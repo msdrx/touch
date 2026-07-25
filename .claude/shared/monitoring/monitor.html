@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orchestrator monitor</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d2130; --text: #e6e8ee;
+    --muted: #8b90a0; --line: #2a2f40;
+    --queued: #8b90a0; --running: #e8b23c; --done: #4cc38a; --failed: #e5534b; --info: #6ea8fe;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --panel:#ffffff; --panel2:#f0f1f5; --text:#1c1e26; --muted:#6a6f80; --line:#e2e4ea; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:16px 24px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  body.task header h1 { cursor:pointer; }
+  body.task header h1:hover { text-decoration:underline; text-underline-offset:3px; }
+  #crumb { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:40vw; }
+  #taskSel, #rateSel { background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 8px; font:12px/1.4 inherit; max-width:280px; }
+  #rate { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+  #conn { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
+  #conn .dot { width:8px; height:8px; border-radius:50%; background:var(--failed); }
+  #conn.on .dot { background: var(--done); }
+  #overall { margin-left:auto; color:var(--muted); font-size:12px; }
+  body.home #taskSel, body.home #conn, body.home #rate, body.home #overall { display:none; }
+  /* auto-fill (not auto-fit): with few plans on a wide screen, empty tracks
+     keep each card at a readable ~380-520px instead of stretching it edge to edge */
+  main#cards { padding: 20px 24px; display:grid; gap:16px; grid-template-columns:repeat(auto-fill, minmax(min(380px, 100%), 1fr)); max-width:1600px; margin:0 auto; align-items:start; }
+  body.home main#cards { display:none; }
+  main#home { padding: 24px; display:grid; gap:14px; grid-template-columns:repeat(auto-fill, minmax(min(280px, 100%), 1fr)); max-width:1200px; margin:0 auto; }
+  body.task main#home { display:none; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; cursor:pointer; display:flex; flex-direction:column; gap:8px; transition:border-color .15s, transform .15s; }
+  .tile:hover, .tile:focus-visible { border-color:var(--info); transform:translateY(-2px); }
+  .tile:focus-visible { outline:2px solid var(--info); outline-offset:2px; }
+  .tile h3 { margin:0; font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; overflow-wrap:anywhere; flex-wrap:wrap; }
+  .tile .meta { color:var(--muted); font-size:12px; }
+  .tile .lastline { color:var(--muted); font-size:12px; font-family:ui-monospace, monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; }
+  .card.wide { grid-column: 1 / -1; }
+  .card h2 { font-size:13px; font-weight:600; margin:0; padding:12px 14px; display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; border-bottom:1px solid var(--line); min-width:0; }
+  .card h2 .title { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .badge { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:2px 9px; border-radius:99px; text-transform:uppercase; letter-spacing:.04em; color:#0f1117; background:var(--queued); }
+  .badge.running { background:var(--running); animation:runpulse 1.1s ease-in-out infinite; }
+  .badge.running::before { content:""; width:7px; height:7px; border-radius:50%; border:2px solid #0f1117; border-top-color:transparent; animation:spin .7s linear infinite; }
+  .badge.done { background:var(--done); }
+  .badge.failed { background:var(--failed); }
+  .badge.info { background:var(--info); }
+  .tok { margin-left:auto; color:var(--muted); font-weight:500; font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .tok.bump { animation:tokbump .5s ease-out; }
+  @keyframes tokbump { 0% { color:var(--running); transform:scale(1.12); } 100% { color:var(--muted); transform:scale(1); } }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @keyframes runpulse {
+    0%, 100% { box-shadow:0 0 0 0 rgba(232,178,60,.6); transform:scale(1); }
+    50%      { box-shadow:0 0 0 8px rgba(232,178,60,0); transform:scale(1.07); }
+  }
+  .flow { display:flex; gap:4px; align-items:center; padding:10px 14px; flex-wrap:wrap; border-bottom:1px solid var(--line); font-size:11px; }
+  .flow:empty { display:none; }
+  .flow .node { padding:2px 9px; border-radius:99px; border:1px solid var(--line); color:var(--muted); font-weight:600; }
+  .flow .node.running { border-color:var(--running); color:var(--running); animation:chipblink 1.1s ease-in-out infinite; }
+  .flow .node.done { border-color:var(--done); color:var(--done); }
+  .flow .node.failed { border-color:var(--failed); color:var(--failed); }
+  .flow .arrow { color:var(--muted); }
+  .flow .loopback { color:var(--running); font-weight:600; margin-left:4px; }
+  .agents { list-style:none; margin:0; padding:6px 0; border-bottom:1px solid var(--line); font-size:12px; }
+  .agents:empty { display:none; }
+  /* flex-wrap: the token counter is long and nowrap — when the row is tight it
+     must wrap to its own line, never squeeze the agent name out of view */
+  .agents li { display:flex; flex-wrap:wrap; gap:2px 10px; align-items:center; padding:2px 14px; font-family:ui-monospace, monospace; min-width:0; }
+  .agents .dot { width:8px; height:8px; border-radius:50%; background:var(--queued); flex:none; }
+  .agents li.running .dot { background:var(--running); animation:chipblink 1.1s ease-in-out infinite; }
+  .agents li.done .dot { background:var(--done); }
+  .agents li.failed .dot { background:var(--failed); }
+  .agents li.stale { opacity:.55; }
+  .log li.stale .s { color:var(--muted); }
+  .agents .alabel { font-weight:600; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .agents .atok { margin-left:auto; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
+  .agents .adur { color:var(--muted); min-width:52px; text-align:right; font-variant-numeric:tabular-nums; }
+  .stagebar { display:flex; gap:6px; padding:10px 14px; flex-wrap:wrap; border-bottom:1px solid var(--line); background:var(--panel2); }
+  .chip { font-size:11px; padding:2px 8px; border-radius:6px; border:1px solid var(--line); color:var(--muted); }
+  .chip.running { border-color:var(--running); color:var(--running); animation:chipblink 1.1s ease-in-out infinite; }
+  @keyframes chipblink { 50% { opacity:.45; } }
+  .chip.done { border-color:var(--done); color:var(--done); }
+  .chip.failed { border-color:var(--failed); color:var(--failed); }
+  .chip.stale { opacity:.55; }
+  .log { list-style:none; margin:0; padding:8px 0; max-height:300px; overflow-y:auto; overscroll-behavior:contain; font-family:ui-monospace, monospace; font-size:12px; flex:1; scrollbar-width:thin; }
+  .log li { padding:3px 14px; display:flex; gap:10px; border-left:3px solid transparent; }
+  .log li .t { color:var(--muted); flex:none; }
+  .log li .s { flex:none; width:64px; font-weight:600; }
+  .log li.running { border-left-color:var(--running); } .log li.running .s { color:var(--running); }
+  .log li.done { border-left-color:var(--done); } .log li.done .s { color:var(--done); }
+  .log li.failed { border-left-color:var(--failed); } .log li.failed .s { color:var(--failed); }
+  .log li.info .s { color:var(--info); }
+  .log li .d { overflow-wrap:anywhere; }
+  .empty { color:var(--muted); padding:14px; font-size:12px; grid-column:1/-1; }
+  /* Artifacts row: final HTML report link + .md note previews (task view only).
+     Lives inside the cards grid as a full-width row placed after the loop
+     cards and before the wide orchestrator card. */
+  #artifacts { display:none; grid-column:1 / -1; flex-wrap:wrap; gap:8px; align-items:center; }
+  body.task #artifacts.has { display:flex; }
+  #artifacts .ahdr { color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .artlink { font:12px/1.4 inherit; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:99px; padding:3px 12px; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .artlink:hover, .artlink:focus-visible { border-color:var(--info); color:var(--info); }
+  .artlink.report { border-color:var(--done); color:var(--done); font-weight:600; }
+  .artlink.report:hover, .artlink.report:focus-visible { border-color:var(--done); filter:brightness(1.2); }
+  /* Markdown preview modal */
+  #mdOverlay { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:10; display:none; align-items:center; justify-content:center; padding:24px; }
+  #mdOverlay.open { display:flex; }
+  #mdBox { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(900px, 100%); max-height:90vh; display:flex; flex-direction:column; overflow:hidden; }
+  .mdhead { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  .mdhead .fname { font-weight:600; font-size:13px; font-family:ui-monospace, monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mdhead a { color:var(--info); font-size:12px; margin-left:auto; flex:none; }
+  .mdhead button { background:none; border:none; color:var(--muted); font-size:16px; cursor:pointer; padding:2px 6px; flex:none; }
+  .mdhead button:hover { color:var(--text); }
+  #mdBody { padding:16px 20px; overflow:auto; overscroll-behavior:contain; font-size:13px; scrollbar-width:thin; }
+  #mdBody h1, #mdBody h2, #mdBody h3, #mdBody h4 { margin:14px 0 6px; line-height:1.3; }
+  #mdBody h1 { font-size:17px; } #mdBody h2 { font-size:15px; } #mdBody h3, #mdBody h4 { font-size:13px; }
+  #mdBody p, #mdBody ul, #mdBody ol, #mdBody table, #mdBody blockquote { margin:6px 0; }
+  #mdBody pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; overflow-x:auto; font-size:12px; }
+  #mdBody code { font-family:ui-monospace, monospace; background:var(--panel2); padding:1px 4px; border-radius:4px; font-size:12px; }
+  #mdBody pre code { background:none; padding:0; }
+  #mdBody blockquote { border-left:3px solid var(--line); padding:2px 12px; color:var(--muted); }
+  #mdBody table { border-collapse:collapse; display:block; overflow-x:auto; max-width:100%; }
+  #mdBody th, #mdBody td { border:1px solid var(--line); padding:4px 10px; text-align:left; }
+  #mdBody th { background:var(--panel2); }
+  #mdBody a { color:var(--info); }
+  #mdBody hr { border:none; border-top:1px solid var(--line); margin:12px 0; }
+  /* Wide screens: the full-width orchestrator card splits into two columns —
+     flow/agents/stages on the left, the log filling the right — so a short
+     log no longer sits alone in a huge empty strip. */
+  @media (min-width: 1100px) {
+    .card.wide { display:grid; grid-template-columns:minmax(340px, 34%) 1fr;
+                 grid-template-rows:auto auto auto auto 1fr;
+                 grid-template-areas:"h h" "flow log" "agents log" "stage log" ". log"; }
+    .card.wide h2 { grid-area:h; }
+    .card.wide .flow { grid-area:flow; }
+    .card.wide .agents { grid-area:agents; }
+    .card.wide .stagebar { grid-area:stage; }
+    .card.wide .log { grid-area:log; border-left:1px solid var(--line); max-height:420px; }
+    .log li .d { max-width:90ch; }
+  }
+  @media (max-width: 640px) {
+    header { padding:10px 12px; gap:8px; }
+    main#cards { padding:12px; gap:12px; }
+    main#home { padding:12px; gap:10px; }
+    #crumb { display:none; }
+    #taskSel { max-width:48vw; }
+    /* ≥16px stops iOS Safari from auto-zooming on focus; extra padding = tap target */
+    #taskSel, #rateSel { font-size:16px; padding:6px 10px; }
+    #overall { flex-basis:100%; margin-left:0; }
+    #mdOverlay { padding:8px; }
+    .artlink { max-width:100%; }
+    .log { max-height:45vh; }
+    .log li { flex-wrap:wrap; }
+    .log li .s { width:auto; min-width:48px; }
+    .agents .adur { min-width:44px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation:none !important; transition:none !important; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="pageTitle" title="all tasks">orchestrator monitor</h1>
+  <span id="crumb"></span>
+  <select id="taskSel" title="switch task"></select>
+  <span id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
+  <label id="rate">refresh <select id="rateSel" title="forced full-resync interval (live = websocket push only)">
+    <option value="0">live</option>
+    <option value="500">500ms</option>
+    <option value="1000">1s</option>
+    <option value="2000">2s</option>
+    <option value="5000">5s</option>
+    <option value="10000">10s</option>
+    <option value="30000">30s</option>
+    <option value="60000">1m</option>
+  </select></label>
+  <span id="overall"></span>
+</header>
+<main id="home"></main>
+<main id="cards"><div id="artifacts"></div></main>
+<div id="mdOverlay" role="dialog" aria-modal="true">
+  <div id="mdBox">
+    <div class="mdhead">
+      <span class="fname" id="mdName"></span>
+      <a id="mdRaw" target="_blank" rel="noopener">open raw</a>
+      <button id="mdClose" title="close (Esc)">✕</button>
+    </div>
+    <article id="mdBody"></article>
+  </div>
+</div>
+<script>
+// Two URL-routed views, the query string is the single source of truth:
+//   /              -> home: grid of every task folder, click-through to a task
+//   /?task=<name>  -> that task's live progress page (survives refresh/share)
+// Dropdown changes and tile clicks pushState; back/forward re-route.
+const plans = new Map();
+
+function planEl(id) {
+  if (plans.has(id)) return plans.get(id);
+  const card = document.createElement("section");
+  card.className = "card" + (id === "orchestrator" ? " wide" : "");
+  card.innerHTML = `<h2><span class="badge">queued</span><span class="title"></span><span class="tok"></span></h2>
+    <div class="flow"></div><ul class="agents"></ul><div class="stagebar"></div><ul class="log"></ul>`;
+  card.querySelector(".title").textContent = id === "orchestrator" ? "Orchestrator" : id;
+  const entry = { card, badge: card.querySelector(".badge"), stagebar: card.querySelector(".stagebar"),
+                  log: card.querySelector(".log"), tok: card.querySelector(".tok"),
+                  titleEl: card.querySelector(".title"),
+                  flowEl: card.querySelector(".flow"), agentsEl: card.querySelector(".agents"),
+                  agents: new Map(), roles: new Map(),
+                  tokIn: 0, tokOut: 0, tokCached: 0, tokWrite: 0, stages: new Map(), state: "queued" };
+  plans.set(id, entry);
+  render();
+  return entry;
+}
+function render() {
+  const cards = document.getElementById("cards");
+  for (const id of plans.keys())
+    if (id !== "orchestrator") cards.appendChild(plans.get(id).card);
+  if (plans.has("orchestrator")) cards.appendChild(plans.get("orchestrator").card);
+  placeArtifacts();  // artifacts row sits after the loop cards, before the orchestrator card
+  let done = 0, failed = 0, running = 0;
+  for (const [id, p] of plans) {
+    if (id === "orchestrator") continue;
+    if (p.state === "done") done++; else if (p.state === "failed") failed++; else if (p.state === "running") running++;
+  }
+  let tin = 0, tout = 0, tcached = 0, twrite = 0;
+  for (const p of plans.values()) { tin += p.tokIn; tout += p.tokOut; tcached += p.tokCached; twrite += p.tokWrite; }
+  if (plans.has("orchestrator") && tin + tout)
+    setTok(plans.get("orchestrator").tok, `Σ ${fmtIn(tin, tcached, twrite)} · out ${fmtTok(tout)}`);
+  document.getElementById("overall").textContent =
+    `${done} done · ${running} running · ${failed} failed · ${plans.size - (plans.has("orchestrator")?1:0)} plans` +
+    (tin + tout ? ` · ${fmtIn(tin, tcached, twrite)} · out ${fmtTok(tout)}` : "");
+}
+function fmtTok(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+}
+// Input-side display: "in 3k - r:1k w:2k" (r = cache read, w = cache write).
+// An agent loop re-reads its whole conversation prefix every turn, so cache
+// reads dominate "in" (and cost ~10x less than fresh input). The r:/w: parts
+// appear only when the event stream carries the breakdown; events from
+// pre-split watchers lack them and keep the plain "in 3k" form.
+function fmtIn(tin, cached, write) {
+  const parts = [];
+  if (cached > 0) parts.push(`r:${fmtTok(cached)}`);
+  if (write > 0) parts.push(`w:${fmtTok(write)}`);
+  return `in ${fmtTok(tin)}` + (parts.length ? " - " + parts.join(" ") : "");
+}
+let replaying = false, replayTimer = null;
+function noteReplay() {  // history replay after (re)connect: suppress pulses until the burst ends
+  if (!replaying) return;
+  clearTimeout(replayTimer);
+  replayTimer = setTimeout(() => { replaying = false; }, 600);
+}
+function setTok(el, text) {  // pulse only the counter whose value changed, and only live
+  if (el.textContent === text) return;
+  el.textContent = text;
+  if (replaying) return;
+  el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump");
+}
+// Per-subagent rows + loop-flow strip: watcher events carry an "agent" field
+// ({id, label: "role #attempt", state, tokens, started, runtime}). Rows are
+// keyed by agent id; the flow strip groups rows by role in first-seen order
+// (that order IS the loop topology: impl -> gate -> e2e -> critique), each
+// node showing the role's latest attempt + state, with a loop-back marker
+// once any role passes attempt 1.
+function upsertAgent(p, a, ts) {
+  let row = p.agents.get(a.id);
+  if (!row) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="dot"></span><span class="alabel"></span><span class="atok"></span><span class="adur"></span>`;
+    li.querySelector(".alabel").textContent = a.label || a.id;
+    p.agentsEl.appendChild(li);
+    row = { li, started: a.started || ts, state: "running",
+            tok: li.querySelector(".atok"), dur: li.querySelector(".adur") };
+    p.agents.set(a.id, row);
+  }
+  if (a.started) row.started = a.started;
+  if (a.state) { row.state = a.state; row.li.className = a.state; }
+  if (a.tokens) setTok(row.tok, `⟳ ${fmtIn(a.tokens.in || 0, a.tokens.cached || 0, a.tokens.cache_write || 0)} · out ${fmtTok(a.tokens.out || 0)}`);
+  if (a.runtime) row.dur.textContent = a.runtime;
+  const role = (a.label || a.id).split(" #")[0];
+  const attempt = parseInt((a.label || "").split(" #")[1]) || 1;
+  const node = p.roles.get(role) || { state: "running", attempt: 1 };
+  if (a.state) node.state = a.state;
+  node.attempt = Math.max(node.attempt, attempt);
+  p.roles.set(role, node);
+  renderFlow(p);
+}
+// events.jsonl is a multi-writer plain file, so agent.state is untrusted input.
+// Build nodes with createElement + a whitelisted className and textContent (never
+// interpolate n.state into an innerHTML string) so a hostile state value cannot
+// break out of the class attribute and inject markup (FRONTEND-1).
+const NODE_STATES = ["running", "done", "failed", "stale"];
+function renderFlow(p) {
+  p.flowEl.textContent = "";
+  let maxAttempt = 1, first = true;
+  for (const [role, n] of p.roles) {
+    if (!first) {
+      const arrow = document.createElement("span");
+      arrow.className = "arrow"; arrow.textContent = "→";
+      p.flowEl.appendChild(arrow);
+    }
+    first = false;
+    const node = document.createElement("span");
+    node.className = "node" + (NODE_STATES.includes(n.state) ? " " + n.state : "");
+    node.textContent = role + (n.attempt > 1 ? " #" + n.attempt : "");
+    p.flowEl.appendChild(node);
+    maxAttempt = Math.max(maxAttempt, n.attempt);
+  }
+  if (maxAttempt > 1) {
+    const lb = document.createElement("span");
+    lb.className = "loopback"; lb.textContent = "↺ attempt " + maxAttempt;
+    p.flowEl.appendChild(lb);
+  }
+}
+setInterval(() => {  // live elapsed time on running agent rows
+  const now = Date.now();
+  for (const p of plans.values())
+    for (const row of p.agents.values()) {
+      if (row.state !== "running" || !row.started) continue;
+      const d = new Date(row.started);
+      if (isNaN(d)) continue;
+      const s = Math.max(0, Math.floor((now - d.getTime()) / 1000));
+      row.dur.textContent = s >= 60 ? Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s" : s + "s";
+    }
+}, 1000);
+// Freeze a closing plan card. Loops are sequential per plan, so a card closing
+// with agent rows still "running" means those agents died without a result
+// (killed driver): freeze them as stale instead of ticking forever. FRONTEND-2:
+// also stale the matching flow-strip role nodes and re-render, so a role node
+// stops blinking "running" forever after the badge settled. A row that is in
+// fact alive heals itself on its next event (state:"running" token delta).
+function freezePlan(pl) {
+  for (const row of pl.agents.values())
+    if (row.state === "running") { row.state = "stale"; row.li.className = "stale"; }
+  let touched = false;
+  for (const node of pl.roles.values())
+    if (node.state === "running") { node.state = "stale"; touched = true; }
+  if (touched) renderFlow(pl);
+}
+function onEvent(ev) {
+  const p = planEl(ev.plan);
+  if (ev.title) { p.titleEl.textContent = ev.title; p.titleEl.title = ev.title; }
+  if (ev.agent && ev.agent.id) upsertAgent(p, ev.agent, ev.ts);
+  // plan-level state: stage "plan" (and run-level "complete") events set the card badge directly
+  if (ev.stage === "plan" || ev.stage === "complete") {
+    p.state = ev.state; p.badge.textContent = ev.state; p.badge.className = "badge " + ev.state;
+    if (ev.state === "done" || ev.state === "failed") {
+      freezePlan(p);
+      // FRONTEND-3: a run-level "complete" settles every still-open sub-plan card
+      // (defense-in-depth alongside the watcher's run-complete sweep: covers a
+      // driver-emitted "complete" with no per-plan "plan" events, or a last
+      // failed plan the watcher never emitted a terminal "plan" event for).
+      if (ev.stage === "complete")
+        for (const [id, pl] of plans) {
+          if (id === "orchestrator" || pl === p) continue;
+          if (pl.state === "queued" || pl.state === "running") {
+            pl.state = ev.state; pl.badge.textContent = ev.state; pl.badge.className = "badge " + ev.state;
+            freezePlan(pl);
+          }
+        }
+    }
+  } else if (ev.stage === "tokens" && ev.tokens) {
+    p.tokIn += ev.tokens.in || 0; p.tokOut += ev.tokens.out || 0;
+    p.tokCached += ev.tokens.cached || 0; p.tokWrite += ev.tokens.cache_write || 0;
+    setTok(p.tok, `⟳ ${fmtIn(p.tokIn, p.tokCached, p.tokWrite)} · out ${fmtTok(p.tokOut)}`);
+    if (ev.quiet) { render(); return; }  // live delta: counters only, no log line
+  } else {
+    if (p.state === "queued") { p.state = "running"; p.badge.textContent = "running"; p.badge.className = "badge running"; }
+    let chip = p.stages.get(ev.stage);
+    if (!chip) { chip = document.createElement("span"); chip.className = "chip"; p.stages.set(ev.stage, chip); p.stagebar.appendChild(chip); }
+    chip.textContent = ev.stage + " · " + ev.state;
+    chip.className = "chip " + ev.state;
+  }
+  const li = document.createElement("li");
+  li.className = ev.state;
+  const d = new Date(ev.ts || "");
+  const t = isNaN(d) ? (ev.ts || "").slice(11, 19)
+    : d.toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  li.innerHTML = `<span class="t"></span><span class="s"></span><span class="d"></span>`;
+  li.children[0].textContent = t;
+  li.children[1].textContent = ev.state;
+  li.children[2].textContent = (ev.stage ? "[" + ev.stage + "] " : "") + (ev.detail || "");
+  p.log.insertBefore(li, p.log.firstChild);  // createdAt DESC — newest on top
+  render();
+}
+
+// ---- artifacts: final-report link + .md note previews ----
+// The server lists .html/.md files under the task folder (/artifacts) and
+// serves them extension-whitelisted + realpath-contained (/file). File names
+// and markdown bodies are agent-written, i.e. untrusted input like the event
+// stream: names render via textContent only, and the preview escapes the
+// whole document BEFORE any inline transform runs (FRONTEND-1 discipline).
+const artifactsEl = document.getElementById("artifacts");
+let artifactsKey = "";
+function fileUrl(rel) {
+  return "/file?task=" + encodeURIComponent(currentTask) + "&path=" + encodeURIComponent(rel);
+}
+function clearArtifacts() {
+  artifactsKey = "";
+  artifactsEl.textContent = "";
+  artifactsEl.classList.remove("has");
+}
+async function refreshArtifacts() {
+  if (!currentTask) return;
+  const forTask = currentTask;
+  try {
+    const data = await (await fetch("/artifacts?task=" + encodeURIComponent(forTask))).json();
+    if (forTask !== currentTask) return;  // stale response after navigation
+    const arts = data.artifacts || [];
+    const key = JSON.stringify(arts.map(a => [a.path, a.mtime]));
+    if (key === artifactsKey) return;
+    artifactsKey = key;
+    renderArtifacts(arts);
+  } catch (e) {}
+}
+// Keep the row between the loop cards and the wide orchestrator card. Called
+// from render() (which re-appends cards in order) and from renderArtifacts()
+// — stopWs()/ws.onopen clear #cards' innerHTML, detaching the row, so an
+// /artifacts response landing after the last render must re-attach it itself.
+function placeArtifacts() {
+  const cards = document.getElementById("cards");
+  const orch = plans.has("orchestrator") ? plans.get("orchestrator").card : null;
+  if (orch && orch.parentNode === cards) cards.insertBefore(artifactsEl, orch);
+  else cards.appendChild(artifactsEl);
+}
+function renderArtifacts(arts) {
+  artifactsEl.textContent = "";
+  artifactsEl.classList.toggle("has", arts.length > 0);
+  placeArtifacts();
+  if (!arts.length) return;
+  const hdr = document.createElement("span");
+  hdr.className = "ahdr";
+  hdr.textContent = "artifacts";
+  artifactsEl.appendChild(hdr);
+  for (const a of arts) {
+    if (a.kind === "report") {
+      const link = document.createElement("a");
+      link.className = "artlink report";
+      link.href = fileUrl(a.path);
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.title = "open HTML report in a new tab";
+      link.textContent = "⬒ " + a.path;
+      artifactsEl.appendChild(link);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "artlink";
+      btn.type = "button";
+      btn.title = "preview " + a.path;
+      btn.textContent = "▤ " + a.path;
+      btn.onclick = () => openMd(a.path);
+      artifactsEl.appendChild(btn);
+    }
+  }
+}
+// ---- minimal escape-first markdown preview ----
+const esc = s => s.replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Inline transforms run on ALREADY-ESCAPED text and only emit tags written
+// here; link hrefs are whitelisted to https?://, #anchor, and relative paths.
+function mdInline(s) {
+  return s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, href) =>
+      /^(https?:\/\/|#|\.{0,2}\/)/.test(href)
+        ? '<a href="' + href + '" target="_blank" rel="noopener">' + txt + "</a>" : m);
+}
+function renderMd(src) {
+  const lines = src.replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0, para = [], list = null;
+  const flushP = () => { if (para.length) { out.push("<p>" + mdInline(esc(para.join(" "))) + "</p>"); para = []; } };
+  const flushL = () => {
+    if (list) { out.push("<" + list.tag + ">" + list.items.map(x => "<li>" + x + "</li>").join("") + "</" + list.tag + ">"); list = null; }
+  };
+  while (i < lines.length) {
+    const ln = lines[i];
+    if (/^\s*```/.test(ln)) {  // fenced code block, verbatim + escaped
+      flushP(); flushL();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]);
+      i++;  // closing fence (or EOF)
+      out.push("<pre><code>" + esc(buf.join("\n")) + "</code></pre>");
+      continue;
+    }
+    const h = ln.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      flushP(); flushL();
+      const lvl = Math.min(h[1].length, 4);
+      out.push("<h" + lvl + ">" + mdInline(esc(h[2])) + "</h" + lvl + ">");
+      i++; continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(ln)) { flushP(); flushL(); out.push("<hr>"); i++; continue; }
+    const li = ln.match(/^\s*[-*+]\s+(.*)$/), oli = ln.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (li || oli) {
+      flushP();
+      const tag = li ? "ul" : "ol";
+      if (!list || list.tag !== tag) { flushL(); list = { tag, items: [] }; }
+      list.items.push(mdInline(esc((li || oli)[1])));
+      i++; continue;
+    }
+    if (/^\s*>/.test(ln)) {
+      flushP(); flushL();
+      const buf = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^\s*>\s?(.*)$/);
+        if (!m) break;
+        buf.push(m[1]); i++;
+      }
+      out.push("<blockquote>" + mdInline(esc(buf.join(" "))) + "</blockquote>");
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(ln)) {  // pipe table
+      flushP(); flushL();
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i]))
+        rows.push(lines[i++].trim().slice(1, -1).split("|").map(c => c.trim()));
+      let header = null, body = rows;
+      if (rows.length > 1 && rows[1].every(c => /^:?-+:?$/.test(c))) { header = rows[0]; body = rows.slice(2); }
+      let html = "<table>";
+      if (header)
+        html += "<thead><tr>" + header.map(c => "<th>" + mdInline(esc(c)) + "</th>").join("") + "</tr></thead>";
+      html += "<tbody>" + body.map(r =>
+        "<tr>" + r.map(c => "<td>" + mdInline(esc(c)) + "</td>").join("") + "</tr>").join("") + "</tbody></table>";
+      out.push(html);
+      continue;
+    }
+    if (!ln.trim()) { flushP(); flushL(); i++; continue; }
+    para.push(ln.trim()); i++;
+  }
+  flushP(); flushL();
+  return out.join("\n");
+}
+const mdOverlay = document.getElementById("mdOverlay"), mdBody = document.getElementById("mdBody"),
+      mdName = document.getElementById("mdName"), mdRaw = document.getElementById("mdRaw");
+function openMd(rel) {
+  mdName.textContent = rel;
+  mdName.title = rel;
+  mdRaw.href = fileUrl(rel);
+  mdBody.textContent = "loading…";
+  mdOverlay.classList.add("open");
+  fetch(fileUrl(rel))
+    .then(r => r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status)))
+    .then(t => { mdBody.innerHTML = renderMd(t); })  // renderMd output is escape-first, self-emitted tags only
+    .catch(e => { mdBody.textContent = "failed to load: " + e.message; });
+}
+function closeMd() { mdOverlay.classList.remove("open"); mdBody.textContent = ""; }
+document.getElementById("mdClose").onclick = closeMd;
+mdOverlay.onclick = (e) => { if (e.target === mdOverlay) closeMd(); };
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMd(); });
+
+// ---- routing ----
+let currentTask = null, ws = null, retry = 1000, tasksData = null;
+const qsTask = () => new URLSearchParams(location.search).get("task");
+function navigate(name, push = true) {
+  if (push) history.pushState({}, "",
+    name ? "?task=" + encodeURIComponent(name) : location.pathname);
+  route();
+}
+function route() {
+  const name = qsTask();
+  stopWs();
+  currentTask = name;
+  document.body.className = name ? "task" : "home";
+  document.getElementById("crumb").textContent = name ? "· " + name : "";
+  const h1 = document.getElementById("pageTitle");
+  h1.textContent = name ? "⌂ orchestrator monitor" : "orchestrator monitor";
+  if (name) { h1.tabIndex = 0; h1.setAttribute("role", "link"); h1.title = "back to all tasks"; }
+  else { h1.removeAttribute("tabindex"); h1.removeAttribute("role"); h1.title = "all tasks"; }
+  document.title = name ? name + " — orchestrator monitor" : "orchestrator monitor";
+  closeMd();
+  clearArtifacts();
+  if (name) {
+    selectTask(name);
+    retry = 1000;
+    connect();
+    refreshArtifacts();
+  } else {
+    refreshTasks();
+  }
+}
+// FRONTEND-5: select the routed task in the dropdown. Assigning <select>.value
+// to a name with no matching <option> silently blanks the control (selectedIndex
+// -1) while the socket still streams the server's STATE_DIR fallback for the
+// unknown task — URL, crumb and (blank) dropdown then all imply something else.
+// Instead inject a synthetic disabled/selected "(unknown task)" option so the
+// mismatch is explicit. Skipped until the task list has loaded (dataset.names).
+function selectTask(name) {
+  const sel = document.getElementById("taskSel");
+  if (!sel.dataset.names) return;
+  const names = sel.dataset.names.split("\n").filter(Boolean);
+  const existing = sel.querySelector("option[data-unknown]");
+  if (names.includes(name)) {
+    if (existing) existing.remove();
+    sel.value = name;
+  } else {
+    const opt = existing || document.createElement("option");
+    opt.dataset.unknown = "1"; opt.disabled = true; opt.value = name;
+    opt.textContent = name + " (unknown task)";
+    if (!existing) sel.insertBefore(opt, sel.firstChild);
+    opt.selected = true;
+  }
+}
+window.addEventListener("popstate", route);
+const pageTitle = document.getElementById("pageTitle");
+pageTitle.onclick = () => { if (currentTask) navigate(null); };
+pageTitle.onkeydown = (e) => { if (currentTask && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); navigate(null); } };
+function stopWs() {
+  // FRONTEND-4: detach onmessage/onopen (not only onclose) before close(), so a
+  // late buffered frame from the old socket can't mutate the freshly-cleared
+  // global plans accumulators (duplicate token delta / cross-task bleed).
+  if (ws) { ws.onclose = null; ws.onmessage = null; ws.onopen = null; try { ws.close(); } catch (e) {} ws = null; }
+  document.getElementById("cards").innerHTML = "";
+  plans.clear();
+}
+
+// ---- home grid ----
+function ago(mtime) {
+  if (!mtime) return "no events yet";
+  const s = Math.max(0, Date.now() / 1000 - mtime);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+function renderHome() {
+  if (currentTask !== null || !tasksData) return;
+  const home = document.getElementById("home");
+  home.innerHTML = "";
+  if (!tasksData.tasks.length) {
+    home.innerHTML = `<div class="empty">no task folders found — start an orchestrator run and it will appear here</div>`;
+    return;
+  }
+  for (const t of tasksData.tasks) {
+    const tile = document.createElement("section");
+    tile.className = "tile";
+    tile.tabIndex = 0;
+    tile.setAttribute("role", "link");
+    tile.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate(t.name); } };
+    tile.innerHTML = `<h3><span class="name"></span><span class="badge"></span><span class="tok"></span></h3>
+      <div class="lastline"></div><div class="meta"></div>`;
+    tile.querySelector(".name").textContent = t.name;
+    const tok = t.tokens || { in: 0, out: 0 };
+    if (tok.in + tok.out)
+      tile.querySelector(".tok").textContent = `Σ ${fmtIn(tok.in, tok.cached || 0, tok.cache_write || 0)} · out ${fmtTok(tok.out)}`;
+    // overall run status from the server; old server processes predate the
+    // "status" field — fall back to the last event's state, then "empty"
+    const st = t.status || (t.last && t.last.state) || "empty";
+    const badge = tile.querySelector(".badge");
+    badge.textContent = st;
+    badge.className = "badge" + (st !== "empty" ? " " + st : "");
+    tile.querySelector(".lastline").textContent = t.last
+      ? (t.last.stage ? "[" + t.last.stage + "] " : "") + (t.last.detail || "")
+      : "no events yet";
+    tile.querySelector(".meta").textContent = "last activity " + ago(t.mtime);
+    tile.onclick = () => navigate(t.name);
+    home.appendChild(tile);
+  }
+}
+
+// ---- task list (feeds both the dropdown and the home grid) ----
+async function refreshTasks() {
+  try {
+    tasksData = await (await fetch("/tasks")).json();
+    const sel = document.getElementById("taskSel");
+    const names = tasksData.tasks.map(t => t.name).join("\n");
+    if (sel.dataset.names !== names) {
+      sel.dataset.names = names;
+      sel.innerHTML = "";
+      for (const t of tasksData.tasks) {
+        const o = document.createElement("option");
+        o.value = t.name; o.textContent = t.name + (t.events ? "" : " (no events)");
+        sel.appendChild(o);
+      }
+    }
+    if (currentTask) selectTask(currentTask);
+    renderHome();
+  } catch (e) {}
+}
+document.getElementById("taskSel").onchange = (e) => navigate(e.target.value);
+
+// ---- websocket ----
+function connect() {
+  if (!currentTask) return;
+  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+    + "?task=" + encodeURIComponent(currentTask);
+  ws = new WebSocket(url);
+  const conn = document.getElementById("conn"), txt = document.getElementById("connText");
+  ws.onopen = () => {
+    conn.classList.add("on"); txt.textContent = "live"; retry = 1000;
+    // server replays full history on every connect — rebuild from scratch, no double counting
+    document.getElementById("cards").innerHTML = "";
+    plans.clear();
+    replaying = true; noteReplay();
+  };
+  ws.onmessage = (m) => { noteReplay(); try { onEvent(JSON.parse(m.data)); } catch (e) {} };
+  ws.onclose = () => { conn.classList.remove("on"); txt.textContent = "reconnecting…";
+    setTimeout(() => { if (currentTask) connect(); }, retry); retry = Math.min(retry * 2, 10000); };
+  ws.onerror = () => ws.close();
+}
+// Refresh rate: "live" relies on websocket push alone; an interval forces a
+// full resync (reconnect + history replay, the same clean-rebuild path task
+// switching uses) every N ms. Choice persists in localStorage.
+const rateSel = document.getElementById("rateSel");
+let resyncTimer = null;
+function forceResync() {
+  refreshTasks();
+  if (!currentTask) return;
+  // FRONTEND-4: detach onmessage/onopen too, so a late frame from the old socket
+  // can't add a duplicate token delta on top of the fresh replay accumulators.
+  if (ws) { ws.onclose = null; ws.onmessage = null; ws.onopen = null; ws.close(); }
+  retry = 1000;
+  connect();
+}
+function applyRate(ms) {
+  clearInterval(resyncTimer); resyncTimer = null;
+  if (ms > 0) resyncTimer = setInterval(forceResync, ms);
+}
+rateSel.value = localStorage.getItem("orchRefreshRate") || "0";
+if (rateSel.selectedIndex < 0) rateSel.value = "0";
+rateSel.onchange = () => { localStorage.setItem("orchRefreshRate", rateSel.value); applyRate(+rateSel.value); };
+applyRate(+rateSel.value);
+refreshTasks();
+route();
+setInterval(() => { refreshTasks(); refreshArtifacts(); }, 5000);
+</script>
+</body>
+</html>

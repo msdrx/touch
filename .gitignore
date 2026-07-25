@@ -1,0 +1,36 @@
+# --- Orchestrator monitoring ---------------------------------------------
+# The shared monitoring module is stateless: state written there means someone
+# forgot ORCH_STATE_DIR. Per-task state under .claude/local-orchestrators/ IS
+# tracked history and must NOT be ignored (see .claude/shared/monitoring/monitoring.md).
+.claude/shared/monitoring/events.jsonl
+.claude/shared/monitoring/.watcher-state.json
+
+# Daemon logs are runtime noise; events.jsonl is the source of truth.
+.claude/local-orchestrators/*/*.log
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Node / web -----------------------------------------------------------
+node_modules/
+dist/
+build/
+.next/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# --- Env / secrets --------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Editor / OS ----------------------------------------------------------
+.DS_Store
+*.swp
+.idea/
+.vscode/
