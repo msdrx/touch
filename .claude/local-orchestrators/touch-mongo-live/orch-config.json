@@ -1,1 +1,7 @@
-{"port": 8931, "wf_dir": "/home/agent/.claude/projects/-home-laniakea-Projects-touch/292fc08c-923d-4ab4-8ff2-a9572417dbc8/subagents/workflows/wf_cca84d59-933"}
+{
+ "port": 8931,
+ "wf_dir": "/home/agent/.claude/projects/-home-laniakea-Projects-touch/a8d43bb1-0313-45d4-8784-4827af443ead/subagents/workflows/wf_b297177a-d11",
+ "max_plan_attempts": 4,
+ "max_gate_attempts": 3,
+ "max_e2e_attempts": 3
+}
