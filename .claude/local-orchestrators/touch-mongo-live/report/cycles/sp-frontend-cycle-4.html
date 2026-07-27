@@ -1,0 +1,566 @@
+<title>sp-frontend — cycle 4</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-frontend — implement→test→critique, attempt 4/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 4 closes every item in sp-frontend-critique-attempt-3 (2 major, 5 minor, 8 nits); attempts 1-2 were verified already fixed in the tree.
+
+MAJORS. M1 (history budget global and never released): `OLDER_MAX` is now one stream's budget — `state.olderStream` plus `resetOlder(stream)` empties `#older`, zeroes the counter and re-labels the list whenever `currentStream()` moves; `renderOlder` also hides a list whose `olderStream !== stream` independently of that reset, `loadOlder` re-checks the identity *before* reading the budget, and the spent-budget label now names the stream (&quot;history full · 400 rows of run:wf_b&quot;). M2 (live edge off-screen): `atLiveEdge()` is sampled before the append and `flushLog` pins `#log` to its newest row, with a user-scroll escape and trim compensation (a reader who scrolled away keeps their rows as the cap evicts above them).
+
+MINORS. m1: the run list's signature no longer carries the per-frame `delivered` seq (the seq is written in place into a remembered text node), `setDetail` bumps `detailRev` only when the serialized payload differs, and `noteTokens` bumps `tokensRev` only when a rendered total moved. m2: `clearOlderError()` drops a failed load-older line when the button hides or the stream changes. m3: `connect()` resets `state.anchors` and the loaded history beside `state.wire.notices`. m4: `isLinkableRunId` + `rowPlain` render `run:legacy:&lt;task&gt;` as an unlinked, labelled row (and `onHello` will not auto-select one) because `ID_PATTERNS[&quot;run&quot;]` 400s on a colon. m5: the timeline is a growable, `TIMELINE_MAX`-bounded window with a working &quot;load more records&quot; button that survives the live poll, and the line above it states what is actually on screen.
+
+NITS: toolbar moved out of `&lt;h2&gt;` into `.logbar` (n1); `queueRefresh`'s dead second guard removed (n2); the `?from=` arms explained (n3); the rollup cap is now LRU (n4); the ack's `backfilled` count reaches the meta line (n5); the empty `reason` chip is guarded (n6); the harness registers `setInterval` and drives a real `resync` round trip (n7); `#older` scrolls to the oldest row just prepended (n8).
+
+TESTS: 39 tests (was 33), 411 `ok:`, 0 FAIL, 0 orphans; 61 driven assertions in the node+vm DOM harness, which gained scroll metrics, on-demand intervals, a paging timeline route and a failable `/api/events`. Six new guards added, and I mutation-tested them: reverting each fix (per-stream reset, scroll follow, run signature, detail key, anchors-on-reconnect, notice clearing) reproduces the critique's exact observations and fails the suite. Green with node present and, skipping loudly, without it. Full-suite regression: only the pre-existing `test_mirror.py` (3) and `test_sessions.py` (1) baseline failures, string-identical and owned by other sub-plans. Only the four owned files touched; no commit (HEAD still 579446e).</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suite tests/test_touch_frontend.py: rc 0, 411 assertions green across 39 test functions, 0 skips (node v20.19.4 present so both `node --check` and the fake-DOM driven harness executed). Re-ran with pymongo/bson import-blocked to simulate a bare checkout: rc 0, same 411 assertions. Full suite 23 PASS / 2 FAIL — tests/test_mirror.py (FAILED 3) and tests/test_sessions.py (FAILED 1) are the string-identical pre-existing baseline already recorded in sp-frontend-test-attempt-3.md, owned by sp-mirror-deploy and sp-sessions-arm; neither suite references touch-visual (grep count 0) and their mtimes are ~18 h older than this attempt's edits, so not attributable. Plan conformance verified against sp-13: R-22:frontend, R-32 (sidebar/tree/rollups, capped+coalesced from day one, dashed provenance CSS, &quot;closed — no verdict&quot; taken from the server label, no control affordance in v0), R-55 (single LIVE_CLASS &quot;fresh&quot;, no animation on base .logrow, reduced-motion honoured), GD-20 escape-first via createTextNode, GD-23 no Date.now/derive/infer in app.js. Non-tautology confirmed by mutating a scratchpad copy (LIVE_CLASS renamed → rc 1, FAILED 4, both static and driven guards fired). No commits, no edits outside the four owned files.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 1 major, 3 minor, 6 nits. Attempt 3's findings are all genuinely fixed (verified in execution, not just in source): per-stream history, pin-to-bottom live edge, real region short-circuits, per-connection anchors, unlinkable run:legacy rows, the timeline window. The major is the one path the per-stream fix did not cover: loadOlder (app.js:2199-2260) never re-checks identity after its await, so an in-flight /api/events page that outlives its selection or its connection is painted into #older anyway. Observed twice: (A) switch selection mid-fetch -&gt; 200 run:wf_a rows sit above run:wf_b's live tail under aria-label &quot;older records of run:wf_b&quot; and charge 200 of wf_b's 400-row budget; (B) socket drop + reconnect that declares NO truncation -&gt; the dead connection's page still lands, #older becomes visible with the button hidden, contradicting connect()'s own stated invariant. Every other async path in the file (refreshDetail twice, fetchTasks, widenTimeline) has the guard; this one does not, and all 39 test functions pass in both arms. Minors: a malformed %-escape in the hash throws out of route() and kills the entire boot (no socket, no render, no notice); history is discarded when the selection moves to a session/task because currentStream() falls back to currentRun; dataSummary JSON-stringifies a whole data value to display 64 chars of it. Probe scripts saved beside the review.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 5/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 4 closes every item in sp-frontend-critique-attempt-3 (2 major, 5 minor, 8 nits); attempts 1-2 were verified already fixed in the tree.
+
+MAJORS. M1 (history budget global and never released): `OLDER_MAX` is now one stream's budget — `state.olderStream` plus `resetOlder(stream)` empties `#older`, zeroes the counter and re-labels the list whenever `currentStream()` moves; `renderOlder` also hides a list whose `olderStream !== stream` independently of that reset, `loadOlder` re-checks the identity *before* reading the budget, and the spent-budget label now names the stream (&quot;history full · 400 rows of run:wf_b&quot;). M2 (live edge off-screen): `atLiveEdge()` is sampled before the append and `flushLog` pins `#log` to its newest row, with a user-scroll escape and trim compensation (a reader who scrolled away keeps their rows as the cap evicts above them).
+
+MINORS. m1: the run list's signature no longer carries the per-frame `delivered` seq (the seq is written in place into a remembered text node), `setDetail` bumps `detailRev` only when the serialized payload differs, and `noteTokens` bumps `tokensRev` only when a rendered total moved. m2: `clearOlderError()` drops a failed load-older line when the button hides or the stream changes. m3: `connect()` resets `state.anchors` and the loaded history beside `state.wire.notices`. m4: `isLinkableRunId` + `rowPlain` render `run:legacy:&lt;task&gt;` as an unlinked, labelled row (and `onHello` will not auto-select one) because `ID_PATTERNS[&quot;run&quot;]` 400s on a colon. m5: the timeline is a growable, `TIMELINE_MAX`-bounded window with a working &quot;load more records&quot; button that survives the live poll, and the line above it states what is actually on screen.
+
+NITS: toolbar moved out of `&lt;h2&gt;` into `.logbar` (n1); `queueRefresh`'s dead second guard removed (n2); the `?from=` arms explained (n3); the rollup cap is now LRU (n4); the ack's `backfilled` count reaches the meta line (n5); the empty `reason` chip is guarded (n6); the harness registers `setInterval` and drives a real `resync` round trip (n7); `#older` scrolls to the oldest row just prepended (n8).
+
+TESTS: 39 tests (was 33), 411 `ok:`, 0 FAIL, 0 orphans; 61 driven assertions in the node+vm DOM harness, which gained scroll metrics, on-demand intervals, a paging timeline route and a failable `/api/events`. Six new guards added, and I mutation-tested them: reverting each fix (per-stream reset, scroll follow, run signature, detail key, anchors-on-reconnect, notice clearing) reproduces the critique's exact observations and fails the suite. Green with node present and, skipping loudly, without it. Full-suite regression: only the pre-existing `test_mirror.py` (3) and `test_sessions.py` (1) baseline failures, string-identical and owned by other sub-plans. Only the four owned files touched; no commit (HEAD still 579446e).</li><li>Test gate PASSED: PASS. Owned suite tests/test_touch_frontend.py: rc 0, 411 assertions green across 39 test functions, 0 skips (node v20.19.4 present so both `node --check` and the fake-DOM driven harness executed). Re-ran with pymongo/bson import-blocked to simulate a bare checkout: rc 0, same 411 assertions. Full suite 23 PASS / 2 FAIL — tests/test_mirror.py (FAILED 3) and tests/test_sessions.py (FAILED 1) are the string-identical pre-existing baseline already recorded in sp-frontend-test-attempt-3.md, owned by sp-mirror-deploy and sp-sessions-arm; neither suite references touch-visual (grep count 0) and their mtimes are ~18 h older than this attempt's edits, so not attributable. Plan conformance verified against sp-13: R-22:frontend, R-32 (sidebar/tree/rollups, capped+coalesced from day one, dashed provenance CSS, &quot;closed — no verdict&quot; taken from the server label, no control affordance in v0), R-55 (single LIVE_CLASS &quot;fresh&quot;, no animation on base .logrow, reduced-motion honoured), GD-20 escape-first via createTextNode, GD-23 no Date.now/derive/infer in app.js. Non-tautology confirmed by mutating a scratchpad copy (LIVE_CLASS renamed → rc 1, FAILED 4, both static and driven guards fired). No commits, no edits outside the four owned files.</li><li>Critique REJECTED: REJECTED — 1 major, 3 minor, 6 nits. Attempt 3's findings are all genuinely fixed (verified in execution, not just in source): per-stream history, pin-to-bottom live edge, real region short-circuits, per-connection anchors, unlinkable run:legacy rows, the timeline window. The major is the one path the per-stream fix did not cover: loadOlder (app.js:2199-2260) never re-checks identity after its await, so an in-flight /api/events page that outlives its selection or its connection is painted into #older anyway. Observed twice: (A) switch selection mid-fetch -&gt; 200 run:wf_a rows sit above run:wf_b's live tail under aria-label &quot;older records of run:wf_b&quot; and charge 200 of wf_b's 400-row budget; (B) socket drop + reconnect that declares NO truncation -&gt; the dead connection's page still lands, #older becomes visible with the button hidden, contradicting connect()'s own stated invariant. Every other async path in the file (refreshDetail twice, fetchTasks, widenTimeline) has the guard; this one does not, and all 39 test functions pass in both arms. Minors: a malformed %-escape in the hash throws out of route() and kills the entire boot (no socket, no render, no notice); history is discarded when the selection moves to a session/task because currentStream() falls back to currentRun; dataSummary JSON-stringifies a whole data value to display 64 chars of it. Probe scripts saved beside the review.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-frontend-test-attempt-4.md</summary><pre># sp-frontend — test gate, attempt 4 — PASS
+
+Read-only gate. No source, test or config file was edited by this agent.
+
+## 1. Targeted suite (owned by sp-frontend)
+
+`cd /home/laniakea/Projects/touch &amp;&amp; python3 tests/test_touch_frontend.py`
+
+* **rc 0**, `all touch-visual source guards passed`
+* **411 assertions green**, 39 test functions, **0 skips** (node v20.19.4 is on
+  PATH, so both `node --check app.js` and the ~200-line fake-DOM driven harness
+  executed for real; the harness's own self-check `the harness itself ran to
+  completion — rc 0 []` is green).
+* No other test file is owned by this sub-plan (the monitoring-module four are
+  owned elsewhere; they were still run below).
+
+### Bare-checkout / no-pymongo arm (GD-21 / R-56)
+
+`tests/test_touch_frontend.py` imports `aggregator.legacy` and `aggregator.store`
+for its enum cross-checks, so the no-third-party arm matters here. Re-run with a
+`sys.meta_path` blocker that raises `ImportError` for `pymongo`/`bson`:
+
+```
+PYTHONPATH=&lt;blocker-dir&gt; python3 tests/test_touch_frontend.py   →  rc 0, 411 ok
+```
+
+Identical assertion count, no degradation, no skip. The suite needs nothing
+beyond the stdlib + node-if-present.
+
+## 2. Full-suite regression gate
+
+Command as specified (monitoring tests from their own dir, repo tests from root):
+
+| suite | result |
+|---|---|
+| `.claude/shared/monitoring/tests/test_frontend.py` | PASS |
+| `.claude/shared/monitoring/tests/test_server.py` | PASS |
+| `.claude/shared/monitoring/tests/test_shell.py` | PASS |
+| `.claude/shared/monitoring/tests/test_watcher.py` | PASS |
+| `tests/test_agents.py` | PASS |
+| `tests/test_api.py` | PASS |
+| `tests/test_bootstrap.py` | PASS |
+| `tests/test_custom_state.py` | PASS |
+| `tests/test_fixtures.py` | PASS |
+| `tests/test_ingest.py` | PASS |
+| `tests/test_legacy.py` | PASS |
+| `tests/test_mirror.py` | **FAIL — pre-existing baseline, not attributable** |
+| `tests/test_mongo_deploy.py` | PASS |
+| `tests/test_mongo_store.py` | PASS |
+| `tests/test_reducer.py` | PASS |
+| `tests/test_refs.py` | PASS |
+| `tests/test_server_core.py` | PASS |
+| `tests/test_sessions.py` | **FAIL — pre-existing baseline, not attributable** |
+| `tests/test_slots.py` | PASS |
+| `tests/test_stdlib_only.py` | PASS |
+| `tests/test_store.py` | PASS |
+| `tests/test_tailer.py` | PASS |
+| `tests/test_touch_frontend.py` | PASS |
+| `tests/test_usage.py` | PASS |
+| `tests/test_ws.py` | PASS |
+
+**23 PASS / 2 FAIL**, and both failures are the known baseline pair.
+
+### Why the two reds are NOT attributable to this change
+
+`tests/test_mirror.py` — rc 1, `FAILED (3)`:
+* `FAIL: …proven by the call count: the held ticks made no attempt`
+* `FAIL: the first generation lands`
+* `FAIL: …and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`
+
+`tests/test_sessions.py` — rc 1, `FAILED (1)`:
+* `FAIL: wipe + --rebuild reproduces a byte-identical fingerprint`
+
+Attribution evidence:
+
+1. **String-identical to the baseline already recorded** in
+   `findings/sp-frontend-test-attempt-3.md` §&quot;FAIL (2) — pre-existing baseline&quot;
+   (same four failing assertion strings, same `FAILED (3)` / `FAILED (1)`
+   counts). Nothing regressed between attempt 3 and attempt 4.
+2. **Ownership**: those suites belong to sp-mirror-deploy and sp-sessions-arm,
+   two loops that closed RED with open findings; this gate must not fix them.
+3. **No coupling**: `grep -c &quot;touch-visual\|touch_frontend&quot;` is **0** in both
+   `tests/test_mirror.py` and `tests/test_sessions.py`. Neither suite imports,
+   reads or serves any file this sub-plan owns; `touch-visual/` is static assets
+   plus a test that only reads them. There is no mechanism by which an edit to
+   `index.html`, `app.js`, `style.css` or `tests/test_touch_frontend.py` can
+   change a mirror-drainer call count or a sessions rebuild fingerprint.
+4. **mtimes**: `find aggregator tests touch-visual docs -newermt &quot;2026-07-26 20:30&quot;`
+   returns exactly four paths — `touch-visual/index.html` 22:29,
+   `touch-visual/style.css` 22:44, `touch-visual/app.js` 22:46,
+   `tests/test_touch_frontend.py` 22:46. `tests/test_mirror.py` (02:44),
+   `aggregator/mirror.py` (02:45), `aggregator/sessions.py` (04:10) and
+   `tests/test_sessions.py` (04:14) are ~18 hours older and untouched.
+
+(Environment note, for the owning sub-plans rather than this gate: two `mongo:7`
+containers `touch-mongo-sp05`/`touch-mongo-sp06` have been up 25 h / 13 h, so
+those live-mongod arms are running against long-lived, possibly dirty
+databases — a plausible cause of the fingerprint/`writers: 1` deltas. Not this
+sub-plan's property; recorded only so the information is not lost.)
+
+## 3. Plan conformance (sp-13 &quot;frontend&quot;)
+
+Owned files per `touch-mongo-live-subplans.md` §sp-13 — all four present and all
+four are exactly the files that changed:
+`touch-visual/index.html` (149 L), `touch-visual/app.js` (2426 L),
+`touch-visual/style.css` (403 L), `tests/test_touch_frontend.py` (2028 L).
+
+Item coverage found asserted in the suite (spot-checked against the plan text):
+
+* **R-22:frontend** — the skeleton exists as three real files; `node --check`
+  parses `app.js`.
+* **R-32 sidebar / tree / rollups** — sessions incl. historical and legacy task
+  folders (GD-14 kinds), agent tree nesting keyed per GD-7 (`driven: the agent
+  panel nests children inside their parent's card` + `…every agent is drawn
+  exactly once`), token rollups from computed sums (`a legacy folder's folded
+  token records roll up by the same rule (GD-14)`).
+* **GD-20 escape-first** — structural: `&quot;createTextNode&quot; in CODE` and no markup
+  sink anywhere in `app.js`.
+* **Render coalescing + capped log from day one** — `LOG_MAX`, `SEEN_MAX`,
+  `TOKENS_MAX` named constants, DOM trim (`childElementCount &gt; LOG_MAX`),
+  pending-queue cap, `state.trimmed` surfaced; plus the driven arm proving the
+  live log pins at 400 rows and the tail-follow/unfollow behaviour.
+* **Degraded/derived labelling** — `.prov-derived { … border-style: dashed }` and
+  `.card.derived` asserted as real CSS, `derived_from_legacy`, and
+  `legacy_mod.CLOSED_NO_VERDICT not in CODE` (the &quot;closed — no verdict&quot; string is
+  rendered from the server label, never hardcoded).
+* **NO control affordance in v0** — dedicated section
+  `# --- R-32: no control affordance renders in v0`, plus &quot;the server's control
+  route group is empty — v0 has no verb to render&quot;.
+* **R-55:frontend** — `const LIVE_CLASS = &quot;fresh&quot;` is the single named animation
+  class, `.logrow` base row carries no animation, every `animation:` rule in the
+  stylesheet is reachable only through `.fresh`, `prefers-reduced-motion`
+  honoured, and the live flag is read off the frame rather than inferred from
+  arrival time → replayed/backfill frames paint once.
+* **GD-23 no re-derivation** — no `Date.now()`, no `reduce*/derive*/infer*/
+  compute*/classify*` function in `app.js`, and `currentRun` is taken as the
+  server's word rather than joined client-side.
+* **Wire contract (from sp-12)** — driven coverage of `(stream, seq)` resume,
+  server-published resume position (&quot;never the newest seq received&quot;), rewind-only
+  resume, absolute-token rendering, ack backfill count on the meta line,
+  reconnect dropping stale anchors and their history.
+
+## 4. Non-tautology check
+
+Text-only guards are the risk in this suite, so I mutation-tested a **copy** of
+the tree in the scratchpad (the live repo was not touched): renaming
+`const LIVE_CLASS = &quot;fresh&quot;` → `&quot;fresh2&quot;` in the copied `app.js` turned the
+suite red — rc 1, `FAILED (4)`, including both the static guard (`the animation
+class is a named constant`) and the executed one (`driven: a live row does —
+logrow fresh2`). The assertions bite on behaviour, and the driven harness
+catches what the source guards cannot.
+
+## 5. Ownership / git
+
+`git log -1` is still `579446e orchestration history` — **nothing committed**.
+`git status --porcelain` shows `touch-visual/` and `tests/` only as
+whole-directory untracked entries from earlier passes; the remaining entries are
+the pre-existing in-flight `.claude/` orchestrator state, running daemons and
+`.temp-develop/` screenshots, none of them written by this sub-plan.
+
+**No edits outside sp-frontend's four owned files.**
+
+---
+
+**Gate result: PASS** — 411 assertions green in the owned suite (0 skips), green
+again in the simulated bare checkout, full suite 23/25 with both reds the
+string-identical, non-attributable pre-existing baseline owned by
+sp-mirror-deploy and sp-sessions-arm.
+</pre></details>
+<details><summary>Critique findings — sp-frontend-critique-attempt-4.md</summary><pre># sp-frontend — adversarial critique, attempt 4
+
+**Verdict: REJECTED** — 1 major, 3 minor, 6 nits. `depth: in-scope`,
+`critical_defect: false`.
+
+Reviewed (full content; the tree is untracked, so `git diff` is empty for all
+four):
+
+- `/home/laniakea/Projects/touch/touch-visual/index.html` (149 lines)
+- `/home/laniakea/Projects/touch/touch-visual/app.js` (2426 lines)
+- `/home/laniakea/Projects/touch/touch-visual/style.css` (403 lines)
+- `/home/laniakea/Projects/touch/tests/test_touch_frontend.py` (2028 lines)
+
+Against `plan/touch-mongo-live-subplans.md` §sp-13, amendment R-55 / GD-22 /
+GD-23, base R-22 / R-32 / GD-20, and `aggregator/server.py` + `store.py` as the
+counterparties.
+
+## Method
+
+The suite is now 39 test functions / 411 assertions, one of them a real
+`node`+`vm` fake-DOM harness that executes `app.js`. Source guards cannot see
+behaviour and the harness only drives scenarios its author imagined, so I
+re-used its prelude and drove three it does not — **all three findings below
+that matter were observed in execution, not argued**:
+
+| probe | scenario | result |
+|---|---|---|
+| `sp-frontend-critique-attempt-4-probe1-selection-race.js` | click *load older*, switch the sidebar selection while the page is in flight | **M1 arm A observed** |
+| `sp-frontend-critique-attempt-4-probe2-reconnect-race.js` | click *load older*, drop + reconnect the socket while the page is in flight; then the task panel and a failing `/health` | **M1 arm B observed** (task panel and health arms clean) |
+| `sp-frontend-critique-attempt-4-probe3-malformed-hash.js` | boot with `#run/%zz` in the location hash | **m1 observed** |
+
+All three are in `findings/` beside this file; each is `node &lt;probe&gt; touch-visual/app.js`.
+
+Baseline re-run before attacking: `python3 tests/test_touch_frontend.py` → rc 0,
+`all touch-visual source guards passed`.
+
+Hygiene, checked and clean: `HEAD` is still `579446e`, nothing committed;
+`find -newermt &quot;2026-07-26 20:00&quot;` lists `aggregator/server.py` (20:17),
+`tests/test_api.py` (20:15) and `tests/test_server_core.py` (20:12) — **2½ hours
+older** than this attempt's window (22:29–22:46) and therefore sp-server-api's
+closed loop, not this one; the only files this attempt wrote are its four.
+GD-21/24/25/26/27/29/30 have no surface in these four files beyond &quot;the suite
+imports clean on bare stdlib and needs no mongod&quot;, which the gate re-proved with
+an import blocker.
+
+Attempt 3's findings are genuinely fixed, and I verified the fixes in execution
+rather than in source: per-stream `resetOlder` (M1), pin-to-bottom + trim-shift
+in `flushLog` (M2), the runs signature without `state.delivered` plus
+`runSeqNodes` written in place (m1), `setDetail`'s payload change-guard and the
+`moved` test in `noteTokens` (m1), `clearOlderError` (m2), `state.anchors = {}`
+in `connect` (m3), `isLinkableRunId` (m4), the timeline window + `TIMELINE_MAX`
+(m5), the toolbar out of `&lt;h2&gt;` (n1), `queueRefresh`'s single flag (n2), LRU
+token eviction (n4), `backfilled` on the meta line (n5), the `derived.reason`
+guard (n6), registered intervals in the harness (n7), `list.scrollTop = 0` after
+a prepend (n8). The major below is **not** an old finding returning by the same
+route — it is the one path the per-stream fix did not cover.
+
+---
+
+## MAJOR
+
+### M1 — a `load older` page is painted into `#older` without re-checking whose window it belongs to, so an in-flight request that outlives its selection *or* its connection puts one stream's history above another stream's live tail, under the page's own label saying it is that other stream's
+
+`touch-visual/app.js:2199-2260` (`loadOlder`), specifically the `await` at
+`app.js:2222`, the paint at `app.js:2241-2249` and `state.olderShown +=
+rows.length` at `app.js:2249`; interacting with `app.js:2059-2067`
+(`resetOlder`), `app.js:2107-2126` (`renderOlder`) and `app.js:777-778`
+(`connect`'s anchor/history reset).
+
+`loadOlder` captures `stream` and `anchor` before the request and re-checks
+neither after it. Every other async path in this file does re-check —
+`refreshDetail` has the guard twice, in both the success and the failure arm
+(`app.js:2342`, `app.js:2345`: *&quot;A slower answer for a selection the user
+already left must not paint&quot;*) — and `resetOlder`'s whole purpose is that the
+history list is per-stream and per-connection. The request this races is the one
+the file itself documents as expensive: *&quot;`h_events` re-reads the whole stream
+file per call, in the process that also serves `/ws`&quot;* (`app.js:2193-2194`), so
+the window is not a microsecond, it is however long a `read_all` of a multi-MB
+stream takes.
+
+**Arm A — the selection moved (probe 1, verbatim):**
+
+```
+selected wf_a; btn=load older · run:wf_a hidden=false
+after click, fetch in flight: older rows=0 deferred=true
+switched to wf_b: older rows=0 hidden=true btn=load older · run:wf_b
+AFTER the wf_a page landed:
+  older rows      = 200  hidden=false
+  first row text  = …run:wf_a#800 event harness agent=old note=history replay
+  aria-label      = older records of run:wf_b, loaded on demand
+  button          = load older · run:wf_b
+  button title    = …this walks run:wf_b only — records older than seq 2,000…
+  logMeta         = 0 seen · 0 shown · 200 older loaded of 400 · window 500
+  rows belonging to wf_a while wf_b is selected = 200
+```
+
+This is attempt 3's M1 in full, with one addition that makes it worse than the
+version just fixed: the page no longer merely *implies* the rows are the
+selected stream's, it **states** it. `renderOlder` writes
+`aria-label=&quot;older records of run:wf_b&quot;` (`app.js:2123-2125`) over 200 rows that
+are all `run:wf_a`, and 200 of `run:wf_b`'s 400-row budget is spent on them
+(`logMeta`, and `olderRoom()` is now short by 200 for the stream that never
+loaded anything). D13's honesty rule is the one this sub-plan is graded hardest
+on; a screen reader is told the wrong thing outright.
+
+**Arm B — the connection moved (probe 2, verbatim):**
+
+```
+after reconnect (no truncation declared): older rows=0 hidden=true btnHidden=true
+after the dead connection's page landed: older rows=200 hidden=false btnHidden=true
+                                         meta=… 200 older loaded of 400 …
+```
+
+The reconnect's `mode` frame declared **no truncation at all**, so `connect()`
+correctly dropped the anchors and the history — and then the dead socket's page
+landed and made `#older` visible again, with the button hidden. The result is
+200 history rows above the live tail with no affordance that explains them, no
+way to clear them short of another stream switch, and a direct contradiction of
+the invariant `connect()` states in prose four lines above the code
+(`app.js:774-776`: *&quot;the loaded history goes with them: it is history of a
+window this socket has not described&quot;*). `index.html:112-114` makes the same
+promise to the reader.
+
+Why the existing guards do not catch it: `resetOlder` is a no-op once
+`state.olderStream` already equals the current stream (`app.js:2060`), and by
+the time the response lands the selection change has *already* handed the list
+over to the new stream. `renderOlder`'s belt-and-braces
+`state.olderStream !== stream` (`app.js:2118`) compares the list's stream to the
+current stream — both are `run:wf_b` — not to the stream the rows came from. The
+guard is on the wrong quantity.
+
+**Fix** (small, entirely inside these files):
+
+- add a connection epoch — `state.epoch = 0` in state, `state.epoch += 1` in
+  `connect()` beside `state.anchors = {}` — and in `loadOlder` capture
+  `const epoch = state.epoch;` with `stream` before the fetch;
+- after the `await`, before anything is painted or counted:
+  `if (currentStream() !== stream || state.olderStream !== stream ||
+  state.epoch !== epoch) return;` (in the `finally`, `loadingOlder = false;
+  render();` still runs, which is correct — the button must come back). The
+  error arm needs the same treatment or a failed page pins its line to a stream
+  it does not describe;
+- alternatively (equivalent, fewer moving parts): stamp the rows —
+  `resetOlder(stream)` then `if (state.olderStream !== stream) return;` *after*
+  the await — the epoch is only needed because a reconnect can leave the same
+  stream selected, which is exactly arm B;
+- **and add the effect guards**, because both arms pass all 39 current test
+  functions. The harness already has everything needed: make `fakeFetch` return
+  a deferred promise for `/api/events` (probe 1 does this in ~10 lines by
+  reassigning `sandbox.fetch`), then assert (a) after a selection change the
+  landed page paints **zero** rows and `state.olderShown` is 0, and (b) after
+  `sock.onclose()` + a clean reconnect the landed page paints zero rows and
+  `#older` stays `hidden`. A static guard is available too and is worth having
+  beside them: `slice_fn(CODE, &quot;async function loadOlder&quot;, &quot;\n}&quot;)` must contain
+  a post-`await` identity check, in the same shape
+  `test_the_expensive_route_is_polled_on_its_own_slow_cadence` asserts for the
+  tasks join.
+
+---
+
+## MINOR
+
+### m1 — a malformed percent-escape in the location hash throws out of `route()`, and at boot that kills the whole page: no socket, no render, no polls, no message
+
+`touch-visual/app.js:2390` (`decodeURIComponent(raw.slice(cut + 1))`),
+`app.js:2412` (`route()` inside `boot()`), `app.js:2411` (the `hashchange`
+listener).
+
+Observed (probe 3 — the page loaded at `#run/%zz`):
+
+```
+URIError: URI malformed
+    at decodeURIComponent (&lt;anonymous&gt;)
+    at route (touch-visual/app.js:2390:34)
+    at boot (touch-visual/app.js:2412:5)
+```
+
+`route()` is the fifth statement of `boot()`, so the throw skips `render()`,
+`refreshModel()`, `refreshTasks()`, `refreshHealth()`, both `setInterval`s and
+`connect()`. What ships is the static skeleton with &quot;connecting&quot; in the header
+forever — no notice, no error panel, nothing in the one place
+(`state.bootError`) that exists to say &quot;this page cannot work and here is why&quot;.
+On a later `hashchange` the same throw is quieter but still wrong: the handler
+dies, the selection silently stays on the previous thing, and the URL bar now
+disagrees with the page.
+
+The page never *generates* such a hash (`rowLink` always
+`encodeURIComponent`s), so the trigger is external — a hand-edited URL, a
+chat client that truncated a shared link mid-escape. That is why this is minor
+and not major; the consequence, a completely dead page, is why it is not a nit.
+
+**Fix.** Wrap the decode and treat a failure as &quot;no selection&quot;, with a line the
+operator can read:
+
+```js
+let id = &quot;&quot;;
+try { id = cut === -1 ? &quot;&quot; : decodeURIComponent(raw.slice(cut + 1)); }
+catch (err) { note(&quot;the address bar's #fragment is not valid percent-encoding&quot;); }
+```
+
+and, independently, make `boot()` robust to the class rather than the instance:
+put `route()` after the listeners and inside a `try`, or call `connect()` before
+it — a page that cannot parse its own hash should still be a live view. Guard:
+drive the harness with `window.location.hash = &quot;#run/%zz&quot;` before the app is
+evaluated and assert a socket is still opened.
+
+### m2 — a page of history is discarded whenever the selection moves to a session or a task folder, because `currentStream()` falls back to `currentRun`
+
+`touch-visual/app.js:2172-2176` (`currentStream`), `app.js:2107-2111`
+(`renderOlder` calls `resetOlder(currentStream())` on **every** paint).
+
+Selecting a session while run `wf_b`'s 400 loaded rows are on screen makes
+`currentStream()` return `state.currentRun` (`run:wf_a`), which hands the list
+over and empties it — two `read_all`s worth of work thrown away by a click that
+had nothing to do with the log, and re-selecting `wf_b` starts from zero. Within
+one stream the discard is correct and deliberate; across a *kind* change it is
+collateral.
+
+**Fix.** Either keep the last run-kind stream (`state.logStream`, updated only
+when `sel.kind === &quot;run&quot;` or when `currentRun` changes) and let the history
+follow that, or key the history per stream (`state.older = {stream: {rows,
+shown}}`, `#older` rebuilt from the entry) so a return trip is free. Both keep
+M1's per-stream identity; neither reintroduces the shared budget.
+
+### m3 — `dataSummary` JSON-stringifies a record's whole `data` value in order to display 64 characters of it
+
+`touch-visual/app.js:470-485` (`const flat = (value &amp;&amp; typeof value ===
+&quot;object&quot;) ? JSON.stringify(value) : String(value); parts.push(k + &quot;=&quot; +
+truncate(flat, 64))`).
+
+The truncation happens *after* the serialization, so a single record whose
+`data` carries a large nested object is fully materialized as a string, per row,
+to render an ellipsis. The corpus this page renders is the one whose worst line
+is 872 KB (the constant is quoted twice in these very files), `h_events` returns
+raw store records, and the page's own budget is 400 live rows plus 400 history
+rows. It is not a hot path today because nothing in `aggregator/` writes a large
+`data` payload, which is exactly the property that changes without this file
+being touched.
+
+**Fix.** One line: `JSON.stringify(value).slice(0, 200)` is not enough (it
+serializes first) — bound the input instead, e.g. serialize only
+`Object.keys(value).length &lt;= 12 ? value : {&quot;…&quot;: Object.keys(value).length + &quot; keys&quot;}`,
+or catch the size at the top: if the record carries `oversize`/`persistedOutput`
+render the marker chip the timeline already has and skip the walk.
+
+---
+
+## NITS
+
+- **n1** — `app.js:2124`: the specialised `aria-label` interpolates the raw
+  stream id with no length bound while every other display path in the file goes
+  through `truncate`. Harmless (it is an attribute, not markup) but inconsistent
+  with `app.js:2147`'s `truncate(stream, 40)` two lines away.
+- **n2** — `index.html:136-137`: `#older` and `#log` are scroll boxes with no
+  `tabindex=&quot;0&quot;`, so a keyboard-only operator cannot scroll either without a
+  focusable child. The page just gained deliberate scroll management; the
+  keyboard arm of it is one attribute per list.
+- **n3** — `app.js:901-906`: `noteStream` re-`sort()`s the whole list on every
+  new stream while `onHello` (`app.js:933`) adopts the server's order verbatim,
+  so the sidebar can visibly re-order itself the first time a mid-connection
+  stream is learned. Sort in both places or neither.
+- **n4** — `app.js:1052-1058` (`adoptCursors`): `state.resume` is never pruned,
+  so a stream that disappears server-side keeps sending a cursor that
+  `subscribe` refuses on every reconnect, and `onHello` renders
+  &quot;resume cursor refused: …&quot; for it forever. Drop resume keys absent from
+  `hello.streams` after the first handshake that omits them.
+- **n5** — `app.js:2118`: `state.olderStream !== stream` in `renderOlder` cannot
+  be false — `resetOlder(stream)` on the line above makes them equal
+  unconditionally. It reads as a second guard and is dead; the *real* second
+  guard is the one M1 asks for (post-`await`, in `loadOlder`).
+- **n6** — `tests/test_touch_frontend.py:1400` (`runGraph` in the harness) is
+  reassigned but the session/task panels are never driven: `renderTaskDetail`,
+  `renderSessionDetail`'s chips and `rollupList` are asserted by source text
+  only. I drove them by hand in probe 2 and they render correctly (including
+  `rollupList` folding two cumulative records for one agent to `in 30`, not
+  `in 40`) — so this is coverage, not a defect. Ten lines of the probe's
+  `tasksBody` would close it.
+
+---
+
+## What I attacked and could NOT break
+
+Recorded so a fifth attempt does not re-litigate settled ground.
+
+- **Attempt 3's M2 (the live edge).** Really fixed, and correctly: `atLiveEdge`
+  is read before the append, the follow is applied after the trim, and the
+  scrolled-away arm gives back exactly the height the trim freed. The harness
+  drives all three arms against a fake DOM with real `scrollHeight` arithmetic;
+  I re-ran it and re-derived the 40 px shift by hand.
+- **Attempt 3's m1 (inert region short-circuit).** Measured again with mutation
+  counters: three live `event` frames now leave `#runList` and `#detailBody`
+  untouched, the run row's `seq` is still current (`seq 6,002` written in place
+  through `setText`), three byte-identical token records do not rebuild the
+  panel, and one that moved does. `noteTokens`' `moved` test and `setDetail`'s
+  `detailKey` are both real change-guards.
+- **Escape-first (GD-20).** Still structural: no markup sink in any spelling, no
+  template literal at all, the only text sink is `createTextNode`/`textContent`,
+  every class is a call-site literal or a `classOf()` whitelist hit, every
+  `href` is `&quot;#&quot; + &lt;whitelisted kind&gt; + &quot;/&quot; + encodeURIComponent(id)`.
+- **R-55's animation rule.** `classList.add(LIVE_CLASS)` appears once, in
+  `paint()`, gated on `live === true`; history rows are built `live:false`;
+  every `animation:` rule in the stylesheet is reachable only through `.fresh`
+  or the mode chip, and `prefers-reduced-motion` kills both.
+- **Absolute tokens.** Latest-per-ref with the `held.seq &gt; totals.seq` guard,
+  LRU eviction, refless records counted and named in the title rather than
+  bucketed under `&quot;&quot;`. 100→300→(identical)→900 verified in execution. No delta
+  arithmetic anywhere.
+- **GD-23.** No `Date.now`, no bare `new Date()`, no idle threshold, no local
+  reducer; every badge word traced to a server field; `current` is a neutral
+  `chip-current` whose title says it is a selection, not a verdict; the session
+  panel still *refuses* to join agents to a session and says so on the page
+  (R-32's &quot;per-session agent tree&quot; is genuinely blocked on a route sp-12 does
+  not have — accepted in attempts 2 and 3, and I agree: the honest refusal beats
+  a client-side join).
+- **GD-22.** `/health` failing produces `mirror —` plus one notice line, and the
+  line clears the moment a poll succeeds (probe 2). Nothing on the page renders
+  conditionally on the mirror; `/api/query` is never fetched.
+- **The other stale-response paths.** `refreshDetail` (both arms), `fetchTasks`'
+  in-flight join, `widenTimeline` → `refreshDetail`, and `dropSocket`'s
+  null-the-handlers-before-close are all correct. `loadOlder` is the only one
+  missing the guard, which is what M1 is.
+- **Wire-shape drift.** Re-walked the fields the page reads against
+  `server.py`: `RECORD_FIELDS`/`STREAM_META_FIELDS`, `h_events`
+  (`records`/`oldest`/`hasOlder`, `page = older[-limit:]` ascending),
+  `h_timeline` (`sessionDoc`/`count`/`hasMore`, `positive_int` clamping at
+  `MAX_PAGE` 1000 vs `TIMELINE_MAX` 960), `h_run_graph`'s `derived`,
+  `_agent_payload`'s `parent`/`root`/`sessions`, `ID_PATTERNS[&quot;run&quot;]` vs
+  `validate_stream`'s multi-component ids. No drift.
+- **The suite is not tautological.** It cross-checks four server-side
+  vocabularies, asserts source *ordering* (guard before fetch, edge check before
+  append, comparison before clear), and the driven harness carries a
+  `HARNESS_EXPECTED` roster so a silently shortened run fails. The gate's own
+  mutation test (`LIVE_CLASS` renamed → 4 failures, static and driven) matches
+  what I saw.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

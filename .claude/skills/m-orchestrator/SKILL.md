@@ -93,7 +93,7 @@ proxies.
 ## Event schema (one JSON line per event)
 
 ```json
-{"ts": "<ISO>", "plan": "<id>", "stage": "<stage>", "state": "queued|running|done|failed|info|stale", "detail": "...", "title": "<optional>", "tokens": {"in": 0, "out": 0, "cached": 0, "cache_write": 0}, "quiet": true}
+{"ts": "<ISO>", "plan": "<id>", "stage": "<stage>", "state": "queued|running|done|failed|info|stale", "detail": "...", "title": "<optional>", "plans_total": 0, "tokens": {"in": 0, "out": 0, "cached": 0, "cache_write": 0}, "quiet": true}
 ```
 
 Reserved: plan id `orchestrator` (wide card, pinned last — the watcher writes
@@ -103,7 +103,11 @@ there); stage `plan` (sets the card badge); stage `complete` (badge alias of
 log). Any event's `title` renames its card. `state: "stale"` marks an abandoned
 agent/row (watcher-emitted). `tokens` deltas carry optional `cached` (cache-read,
 shown as `r:`) and `cache_write` (cache-write, shown as `w:`) breakdowns on top
-of total `in`.
+of total `in`. Optional `plans_total` (integer; `ORCH_PLANS_TOTAL` env with
+`status.sh`) declares the run's expected total plan-card count — dashboards use
+`max(cards seen, declared total)` as the progress denominator, folded
+monotonically, so plans not yet started still count; the reference templates
+declare it at their partition/barrier close.
 
 The decision watcher also attaches a per-subagent `agent` sub-object that drives
 the live per-agent rows and the impl→test→critique flow strip:
@@ -127,3 +131,26 @@ the live per-agent rows and the impl→test→critique flow strip:
 - Never `pkill -f` these scripts from a command that spells the script name —
   bracket the first letter: `pkill -f "[m]onitor_server"`.
 - Keep detail strings short, single-line, without double quotes.
+- **Time policy — implement in UTC, display in the user's local zone.** Every
+  timestamp WRITTEN by scripts, daemons, agents, and event streams
+  (`events.jsonl` `ts`, watcher emits, findings, configs) is UTC, ISO-8601
+  with explicit offset (`+00:00`/`Z`); run daemons and any shell that calls
+  `status.sh` with `TZ=UTC` so this holds regardless of container settings.
+  Conversion to local time happens ONLY at the presentation layer: the
+  dashboard renders `ts` in the viewer's browser timezone, and assistant
+  responses/reports show the OS-configured local zone (read it from
+  `/etc/localtime`; here `Asia/Tbilisi`, `+04`). Never store local-zone
+  timestamps; never compare or sort mixed-source times except as parsed
+  instants. Historic events already written with a non-UTC offset are valid
+  instants — leave them; the stream is append-only.
+
+## Network failure and manual loop restart
+
+Everything monitored is local and survives uplink loss; only in-flight agent
+API calls are at risk. Full strategy — detection signatures, the `agentR`
+retry wrapper every workflow script should use, launch-time resume pointers
+(`orch-config.json` + `plan/RESUME.md`), and the manual restart procedures
+(same-session `resumeFromRunId`, new-session skip-green relaunch, single-loop
+remediation, daemon restarts) — lives in `network-recovery.md` next to this
+file. Read it BEFORE launching long runs on flaky networks, and again before
+any manual restart.

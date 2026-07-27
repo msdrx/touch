@@ -1,0 +1,330 @@
+{
+  "note": "Line anchors into the frozen legacy streams. 1-based line numbers into the fixture files in this directory (identical to the source line numbers, except that touch-mongo-live is a 1..320 prefix). tests/test_fixtures.py verifies every field here against the bytes, so an anchor can never drift silently.",
+  "unattributable_rule": "CUSTOMSTATE-3 / GD-28: a line carrying `agent` or `tokens` is provenance `derived`; carrying `title` is `asserted`; anything else is `unknown` (unattributable). No frozen line carries the R-39 `w` field.",
+  "last_event_wins_rule": "SD-4: conflicting terminals on the same (task, plan, stage='plan') resolve last-event-wins in FILE ORDER, so a later corrective `done` beats an earlier fabricated `failed`. RUNSTATE-7 watcher-wins dedup applies only to same-state duplicates.",
+  "streams": {
+    "touch-aggregator-events.jsonl": {
+      "lines": 590,
+      "unattributable": 33,
+      "anchors": [
+        {
+          "line": 10,
+          "what": "ts-format-offset-suffix-written-by-status.sh",
+          "plan": "orchestrator",
+          "stage": "watcher",
+          "state": "info",
+          "detail_startswith": "decision watcher online (tailing workflo"
+        },
+        {
+          "line": 11,
+          "what": "ts-format-Z-suffix-written-by-watcher-and-11s-EARLIER",
+          "plan": "orchestrator",
+          "stage": "research",
+          "state": "running",
+          "detail_startswith": "spawn research research attempt 1"
+        },
+        {
+          "line": 12,
+          "what": "agent-id-truncated-to-8-chars-in-the-event",
+          "plan": "research",
+          "stage": "sessiondata",
+          "state": "running",
+          "detail_startswith": "research attempt 1 spawned"
+        },
+        {
+          "line": 571,
+          "what": "fabricated-plan-failed-no-correction",
+          "plan": "research",
+          "stage": "plan",
+          "state": "failed",
+          "detail_startswith": "loop exited -> synthesis"
+        },
+        {
+          "line": 586,
+          "what": "synthesis-plan-done",
+          "plan": "synthesis",
+          "stage": "plan",
+          "state": "done",
+          "detail_startswith": "plan written"
+        }
+      ],
+      "duplicate_stage_terminals": [
+        [
+          491,
+          503
+        ],
+        [
+          527,
+          539
+        ],
+        [
+          532,
+          548
+        ],
+        [
+          552,
+          555
+        ],
+        [
+          558,
+          564
+        ],
+        [
+          561,
+          567
+        ],
+        [
+          585,
+          589
+        ]
+      ],
+      "ts_inversions": [
+        11,
+        18
+      ],
+      "source": ".claude/local-orchestrators/touch-aggregator/events.jsonl",
+      "source_lines": "all"
+    },
+    "touch-repo-recon-events.jsonl": {
+      "lines": 103,
+      "unattributable": 20,
+      "anchors": [
+        {
+          "line": 3,
+          "what": "two-wave-respawn-first-wave-models",
+          "plan": "research",
+          "stage": "models",
+          "state": "running",
+          "detail_startswith": "scanning models perspective"
+        },
+        {
+          "line": 26,
+          "what": "two-wave-respawn-second-wave-models",
+          "plan": "research",
+          "stage": "models",
+          "state": "running",
+          "detail_startswith": "research attempt 1 spawned"
+        },
+        {
+          "line": 101,
+          "what": "GENUINE-plan-failed-user-killed-must-stay-failed",
+          "plan": "research",
+          "stage": "plan",
+          "state": "failed",
+          "detail_startswith": "stopped by user before completion"
+        },
+        {
+          "line": 102,
+          "what": "GENUINE-plan-failed-synthesis-never-started",
+          "plan": "synthesis",
+          "stage": "plan",
+          "state": "failed",
+          "detail_startswith": "run stopped before synthesis started"
+        },
+        {
+          "line": 103,
+          "what": "orchestrator-complete-naming-wf_455b348c-e17-in-free-text-only",
+          "plan": "orchestrator",
+          "stage": "complete",
+          "state": "done",
+          "detail_startswith": "run wf_455b348c-e17 stopped by user - 6 "
+        }
+      ],
+      "duplicate_stage_terminals": [],
+      "ts_inversions": [
+        8,
+        13,
+        17,
+        29,
+        31
+      ],
+      "source": ".claude/local-orchestrators/touch-repo-recon/events.jsonl",
+      "source_lines": "all",
+      "respawn_waves": {
+        "research/models": [
+          3,
+          26
+        ],
+        "research/monitoring": [
+          4,
+          12,
+          32
+        ],
+        "research/v0task": [
+          5,
+          16,
+          28
+        ],
+        "research/aggtask": [
+          6,
+          18,
+          30
+        ]
+      }
+    },
+    "touch-full-recon-events.jsonl": {
+      "lines": 276,
+      "unattributable": 35,
+      "anchors": [
+        {
+          "line": 255,
+          "what": "fabricated-plan-failed",
+          "plan": "research",
+          "stage": "plan",
+          "state": "failed",
+          "detail_startswith": "loop exited -> synthesis"
+        },
+        {
+          "line": 270,
+          "what": "synthesis-plan-done",
+          "plan": "synthesis",
+          "stage": "plan",
+          "state": "done",
+          "detail_startswith": "plan written"
+        },
+        {
+          "line": 276,
+          "what": "CORRECTIVE-plan-done-later-in-file-order-beats-255",
+          "plan": "research",
+          "stage": "plan",
+          "state": "done",
+          "detail_startswith": "all 6 researchers returned - earlier fai"
+        }
+      ],
+      "duplicate_stage_terminals": [
+        [
+          217,
+          229
+        ],
+        [
+          220,
+          232
+        ],
+        [
+          223,
+          239
+        ],
+        [
+          226,
+          236
+        ],
+        [
+          242,
+          245
+        ],
+        [
+          248,
+          251
+        ],
+        [
+          269,
+          273
+        ]
+      ],
+      "ts_inversions": [
+        11,
+        18,
+        22,
+        235,
+        238
+      ],
+      "source": ".claude/local-orchestrators/touch-full-recon/events.jsonl",
+      "source_lines": "all",
+      "conflicting_plan_terminals": [
+        {
+          "plan": "research",
+          "failed": 255,
+          "corrective_done": 276
+        }
+      ]
+    },
+    "touch-mongo-live-events.jsonl": {
+      "lines": 320,
+      "unattributable": 41,
+      "anchors": [
+        {
+          "line": 275,
+          "what": "fabricated-plan-failed",
+          "plan": "research",
+          "stage": "plan",
+          "state": "failed",
+          "detail_startswith": "loop exited -> synthesis"
+        },
+        {
+          "line": 286,
+          "what": "CORRECTIVE-plan-done-later-in-file-order-beats-275",
+          "plan": "research",
+          "stage": "plan",
+          "state": "done",
+          "detail_startswith": "all 5 researchers returned findings - fa"
+        },
+        {
+          "line": 293,
+          "what": "synthesis-plan-done",
+          "plan": "synthesis",
+          "stage": "plan",
+          "state": "done",
+          "detail_startswith": "plan written"
+        },
+        {
+          "line": 319,
+          "what": "fabricated-plan-failed-NO-correction-relabel-to-closed-no-verdict",
+          "plan": "divide",
+          "stage": "plan",
+          "state": "failed",
+          "detail_startswith": "loop exited -> sp-repo-bootstrap"
+        }
+      ],
+      "duplicate_stage_terminals": [
+        [
+          241,
+          244
+        ],
+        [
+          247,
+          256
+        ],
+        [
+          250,
+          260
+        ],
+        [
+          253,
+          265
+        ],
+        [
+          268,
+          271
+        ],
+        [
+          292,
+          296
+        ],
+        [
+          312,
+          315
+        ]
+      ],
+      "ts_inversions": [
+        10,
+        17,
+        302
+      ],
+      "source": ".claude/local-orchestrators/touch-mongo-live/events.jsonl",
+      "source_lines": "1..320 (prefix: the stream was still live when frozen)",
+      "unattributable_in_first_130": 12,
+      "conflicting_plan_terminals": [
+        {
+          "plan": "research",
+          "failed": 275,
+          "corrective_done": 286
+        },
+        {
+          "plan": "divide",
+          "failed": 319,
+          "corrective_done": null
+        }
+      ]
+    }
+  }
+}

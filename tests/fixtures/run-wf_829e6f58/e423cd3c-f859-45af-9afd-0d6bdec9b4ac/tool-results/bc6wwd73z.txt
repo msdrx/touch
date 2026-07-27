@@ -1,0 +1,195 @@
+CLAUDE.md:48:  LLM cooperation; `status.sh` calls inside agents are best-effort color only.
+CLAUDE.md:68:  `opus`) with a barrier, then ONE `fable` synthesizer that writes
+CLAUDE.md:71:- `implement-plan`: a `fable` divider derives isolated sub-plans by **file
+CLAUDE.md:78:  schemas, models, markers, status calls). Adapt a copy into the task folder's
+.claude/statusline.sh:19:MODEL=$(jq -r '.model.display_name' "$TMPJSON")
+.claude/statusline.sh:71:    echo "🤖 $MODEL | 📊 $CTX | 📁 $DIRNAME | 🌿 $BRANCH"
+.claude/statusline.sh:73:    echo "🤖 $MODEL | 📊 $CTX | 📁 $DIRNAME"
+inception.md:33:  skill pair. Research fans out read-only perspective agents (opus) behind a
+inception.md:34:  barrier, then ONE fable synthesizer writes `plan/<name>-plan.md`.
+inception.md:35:  Implementation runs a fable divider (file-ownership partitioning, one file =
+inception.md:92:`agentType, description, toolUseId, spawnDepth, model` at spawn instant —
+inception.md:154:- *Stop loop* (v1, model-mediated): type a `TaskStop({taskId})` instruction
+inception.md:159:- *Restart loop* (v1, model-mediated): typed
+inception.md:166:  `initialize/interrupt/set_model/set_permission_mode` (interrupt verified
+inception.md:173:model-mediated verbs surface `requested → sent → confirmed` distinctly in the
+inception.md:209:   deterministic v1; stop/restart model-mediated v1; pause as hook gate v1.5;
+inception.md:217:5. **Event model (D4)**: ONE new format, "touch events v2" —
+inception.md:238:`touch-aggregator/findings/`) and the fable synthesizer, which reconciled them
+inception.md:242:vendoring, WS codec, server core, `.touch/` store, ingestion, graph model,
+inception.md:270:record lifecycle facts regardless of model cooperation).
+.claude/shared/monitoring/decision_watcher.py:604:                        # row so it doesn't tick "running" forever. Best-effort
+.claude/shared/monitoring/monitoring.md:100:   These are best-effort color on top of the deterministic stream — an agent
+.claude/local-orchestrators/touch-monitor-spawn/plan/touch-monitor-spawn-plan.md:28:  become the in-memory model reduced from the events log.
+.claude/local-orchestrators/touch-monitor-spawn/plan/touch-monitor-spawn-plan.md:35:- **G4 — Event model**: touch-events-v2 exactly as D4 (`v, seq, ts, source,
+.claude/local-orchestrators/touch-monitor-spawn/plan/touch-monitor-spawn-plan.md:117:never crash. Upsert by `uuid` into the in-memory model; token accounting per
+.claude/local-orchestrators/touch-monitor-spawn/plan/touch-monitor-spawn-plan.md:215:ledger — assert: sidebar model, join table, tree, rollups; then write a stop
+.claude/shared/monitoring/monitor_server.py:383:        try:  # best-effort CLOSE frame so a conforming client tears down cleanly
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:9:    { title: 'Research', detail: '6 read-only researchers, one perspective each', model: 'opus' },
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:10:    { title: 'Synthesize', detail: 'dedup + decide + write ONE complete plan', model: 'fable' },
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:84:    focus: `The PERSISTED SESSION DATA MODEL. Enumerate, from real files under ~/.claude, every record
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:137:installs actually succeed here rather than assuming). Cover: process model and how the web tier reaches
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:215:   UI affordance; the canonical internal event/state model; the read pipeline
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:244:    model: 'opus', effort: 'high',
+.claude/local-orchestrators/touch-aggregator/orch-scripts/research.workflow.js:252:  model: 'fable', effort: 'xhigh',
+.claude/local-orchestrators/touch-aggregator/context/driver-context.md:59:- `assistant.message`: `{id, model, role, content[], usage, stop_reason,
+.claude/local-orchestrators/touch-aggregator/context/driver-context.md:60:  stop_details, diagnostics}`; plus `requestId`, `effort`, `attributionSkill`.
+.claude/local-orchestrators/touch-aggregator/context/driver-context.md:77:agent-<agentId>.meta.json    {"agentType","description","toolUseId","spawnDepth","model"}
+.claude/local-orchestrators/touch-aggregator/context/driver-context.md:102:  phases, defaultModel, workflowProgress, totalTokens, totalToolCalls}`.
+.claude/local-orchestrators/touch-aggregator/context/driver-context.md:104:  phaseIndex, phaseTitle, agentId, agentType, isolation, model, state,
+.claude/local-orchestrators/touch-aggregator/context/driver-context.md:261:replayed into the model's context and a torn line breaks the user's real
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:77:**Recommendation.** Model Touch's control plane as
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:127:`interrupt`, `set_model`, `set_permission_mode` (and outbound-only
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:191:**model** calling `Workflow({scriptPath})`, and the tool result (line 295) reads
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:195:**Scenario.** Touch's "restart loop" button must ultimately cause the *model in
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:198:into that session's stdin containing the resume instruction, and hope the model
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:210:  model actually did it. Surface "restart requested / restart confirmed" as two
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:279:`function Kf(e,t,r){…return {session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id: r?.agentId, agent_type, effort}}`,
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:300:keep running, and it needs no cooperation from the model.
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:310:## CONTROL-9 — Hook-based pause has hard limits: tool boundaries, a timeout ceiling, and `deny` is visible to the model
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:317:`u.blockingError={blockingError:…}` — i.e. the model receives a tool error.
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:321:reasoning turn. Nothing happens until the model next calls a tool — the UI shows
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:394:`claude agents`)"), `--permission-mode`, `--model`, `--settings`, `--add-dir`.
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:497:## CONTROL-16 — `TaskStop` and `Workflow` are model-facing tools; any Touch verb built on them is advisory, not deterministic
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:508:"call TaskStop with wpbwj76b3". The model is mid-tool-call, or decides to ask a
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:512:**Recommendation.** Every model-mediated verb in Touch must be modelled as a
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:525:1. **Suspend/resume of in-flight model inference.** No primitive exists at any
+.claude/local-orchestrators/touch-aggregator/findings/research-control-attempt-1.md:546:or model-mediated. Every UI control must map to one row; anything that maps to
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:39:The data model has the same shape: `events.jsonl` is append-only and every
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:76:**Recommendation.** Decide the auth model **before** writing the first write
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:111:That is exactly the sidebar model — with a live status, a name, a cwd and a pid
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:149:      "toolUseId":"toolu_017UzEDnR28ARKERuMw2PGwX","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:155:(`{"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}`, no
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:219:**Scenario.** The whole model is `(plan, stage, state)` → one card per `plan`,
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:358:## PRIORART-10 — "Restart" is `resumeFromRunId` cache replay into a NEW journal, and the checkpoint model turns that into duplicated history
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:514:`implement-plan` are generated at runtime by a Fable divider from the plan text
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:619:- **The `?task=` URL-as-state routing model** (`monitor.html:196-200, 562-591`):
+.claude/local-orchestrators/touch-aggregator/findings/research-priorart-attempt-1.md:630:schema as the graph source (PRIORART-6); the marker-gated visibility model
+.claude/local-orchestrators/touch-aggregator/findings/research-stack-attempt-1.md:3:Scope: runtime, transport, terminal emulation, graph rendering, process model,
+.claude/local-orchestrators/touch-aggregator/findings/research-stack-attempt-1.md:45:**Recommendation** — split the model explicitly and surface it in the UI:
+.claude/local-orchestrators/touch-aggregator/findings/research-stack-attempt-1.md:493:  ladder, env allowlist, id validation, graph model derivation. Keep browser JS
+.claude/local-orchestrators/touch-aggregator/findings/research-stack-attempt-1.md:494:  thin (render a model the server computed).
+.claude/local-orchestrators/touch-aggregator/findings/research-stack-attempt-1.md:525:aggregator/          # python package: server.py, ws.py, pty.py, sessions.py, model.py
+.claude/local-orchestrators/touch-aggregator/findings/research-stack-attempt-1.md:545:  Resumption is an **in-session tool call**, i.e. it happens because the model in
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:35:{"agentType":"general-purpose","description":"Assess data-layer feasibility","toolUseId":"toolu_011Ug5qnU1bc2nEdXq57eRg7","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:38:{"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:87:exactly this and is the right model to copy.
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:93:- **Proof**: `.claude/skills/execute-research/templates/research.workflow.js:139-143` passes `label: \`research:${p.key}\`, phase: 'Research'`; the resulting sidecars contain only `{"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}` (all six files under `subagents/workflows/wf_829e6f58-b2f/*.meta.json`). Binary offset `254695154` shows the full set of fields the sidecar writer can emit — `agentType, isFork, worktreePath, worktreeBranch, cwd, spawnMode, description, name, toolUseId, parentAgentId, stoppedByUser, spawnDepth, taskKind, teamName, color, planModeRequired, customAgentType, model, permissionMode` — `label` and `phase` are not among them, and `description`/`name` are only populated on the Agent-tool path.
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:98:`workflow-subagent · opus · spawnDepth 1`. The graph is unreadable — the user
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:104:`{index, label, phaseIndex, phaseTitle, agentId, agentType, isolation, model, fallbackModel, state, startedAt, queuedAt, attempt, lastAttemptReason, lastToolName, lastToolSummary, promptPreview, lastProgressAt}` — but that is an in-process progress stream to the TUI, unreachable from another process (see AGENTGRAPH-6).
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:155:  prompt and `VWy(t)` serialises only `{schema, model, effort, isolation,
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:227:defaultModel, workflowProgress[], totalTokens, totalToolCalls}` — where
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:244:node model so those fields are *optional* and arrive late.
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:298:editFileCount, linesAdded, linesRemoved, otherToolCount}` and `resolvedModel`
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:299:(`"claude-opus-5[1m]"`, i.e. the *resolved* model, unlike the sidecar's coarse
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:300:`"opus"`). So the record is mixed-fidelity, not uniformly wrong.
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:307:`totalToolUseCount`, `toolStats` and `resolvedModel` from `toolUseResult`;
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:331:**Recommendation**: model node liveness as three states with distinct visuals:
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:369:   `run_in_background` and `model`.
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:580:**Recommendation**: write this table into Touch's data-model design as a
+.claude/local-orchestrators/touch-aggregator/findings/research-agentgraph-attempt-1.md:601:"declare, then observe" model.
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:1:# Research findings — PERSISTED SESSION DATA MODEL (attempt 1)
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:30:| `last-wins` | `summary`, `custom-title`, `ended-by-model`, `ai-title`, `tag`, `relocated`, `agent-name`, `agent-color`, `agent-setting`, `pr-link`, `bridge-session`, `attribution-snapshot`, `mode`, `permission-mode`, `isolation-latch`, `worktree-state`, `queue-operation`, `observer-ref` |
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:100:model's reasoning; the transcript contains a placeholder. Any Touch pane that
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:140:`uuid` and make the in-memory model idempotent on re-ingest (upsert-by-uuid,
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:318:carries `status:"completed"`, `agentId`, `agentType`, `resolvedModel`,
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:376: "toolUseId":"toolu_017UzEDnR28ARKERuMw2PGwX","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:384:{"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:476:`.claude/local-orchestrators/<task>/events.jsonl` model) at ingest time, and
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:495:"message" shows one model turn as three stacked bubbles — text, then two
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:604:`lastTotalOutputTokens = 0`, `lastModelUsage = {}` even after a full session.
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:615:a Touch-owned model→price table. Never write to `~/.claude.json` — a
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:680:per-response token usage, model id, `effort`, `attributionSkill`, cwd, git
+.claude/local-orchestrators/touch-aggregator/findings/research-sessiondata-attempt-1.md:686:**Cannot**: model reasoning text, streaming/partial output, ANSI styling,
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:114:### D4. Canonical event model: "touch events v2" (DRIVER §7.3 decided)
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:207:| Stop loop | v1 | typed instruction "call `TaskStop({taskId})`" into owned session, gated on registry `status:"idle"`; confirmed by `task_updated`/journal silence | run | running agent aborted; no disk marker — Touch's audit is the record | model-mediated |
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:208:| Restart loop | v1 | typed `Workflow({scriptPath, resumeFromRunId})` instruction, same gating; confirmed by a new Workflow tool_result + new journal; replayed nodes rendered "replayed from journal (not re-executed)" (CONTROL-5, AGENTGRAPH-4) | run | in-flight agents respawn from scratch onto a dirty tree — Touch records `git stash create` + `git status --porcelain` checkpoint first and offers restore as a separate action (CONTROL-7) | model-mediated |
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:241:— AGENTGRAPH-8); `totalDurationMs`/`toolStats`/`resolvedModel` are trusted.
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:289:task-agnostic. The watcher's process model (one global-ridden process per run
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:299:server-computed models) and is guarded by static source tests, same genre as
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:304:- Every model-mediated verb shows `requested/sent/confirmed` distinctly; a
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:480:### T8. Workflow runs and the agent graph model
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:509:`toolStats`, `resolvedModel` trusted from `toolUseResult`. When
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:670:never approach the 600 s ceiling; never `deny` — the model must not see
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:733:(labels/declared), PRIORART-5, PRIORART-6 (graph from model, painted by
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:747:server model contains everything the page needs (no client-side derivation
+.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md:812:owned/observed model, the D7 control table verbatim (what each verb honestly
+.claude/local-orchestrators/touch-repo-recon/findings/research-intent-attempt-1.md:61:`/exit` → SIGHUP pgroup → SIGKILL); `stop loop` → model-mediated v1;
+.claude/local-orchestrators/touch-repo-recon/findings/research-intent-attempt-1.md:275:only the model-mediated whole-loop stop (typed instruction, `requested → sent →
+.claude/local-orchestrators/touch-repo-recon/findings/research-intent-attempt-1.md:398:the best-effort `status.sh` stream (stages `sessiondata`, `agentgraph`,
+.claude/local-orchestrators/touch-repo-recon/findings/research-intent-attempt-1.md:400:channel the docs call "best-effort color". So the deterministic source is
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:116:model-driven shell). Worse, an agent instructed to "append a line" frequently
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:146:aggregator, `.touch/` does not exist yet, the model latches the task-dir path,
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:370:spawn therefore has nowhere defined to write, and the model will invent a path
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:438:the best-effort `status.sh` calls the skills explicitly label "best-effort
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:467:*model* must read and act on, not a validated object a script branches on.
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:470:model-mediated one and voids the "the loops are a pure function of the divider's
+.claude/local-orchestrators/touch-repo-recon/findings/research-skills-attempt-1.md:493:With `[touch]` about to become line 1 (SKILLS-6/-7), a wrong mental model here
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:97:    "toolUseId":"toolu_011Ug5qnU1bc2nEdXq57eRg7","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:99:   {"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:284:## V0TASK-8 — No module interface contract across P2–P9, and no owner for the in-memory model
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:298:  "in memory" — but no item owns a `model.py`. Is the model a dict passed
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:300:- P5 "Upsert by `uuid` into the in-memory model" and P6 "Per-agent rollups"
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:313:(bool = reset), `ingest.apply(model, lines, source) -> list[dict]`,
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:314:`agents.scan(model, session) -> list[dict]`, `control.reduce(model, lines) -> list[dict]`;
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:315:and give the model its own file (`aggregator/model.py`, owned by P2) with the
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:510:as "the in-memory model" but no item creates it (see V0TASK-8). A global
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:518:rather than trusted. G2's shapes belong in the `model.py` of V0TASK-8.
+.claude/local-orchestrators/touch-repo-recon/findings/research-v0task-attempt-1.md:582:   unwritten API an unimplementable plan; signatures, a `model.py`, a
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:10:    { title: 'Research', detail: '5 read-only researchers, one perspective each', model: 'opus' },
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:11:    { title: 'Synthesize', detail: 'dedup + decide + write ONE complete plan', model: 'fable' },
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:50:  { key: 'models', focus: 'Pinned subagent model + effort usage, repo-wide. Inventory EVERY place a subagent model or effort is pinned or prescribed: both skills SKILL.md files (execute-research says research=opus effort by complexity never above xhigh; implement-plan prescribes models for divider/implementer/test/critique/final gate), both templates/*.workflow.js (model:/effort: options per agent() call), the orch-scripts copies under both task folders, orch-config.json files, and any model references in the plans/docs (inception.md, touch-aggregator-plan.md, touch-monitor-spawn-plan.md). For each: file:line, role, pinned model string (alias like opus vs explicit id like claude-opus-4-8 / claude-opus-5 / [1m] variants), effort. Determine empirically (safe inspection only, e.g. claude --help or version strings — throwaway dir /tmp/claude-1000) what the bare aliases opus/fable resolve to in this environment. THE MANDATE (user-directed, normative): (a) for RESEARCH and IMPLEMENTATION roles (execute-research researchers; implement-plan implementer, test-gate, critique agents), any pin to Opus 4.8 at xhigh (or an alias resolving there) must be replaced with Opus 5 at xhigh — report each occurrence as a finding with the exact edit; (b) Fable is reserved for exactly: the plan SYNTHESIZER, the MAIN USER TERMINAL agent (the driver session itself — check where docs/skills state the driver model and report it as an item if unstated), and the FINAL REVIEW agent (implement-plan aggregate/final gate); (c) NOTE an open decision: implement-plan currently also pins the DIVIDER to fable, which the user enumeration omits — flag every divider pin (file:line) and mark divider-model as a decision the synthesizer must make explicitly, never change it silently; (d) effort caps (never above xhigh) stay as skill-mandated. Flag inconsistencies between what skills prescribe and what templates/scripts actually pin, and recommend the canonical role-to-model table the synthesized plan must mandate.' },
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:85:module, and two prior planning efforts: touch-aggregator (six research reports,
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:168:    model: 'opus', effort: 'high',
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:175:// Synthesis is the only stage in THIS workflow allowed to use fable; research
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:176:// agents stay on opus. (implement-plan's final gate reviewer also runs fable.)
+.claude/local-orchestrators/touch-repo-recon/orch-scripts/research.workflow.js:178:  model: 'fable', effort: 'xhigh',
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:46:**Recommendation.** Make the ownership model explicit in the product: **Touch
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:62:    -- /home/agent/.local/share/claude/versions/2.1.220 --session-id … --model haiku …
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:88:--settings … --model haiku --permission-mode bypassPermissions`), typing
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:105:(`.claude/shared/monitoring/monitoring.md:19`), so the mental model is already in
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:129:`--dangerously-skip-permissions` on. The published-port model means "reachable"
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:190:→ interrupt, stop_task, set_permission_mode, set_model, set_max_thinking_tokens,
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:228:`session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id, agent_type, effort`.
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:320:`interrupt`, `stop_task`, `agents_killed`, `set_permission_mode`, `set_model`,
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:468:   "toolUseId":"toolu_017Uz…","spawnDepth":1,"model":"opus"}
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:470:  {"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}      ← no toolUseId,
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:528:  "sessionId":…,"resumeSessionId":…,"cwd":…,"respawnFlags":["--model","haiku"],
+.claude/local-orchestrators/touch-aggregator/findings/research-liveio-attempt-1.md:546:`roster.json` as the read model, with `claude stop` as terminate and the roster's
+.claude/skills/execute-research/SKILL.md:22:divide-and-conquer belongs to `implement-plan`'s Fable divider). It carries:
+.claude/skills/execute-research/SKILL.md:37:protocol — prompts, schemas, models, monitor markers, status.sh calls, phase
+.claude/skills/execute-research/SKILL.md:55:- Models: research = `opus` (effort by complexity, never above xhigh);
+.claude/skills/execute-research/SKILL.md:56:  synthesizer = `fable` — the only Fable role here (the others are
+.claude/skills/execute-research/SKILL.md:86:folder, handing `{ plan_file }` only (its Fable divider derives the sub-plans;
+.claude/skills/m-orchestrator/SKILL.md:62:   progress notes — best-effort color, not the source of truth (note:
+.claude/skills/execute-research/templates/research.workflow.js:9://     divide-and-conquer belongs to implement-plan's Fable divider
+.claude/skills/execute-research/templates/research.workflow.js:16:    { title: 'Research', detail: 'N read-only researchers, one perspective each', model: 'opus' },
+.claude/skills/execute-research/templates/research.workflow.js:17:    { title: 'Synthesize', detail: 'dedup + decide + write ONE complete plan', model: 'fable' },
+.claude/skills/execute-research/templates/research.workflow.js:141:    model: 'opus', effort: 'high',
+.claude/skills/execute-research/templates/research.workflow.js:148:// Synthesis is the only stage in THIS workflow allowed to use fable; research
+.claude/skills/execute-research/templates/research.workflow.js:149:// agents stay on opus. (implement-plan's final gate reviewer also runs fable.)
+.claude/skills/execute-research/templates/research.workflow.js:151:  model: 'fable', effort: 'xhigh',
+.claude/skills/execute-research/templates/research.workflow.js:164:// workflow returns, handing it { plan_file } only — implement-plan's Fable
+.claude/skills/implement-plan/SKILL.md:3:description: Take the complete plan produced by execute-research (or an equivalent plan), divide it into isolated feature-sub-plans via a Fable divider agent, then implement them through generated, monitored implement→test→critique loops (serial by default). Use when asked to execute / implement a plan; pass the user's request as the argument.
+.claude/skills/implement-plan/SKILL.md:28:protocol — prompts, schemas, models, the Divide phase, monitor markers,
+.claude/skills/implement-plan/SKILL.md:42:- **Divide first, by Fable.** The partition into isolated sub-plans
+.claude/skills/implement-plan/SKILL.md:44:  the READ-ONLY `{model: 'fable'}` divider — file ownership is the isolation
+.claude/skills/implement-plan/SKILL.md:63:- **Models**: everything `opus` (effort by complexity, never above xhigh)
+.claude/skills/implement-plan/SKILL.md:64:  EXCEPT the two `fable` agents — the DIVIDER and the FINAL-GATE REVIEWER (the
+.claude/skills/implement-plan/SKILL.md:65:  final-gate fixer is an implementer: opus).
+.claude/skills/implement-plan/templates/implement.workflow.js:2:// feature-sub-plans (Fable divider), then implement them through gated
+.claude/skills/implement-plan/templates/implement.workflow.js:7://   * the sub-plan partition comes from the Divide phase (fable) — the gated
+.claude/skills/implement-plan/templates/implement.workflow.js:18:    { title: 'Divide', detail: 'fable divider: one plan -> isolated feature-sub-plans', model: 'fable' },
+.claude/skills/implement-plan/templates/implement.workflow.js:19:    { title: 'Implement', model: 'opus' },
+.claude/skills/implement-plan/templates/implement.workflow.js:20:    { title: 'Test', model: 'opus' },
+.claude/skills/implement-plan/templates/implement.workflow.js:21:    { title: 'Critique', model: 'opus' },
+.claude/skills/implement-plan/templates/implement.workflow.js:22:    { title: 'FinalGate', model: 'fable' },
+.claude/skills/implement-plan/templates/implement.workflow.js:173:      model: 'opus', effort: attempt >= 3 ? 'xhigh' : 'high',
+.claude/skills/implement-plan/templates/implement.workflow.js:180:      model: 'opus', effort: 'medium',
+.claude/skills/implement-plan/templates/implement.workflow.js:190:      model: 'opus', effort: 'high',
+.claude/skills/implement-plan/templates/implement.workflow.js:212:// ---- Divide: the Fable divider derives the sub-plans from the plan ----
+.claude/skills/implement-plan/templates/implement.workflow.js:257:  model: 'fable', effort: 'high',
+.claude/skills/implement-plan/templates/implement.workflow.js:311:// opus: fable is reserved for the gate REVIEWER above.
+.claude/skills/implement-plan/templates/implement.workflow.js:332:    // The final gate reviewer is the one implement-side agent that runs fable.
+.claude/skills/implement-plan/templates/implement.workflow.js:334:      model: 'fable', effort: 'medium',
+.claude/skills/implement-plan/templates/implement.workflow.js:344:        model: 'opus', effort: 'xhigh',

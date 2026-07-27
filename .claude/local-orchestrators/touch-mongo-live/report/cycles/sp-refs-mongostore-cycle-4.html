@@ -1,0 +1,659 @@
+<title>sp-refs-mongostore — cycle 4</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-refs-mongostore — implement→test→critique, attempt 4/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 4 closes every finding from sp-refs-mongostore-critique-attempt-3 (attempts 1–2 were already verified closed there; the attempt-3 test gate passed).
+
+M1 (major) — `guarded_update` reported a normal lost race as `MongoUnavailable`. Root cause: with `require` on an `upsert=True` `update_one`, a guard miss becomes an INSERT attempt, and an insert built from a PARTIAL update fails `$jsonSchema` (code 121, an `OperationFailure`) before it can fail on the duplicate `_id` — and both of GD-29's own call shapes are partial. Fixed by splitting the guarded path: (1) the conditional update now runs with `upsert=False`, so it can never insert; (2) on no match, when `upsert`, a create is attempted only if `apply_update(None, …)` yields a document carrying the collection's required fields (a payload-only write is not a create → `acquired: False`, nothing written, no round trip wasted), and the create is an explicit `insert_one`, so &quot;already exists&quot; comes back as the duplicate key GD-29 requires be counted (`tolerated_dups: 1`). Added `_guard_lost()` and `_driver_error()`; the latter maps `DOCUMENT_VALIDATION_FAILED` (121) to `SchemaError` rather than `MongoUnavailable`, so a `$jsonSchema` refusal can never feed GD-30's breaker. Both of the critique's live reproductions now return the documented result: payload-only late custom-state write → `{acquired: False, tolerated_dups: 0}`, head untouched; expiry-only lease renewal by a non-holder → same, holder untouched; by the holder → `{acquired: True, matched: 1}` (re-verified independently against mongo:7, plus new unit and live assertions). Also fixed: a first acquisition through a guard still works (absent doc → insert), and the precondition never becomes data the way an upsert-built insert makes it.
+
+m1 (minor) — the `MongoStoreError` funnel now covers the other four doors: `_json_default` raises `SchemaError` (not `TypeError`), `document_size` (and `guard_oversize` through it) and `fingerprint` wrap encode failures — `fingerprint`'s refusal names `collection` + `_id` — and `unwrap_raw` turns a non-decoding `_raw` into a `SchemaError` (the `--rebuild` reachability the critique flagged). `_bson_identity` updated so dedup still never throws. New `test_every_refusal_stays_inside_the_exception_hierarchy` asserts all five doors plus a still-working round trip.
+
+n1 — `_SESSION_KEY_RE` tightened to `^[1-9]\d*-\d+$` so a `slots` document cannot name a sessionKey the `session` grammar can never emit; asserted in `test_bson_type_pins` for `0-1`, `0622-10028`, `-1`, `622`.
+n2 — four GD-24 key fields pinned: `slots.runNode` (string), `agents.spawn` / `runs.harnessTotals` (object, new `_OBJ`), `sessions.sources` (array); asserted in both `COLLECTIONS` and the emitted `$jsonSchema`, with a scalar-`sources` rejection.
+n3 — `_guard_filter` now says a dict precondition is read as a comparison expression and that sub-document equality is unsupported, instead of listing operators at a reader who wanted equality.
+
+Test-side extras found while verifying: pymongo decodes BSON Date as a NAIVE datetime, so `== &lt;aware ts&gt;` in the live arm would have been silently vacuous — added `same_moment()` with that stated.
+
+Verification: `tests/test_refs.py` and `tests/test_mongo_store.py` rc=0 on the ambient interpreter, on a genuinely pymongo-free `venv --without-pip`, and against a live `mongo:7` (R-42 loopback+auth, `touch_test_&lt;pid&gt;`, dropped after; live arm now 30 assertions, all green). Full 12-file suite green on both interpreters (`run_all.sh`: 12 passed, 0 failed). Only the four owned files were touched; no commit was made.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites green: tests/test_refs.py rc=0 (230 checks), tests/test_mongo_store.py rc=0 (313 checks, live arm skipping cleanly with no mongod) and rc=0 again (339 checks) against a real loopback+auth mongo:7 container started per R-42 and removed after. Full-suite regression green (SUITE_RC=0): all four monitoring suites plus test_bootstrap/fixtures/stdlib_only/store/tailer/ws/refs/mongo_store, no new failures. R-43 purity (imports only __future__+re, no clock/env) and R-44 no-pymongo import verified independently by blocking pymongo/bson in sys.meta_path — module imports, pymongo_available() returns False. GD-24/25/26/27/28 asserted against the real server (idempotent ensure_schema, unique {stream:1,seq:1}, TTL refused on read-back, identical fingerprint b8f05eb7 across normal/shuffled/reversed with equal counts, IXSCAN explains, server-side provenance refusal, touch_test_&lt;pid&gt; scoping). Critique-3 blocker M1 is closed: guarded_update has a code-121 arm and the payload-only/lease-renewal shapes now return acquired:False instead of MongoUnavailable, proven live. Ownership clean — only the four owned files have mtimes in the attempt window, git HEAD unchanged at 579446e, no commit.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 0 blocker, 2 major, 3 minor, 3 nit. Attempt-3's M1 is genuinely fixed (guarded_update no longer rides a precondition on an upsert; both partial shapes return acquired:False, proven against a real $jsonSchema), and m1/n1/n2/n3 are all closed. I re-ran everything independently: both owned suites rc=0 ambient, rc=0 on a pymongo-free venv, full eight-file regression rc=0, and the live arm rc=0 (339 checks) against the running loopback+auth mongo:7. Ownership clean, HEAD still 579446e, no commit, no source edited. MAJOR 1 (mongo_store.py:1442-1458, :1519-1528, :1707-1710): classify_write_errors treats EVERY code-11000 as a tolerated duplicate, so a dup on a secondary unique index is reported as success with errors:[] and the write is lost — reproduced live on slots.{agentId:1} unique sparse (two slots claiming one agentId ⇒ tolerated_dups:1, errors:[], 1 document stored), which this test file itself calls &quot;the conflict signal R-53 renders&quot;; the driver hands over keyPattern and the module discards it. MAJOR 2 (mongo_store.py:320-326 + the $set fence at :1072-1076): sessions.sources is declared accumulable, leaving $addToSet as the only writer, so GD-26's &quot;sources[].present:false, lastSeenTs set by a stat pass&quot; is inexpressible — reproduced: three stat passes over ONE source yield three contradictory array elements and unbounded growth, while $set (the operator mongod accepts, verified) is fenced and $max on a positional path is refused by the memory model; sp-07 owns sessions.py but not mongo_store.py, so it cannot fix the row it will break against. Minors: bulk_upsert/guarded_update are silently sync-only and raise a bare AttributeError outside MongoStoreError when handed GD-21's mandated AsyncMongoClient (reproduced), while the module docstring promises no downstream caller needs a raw handle; validate_update accepts positional array paths that apply_update then refuses (the GD-25 oracle silently stops covering such mappers); the $set fence misses run_nodes.journalSeq and custom_state.fromSeq, which the module's own writers accumulate. Nits: events/custom_state_events ref{} and data{} plus run_nodes.result still carry no bsonType pin (the attempt-3 pin fix stopped three fields short); a normal R-52 late event with full identity inflates tolerated_dups; $addToSet dedup distinguishes 1 from 1.0 where mongod does not (reproduced, not reachable on the frozen corpus). refs.py itself drew no finding.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 5/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 4 closes every finding from sp-refs-mongostore-critique-attempt-3 (attempts 1–2 were already verified closed there; the attempt-3 test gate passed).
+
+M1 (major) — `guarded_update` reported a normal lost race as `MongoUnavailable`. Root cause: with `require` on an `upsert=True` `update_one`, a guard miss becomes an INSERT attempt, and an insert built from a PARTIAL update fails `$jsonSchema` (code 121, an `OperationFailure`) before it can fail on the duplicate `_id` — and both of GD-29's own call shapes are partial. Fixed by splitting the guarded path: (1) the conditional update now runs with `upsert=False`, so it can never insert; (2) on no match, when `upsert`, a create is attempted only if `apply_update(None, …)` yields a document carrying the collection's required fields (a payload-only write is not a create → `acquired: False`, nothing written, no round trip wasted), and the create is an explicit `insert_one`, so &quot;already exists&quot; comes back as the duplicate key GD-29 requires be counted (`tolerated_dups: 1`). Added `_guard_lost()` and `_driver_error()`; the latter maps `DOCUMENT_VALIDATION_FAILED` (121) to `SchemaError` rather than `MongoUnavailable`, so a `$jsonSchema` refusal can never feed GD-30's breaker. Both of the critique's live reproductions now return the documented result: payload-only late custom-state write → `{acquired: False, tolerated_dups: 0}`, head untouched; expiry-only lease renewal by a non-holder → same, holder untouched; by the holder → `{acquired: True, matched: 1}` (re-verified independently against mongo:7, plus new unit and live assertions). Also fixed: a first acquisition through a guard still works (absent doc → insert), and the precondition never becomes data the way an upsert-built insert makes it.
+
+m1 (minor) — the `MongoStoreError` funnel now covers the other four doors: `_json_default` raises `SchemaError` (not `TypeError`), `document_size` (and `guard_oversize` through it) and `fingerprint` wrap encode failures — `fingerprint`'s refusal names `collection` + `_id` — and `unwrap_raw` turns a non-decoding `_raw` into a `SchemaError` (the `--rebuild` reachability the critique flagged). `_bson_identity` updated so dedup still never throws. New `test_every_refusal_stays_inside_the_exception_hierarchy` asserts all five doors plus a still-working round trip.
+
+n1 — `_SESSION_KEY_RE` tightened to `^[1-9]\d*-\d+$` so a `slots` document cannot name a sessionKey the `session` grammar can never emit; asserted in `test_bson_type_pins` for `0-1`, `0622-10028`, `-1`, `622`.
+n2 — four GD-24 key fields pinned: `slots.runNode` (string), `agents.spawn` / `runs.harnessTotals` (object, new `_OBJ`), `sessions.sources` (array); asserted in both `COLLECTIONS` and the emitted `$jsonSchema`, with a scalar-`sources` rejection.
+n3 — `_guard_filter` now says a dict precondition is read as a comparison expression and that sub-document equality is unsupported, instead of listing operators at a reader who wanted equality.
+
+Test-side extras found while verifying: pymongo decodes BSON Date as a NAIVE datetime, so `== &lt;aware ts&gt;` in the live arm would have been silently vacuous — added `same_moment()` with that stated.
+
+Verification: `tests/test_refs.py` and `tests/test_mongo_store.py` rc=0 on the ambient interpreter, on a genuinely pymongo-free `venv --without-pip`, and against a live `mongo:7` (R-42 loopback+auth, `touch_test_&lt;pid&gt;`, dropped after; live arm now 30 assertions, all green). Full 12-file suite green on both interpreters (`run_all.sh`: 12 passed, 0 failed). Only the four owned files were touched; no commit was made.</li><li>Test gate PASSED: PASS. Owned suites green: tests/test_refs.py rc=0 (230 checks), tests/test_mongo_store.py rc=0 (313 checks, live arm skipping cleanly with no mongod) and rc=0 again (339 checks) against a real loopback+auth mongo:7 container started per R-42 and removed after. Full-suite regression green (SUITE_RC=0): all four monitoring suites plus test_bootstrap/fixtures/stdlib_only/store/tailer/ws/refs/mongo_store, no new failures. R-43 purity (imports only __future__+re, no clock/env) and R-44 no-pymongo import verified independently by blocking pymongo/bson in sys.meta_path — module imports, pymongo_available() returns False. GD-24/25/26/27/28 asserted against the real server (idempotent ensure_schema, unique {stream:1,seq:1}, TTL refused on read-back, identical fingerprint b8f05eb7 across normal/shuffled/reversed with equal counts, IXSCAN explains, server-side provenance refusal, touch_test_&lt;pid&gt; scoping). Critique-3 blocker M1 is closed: guarded_update has a code-121 arm and the payload-only/lease-renewal shapes now return acquired:False instead of MongoUnavailable, proven live. Ownership clean — only the four owned files have mtimes in the attempt window, git HEAD unchanged at 579446e, no commit.</li><li>Critique REJECTED: REJECTED — 0 blocker, 2 major, 3 minor, 3 nit. Attempt-3's M1 is genuinely fixed (guarded_update no longer rides a precondition on an upsert; both partial shapes return acquired:False, proven against a real $jsonSchema), and m1/n1/n2/n3 are all closed. I re-ran everything independently: both owned suites rc=0 ambient, rc=0 on a pymongo-free venv, full eight-file regression rc=0, and the live arm rc=0 (339 checks) against the running loopback+auth mongo:7. Ownership clean, HEAD still 579446e, no commit, no source edited. MAJOR 1 (mongo_store.py:1442-1458, :1519-1528, :1707-1710): classify_write_errors treats EVERY code-11000 as a tolerated duplicate, so a dup on a secondary unique index is reported as success with errors:[] and the write is lost — reproduced live on slots.{agentId:1} unique sparse (two slots claiming one agentId ⇒ tolerated_dups:1, errors:[], 1 document stored), which this test file itself calls &quot;the conflict signal R-53 renders&quot;; the driver hands over keyPattern and the module discards it. MAJOR 2 (mongo_store.py:320-326 + the $set fence at :1072-1076): sessions.sources is declared accumulable, leaving $addToSet as the only writer, so GD-26's &quot;sources[].present:false, lastSeenTs set by a stat pass&quot; is inexpressible — reproduced: three stat passes over ONE source yield three contradictory array elements and unbounded growth, while $set (the operator mongod accepts, verified) is fenced and $max on a positional path is refused by the memory model; sp-07 owns sessions.py but not mongo_store.py, so it cannot fix the row it will break against. Minors: bulk_upsert/guarded_update are silently sync-only and raise a bare AttributeError outside MongoStoreError when handed GD-21's mandated AsyncMongoClient (reproduced), while the module docstring promises no downstream caller needs a raw handle; validate_update accepts positional array paths that apply_update then refuses (the GD-25 oracle silently stops covering such mappers); the $set fence misses run_nodes.journalSeq and custom_state.fromSeq, which the module's own writers accumulate. Nits: events/custom_state_events ref{} and data{} plus run_nodes.result still carry no bsonType pin (the attempt-3 pin fix stopped three fields short); a normal R-52 late event with full identity inflates tolerated_dups; $addToSet dedup distinguishes 1 from 1.0 where mongod does not (reproduced, not reachable on the frozen corpus). refs.py itself drew no finding.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-refs-mongostore-test-attempt-4.md</summary><pre># sp-refs-mongostore — test gate, attempt 4 — PASS
+
+Read-only gate. Nothing was edited; the only side effect was a throwaway
+`mongo:7` container (`touch-mongo-test`, loopback-published on 127.0.0.1:27018,
+`--auth`), removed at the end of the run.
+
+## 1. Targeted suites (owned files) — GREEN
+
+Run from the repo root, stdlib only, no runner:
+
+| suite | rc | passing checks | skips |
+|---|---|---|---|
+| `python3 tests/test_refs.py` | 0 | 230 | 0 |
+| `python3 tests/test_mongo_store.py` (no mongod, no `TOUCH_MONGO_URI`) | 0 | 313 | 1 — the live arm, skipped cleanly |
+| `TOUCH_MONGO_URI=… python3 tests/test_mongo_store.py` (live `mongo:7`) | 0 | 339 | 0 |
+
+Both no-mongod and live arms are exercised, so the R-56/GD-21 &quot;skips cleanly
+without a reachable mongod&quot; requirement and the real-server behaviour are both
+proven in this attempt rather than assumed.
+
+## 2. Full-suite regression gate — GREEN (`SUITE_RC=0`)
+
+`for t in .claude/shared/monitoring/tests/test_*.py … ; for t in tests/test_*.py …`
+
+- monitoring baseline: `test_server`, `test_watcher`, `test_shell`,
+  `test_frontend` — all rc=0.
+- repo suites: `test_bootstrap` (65), `test_fixtures` (181), `test_stdlib_only`
+  (21, 1 skip), `test_store` (161, 2 skips), `test_tailer` (91), `test_ws`
+  (128), `test_refs` (230), `test_mongo_store` (313) — all rc=0.
+
+No new failures; no baseline failure to discount. The suite was run with **no
+services running** and the live arm off, i.e. the bare-checkout shape the gate
+specifies.
+
+## 3. Item verification
+
+### R-43 (`aggregator/refs.py`)
+- Present, pure: the suite asserts the module imports only `__future__` and
+  `re`, calls nothing that touches the world, and reads neither environment nor
+  clock — a key is a function of its ref (SD-1).
+- GD-24 grammar is cross-checked *against the file-side implementation*, not
+  restated: `ref_key` ≡ `store.cursor_key` on shared shapes, only the first `:`
+  of a stream id is structural, `%`-escaping of `% # | :` verified, zero-padded
+  ints, directory-traversal stream ids rejected on both sides.
+- The seven GD-11 union members are asserted identical in `refs.py` and
+  `store.py` (required/optional key sets *and* classification of the same dict),
+  so drift between the two is a test failure. The GD-14
+  `legacy:&lt;task&gt;:&lt;id8&gt;` exemption is checked on both sides, including the
+  negative (a bare 8-hex agentId is rejected).
+- Non-tautology spot-check: I called `ref_key({'kind':'uuid','sessionId':…,
+  'uuid':…})` by hand and got
+  `RefError: ref kind 'uuid' has unexpected fields ['sessionId']` — the
+  validator really is closed-world, not a pass-through.
+
+### R-44 (`aggregator/mongo_store.py`)
+- Imports with **nothing third-party installed**: verified independently of the
+  suite by blocking `pymongo`/`bson` in `sys.meta_path` — the module imports and
+  `pymongo_available()` returns `False` instead of raising (GD-21 degrade).
+  Module-level imports are only `__future__`, `datetime`, `hashlib`, `json`.
+- GD-24 table: `ensure_schema` creates the collections on a real mongod, is
+  idempotent on a second boot, and the unique `{stream:1,seq:1}` index exists on
+  the server.
+- GD-26: no index carries `expireAfterSeconds` (read back from the server), a
+  hand-added TTL makes the next `ensure_schema` **refuse**, and an AST walk plus
+  string-literal scan proves no delete verb is callable or spellable in the
+  module; `$unset` is absent from the algebra.
+- GD-25 acceptance test: normal / shuffled / reversed ingest into the real
+  mongod produce ONE fingerprint (`b8f05eb7` three times) **and** equal counts
+  (`agents 7, records 1091, run_nodes 16, runs 2, stream_meta 34, usage 328`),
+  with the in-memory model agreeing with the server byte for byte.
+- Index usage: both the `(stream, seq)` cursor query and the zero-padded `_id`
+  range scan are asserted IXSCAN via `explain()`.
+- Oversize: an 8 388 762-byte document becomes a stub that keeps `_id` and key
+  fields and records where the bytes are; the real 877 KB line stores whole.
+- `ts` is always aggregator-supplied: `tsRaw` keeps source spelling, `ts` is a
+  tz-aware ms-resolution datetime, an unparseable `ts` is a loud rejection and
+  there is no `now()` default.
+- GD-28: the server itself refuses a `records` document with no `provenance`.
+- GD-27: the live arm builds `touch_test_&lt;pid&gt;` (`touch_test_66785` this run),
+  asserts the prefix before both the wipe and the drop, and drops only that
+  database; no URI/credential appears in any message.
+
+### Previous round's blocker (critique attempt 3, M1) — closed
+`guarded_update` now has an explicit `DOCUMENT_VALIDATION_FAILED = 121` arm, and
+the live run asserts the exact shape that was broken: the **payload-only**
+custom-state write &quot;loses the guard and SAYS SO against a real `$jsonSchema`,
+instead of reporting the server unreachable&quot;, and the lease-renewal partial
+update returns `acquired:False` on a lost race rather than `MongoUnavailable`
+(which GD-30's breaker would have counted toward taking a healthy mirror down).
+Both are checked against the real server, plus a mocked-`OperationFailure(…,121)`
+arm for the no-pymongo path.
+
+## 4. Ownership
+
+`git log` is unchanged at `579446e` — **no commit was made**, correctly (only
+sp-repo-bootstrap may commit). `aggregator/` and `tests/` are untracked as a
+whole, so ownership was checked by mtime instead: files modified after 23:20 UTC
+are exactly the four owned ones —
+
+```
+23:27:00 aggregator/refs.py
+23:36:01 aggregator/mongo_store.py
+23:32:11 tests/test_refs.py
+23:34:14 tests/test_mongo_store.py
+```
+
+Observation (not a finding, not attributable to this sub-plan):
+`.claude/shared/monitoring/monitoring.md` (23:30) and `monitor.html` (23:40) also
+carry recent mtimes. They are owned by the concurrently running
+sp-watcher-templates-firstwave sub-plan, are absent from this implementer's
+declared change set, and both monitoring suites that guard them
+(`test_shell`, `test_frontend`) are green.
+
+## Verdict
+
+**PASS** — targeted suites green in both mongod-absent and live-mongod arms,
+full suite green with no new failures, R-43/R-44 present and asserted on real
+behaviour, no out-of-scope edits, no commit.
+</pre></details>
+<details><summary>Critique findings — sp-refs-mongostore-critique-attempt-4.md</summary><pre># sp-refs-mongostore — adversarial critique, attempt 4
+
+**Verdict: REJECTED** — 0 blocker, 2 major, 3 minor, 3 nit.
+
+Reviewed (full content; all four files are new in an untracked tree, so there is
+no `git diff` — `git status` shows `?? aggregator/`, `?? tests/`):
+
+- `/home/laniakea/Projects/touch/aggregator/refs.py` (927 lines)
+- `/home/laniakea/Projects/touch/aggregator/mongo_store.py` (1714 lines)
+- `/home/laniakea/Projects/touch/tests/test_refs.py` (528 lines)
+- `/home/laniakea/Projects/touch/tests/test_mongo_store.py` (1635 lines)
+
+Against `plan/touch-mongo-live-subplans.md` §`sp-05 — refs-mongostore`;
+amendment items **R-43**, **R-44**, **GD-21…GD-30**; base plan **GD-11/GD-15**;
+shared decisions **SD-1, SD-2, SD-11**.
+
+## What I re-ran rather than trusted
+
+- Both owned suites on the ambient interpreter: `tests/test_refs.py` rc=0
+  (230 checks), `tests/test_mongo_store.py` rc=0 (313 checks, live arm skipping
+  cleanly).
+- Both suites on a genuinely pymongo-free interpreter
+  (`python3 -m venv --without-pip`, `import pymongo` → `ModuleNotFoundError`):
+  rc=0 and rc=0. GD-21 holds at import *and* call granularity.
+- Full regression, all eight files: `test_bootstrap` 65 ok, `test_fixtures` 181,
+  `test_stdlib_only` 21, `test_store` 161, `test_tailer` 91, `test_ws` 128,
+  `test_refs` 230, `test_mongo_store` 313 — 0 failures anywhere.
+- The live arm against the running `mongo:7` (`127.0.0.1:27117`,
+  `authSource=admin`, R-42 recipe): rc=0, 339 checks, `touch_test_67708`
+  constructed and dropped.
+- Four independent probes of my own against the same mongod, in
+  `touch_test_probe_&lt;pid&gt;` databases I constructed and dropped (M1, M2, m2, n3
+  below are each reproduced output, not reasoning).
+
+**Attempt-3's findings are genuinely closed.** M1 is fixed at the level it was
+made: `guarded_update` no longer rides a precondition on an `upsert=True`
+`update_one`; it does the conditional update with `upsert=False`, and only
+attempts a create when `apply_update(None, update)` alone satisfies
+`spec.required`. Both of GD-29's partial shapes now return `acquired:False`
+instead of `MongoUnavailable`, and both are asserted **against the real
+validator** (`_live_checks:1534-1552` for the lease renewal, `:1568-1575` for
+the payload-only head). The `Recorder` stub answers both round trips now, so the
+suite can see the second one. m1 is closed at all four sites (`document_size`,
+`guard_oversize`, `fingerprint`/`_json_default`, `unwrap_raw`) and pinned by
+`test_every_refusal_stays_inside_the_exception_hierarchy`. n1 (`^[1-9]\d*-\d+$`),
+n2 (the four missing bsonType pins) and n3 (the guard-message rewrite) are all
+in, each with an assertion.
+
+Ownership is clean: only the four owned files carry mtimes in this attempt's
+window (`refs.py` 23:27, `test_refs.py` 23:32, `test_mongo_store.py` 23:34,
+`mongo_store.py` 23:36); `store.py`/`tailer.py`/`ws.py`/`__init__.py` and the
+other suites are older. `git rev-parse HEAD` is still `579446e` — no commit,
+correctly. `grep -rE 'mongodb(\+srv)?://' aggregator/` is empty. No source file
+was modified during this review.
+
+The two majors below are both things a green run cannot show, because in both
+cases the suite exercises the one call shape that happens to work.
+
+---
+
+## MAJOR
+
+### M1 — a duplicate key on a **secondary** unique index is counted as a tolerated dup, so a lost write is reported as success with `errors: []`
+
+`aggregator/mongo_store.py:1442-1458` (`classify_write_errors`), `:1519-1528`
+(`bulk_upsert`'s `BulkWriteError` arm), `:1707-1710` (`guarded_update`'s
+`DuplicateKeyError` arm), `:1583-1586` (`_guard_lost`).
+
+`classify_write_errors` splits on the code alone:
+
+```python
+    if item.get(&quot;code&quot;) == DUPLICATE_KEY:
+        tolerated += 1
+```
+
+Every 11000 is therefore &quot;healthy replay or two writers racing one stream&quot;
+(GD-29's two cases). But GD-24's table declares **three** unique indexes, and
+only one of them is `_id`:
+
+- `events` `{stream:1, seq:1}` unique — a dup here really *is* GD-29's case;
+- `slots` `{agentId:1}` **unique sparse** — a dup here is R-53's *conflict*: two
+  different slots claiming one agentId. The document is **not written**, and the
+  caller is told `tolerated_dups: 1, errors: []`.
+
+Reproduced live, in a database I constructed, against the schema
+`ensure_schema` itself installs:
+
+```
+first  slot: {'matched': 0, 'upserted': 1, 'modified': 0, 'tolerated_dups': 0, 'errors': []}
+second slot (SAME agentId, unique sparse index):
+             {'matched': 0, 'upserted': 0, 'modified': 0, 'tolerated_dups': 1, 'errors': []}
+docs in slots: 1
+
+raw writeError code: 11000 keyPattern: {'agentId': 1}
+errmsg: E11000 duplicate key error collection: …slots index: agentId_1 dup key: { agentId: &quot;a2fc883c96ff7b837&quot; }
+
+guarded_update secondary-unique conflict:
+             {'matched': 0, 'upserted': 0, 'modified': 0, 'acquired': False, 'tolerated_dups': 1}
+```
+
+The driver hands the module `keyPattern: {'agentId': 1}` and the module throws
+it away — `tolerated` is an `int`, so even a caller that wanted to distinguish
+cannot: there is no per-item detail on the tolerated side at all, unlike
+`errors`.
+
+**Why this is R-44's problem and not sp-13's.** R-44's approach line is
+&quot;`writeErrors` of unordered bulks ALWAYS inspected and surfaced&quot;, and GD-29 is
+explicit that a duplicate key is &quot;counted and returned, never swallowed&quot;. Here
+it is counted under the wrong meaning and the write it lost is surfaced nowhere.
+This file's own test says so out loud —
+`test_indexes_and_the_no_ttl_law:258-261`:
+
+&gt; &quot;slots.agentId is unique AND sparse — a DuplicateKeyError there **is the
+&gt; conflict signal R-53 renders**, not a crash&quot;
+
+R-53 will be handed `tolerated_dups: 1` and nothing to render. Worse, GD-29's
+diagnostic rule (&quot;a nonzero steady state means a second writer or a key bug&quot;) is
+inverted: the number now also moves on ordinary slot-binding conflicts, which
+R-53 calls normal-and-renderable.
+
+**Fix.** Split on the violated index, not on the code. The information is in the
+error item on both paths:
+
+```python
+def _is_id_dup(item):
+    &quot;&quot;&quot;A dup on `_id` (or on a stream identity index) is GD-29's tolerated case.
+    A dup on any OTHER unique index means the document was REJECTED and the
+    conflict is data — R-53's slots.agentId binding above all.&quot;&quot;&quot;
+    pattern = item.get(&quot;keyPattern&quot;) or {}
+    return list(pattern) in ([&quot;_id&quot;], [&quot;stream&quot;, &quot;seq&quot;])
+
+
+def classify_write_errors(error):
+    details = getattr(error, &quot;details&quot;, None) or {}
+    tolerated, conflicts, fatal = [], [], []
+    for item in details.get(&quot;writeErrors&quot;) or []:
+        if item.get(&quot;code&quot;) != DUPLICATE_KEY:
+            fatal.append(item)
+        elif _is_id_dup(item):
+            tolerated.append(item)
+        else:
+            conflicts.append(item)          # a write that did NOT happen
+    return tolerated, conflicts, fatal
+```
+
+…returning `{&quot;tolerated_dups&quot;: len(tolerated), &quot;tolerated&quot;: tolerated,
+&quot;conflicts&quot;: conflicts, &quot;errors&quot;: fatal}` from `bulk_upsert`, and in
+`guarded_update` re-raising (or reporting as a `conflicts` entry) a
+`DuplicateKeyError` whose `details[&quot;keyPattern&quot;]` is not `_id` — `acquired:False`
+there currently means &quot;the guard lost&quot;, and &quot;another slot owns this agentId&quot; is
+not that.
+
+Add the arm to `_live_checks` next to the existing `(stream, seq)` one, since
+the existing one is precisely the index for which the current behaviour is
+right:
+
+```python
+    dup = ms.bulk_upsert(db, &quot;slots&quot;, [(other_slot_key, same_agent_binding)])
+    check(dup[&quot;conflicts&quot;] and not dup[&quot;tolerated_dups&quot;],
+          &quot;two slots claiming ONE agentId is R-53's conflict, not a replay duplicate — &quot;
+          &quot;the write did not happen and the caller is told which index refused it&quot;)
+```
+
+### M2 — GD-26's `sources[].present:false` cannot be written through this table at all, and `$addToSet` grows the array by one element per stat pass
+
+`aggregator/mongo_store.py:320-326` (`sessions` row: `sources` in both
+`set_fields` and `accumulable`), `:1072-1076` (the `$set` fence), `:1131-1159`
+(`_set_path`).
+
+GD-26 is normative and specific:
+
+&gt; **Source disappearance is a field, never a removal:** `sources[].present:false,
+&gt; lastSeenTs` **set by a stat pass** — the same three-state derived-archive-label
+&gt; vocabulary GD-14 already mandates.
+
+`sources` is declared `accumulable`, so `$set` on it — or on any path under it —
+is refused, and `$addToSet` is the only operator left. Three stat passes over
+**one** source (measured, in-memory model):
+
+```
+sources after 3 stat passes:
+    {'path': '/a/b.jsonl', 'present': True,  'lastSeenTs': 'T1'}
+    {'path': '/a/b.jsonl', 'present': True,  'lastSeenTs': 'T2'}
+    {'path': '/a/b.jsonl', 'present': False, 'lastSeenTs': 'T3'}
+```
+
+One source, three elements, and a reader that has to decide which of two
+mutually contradictory `present` values is current — with no ordering guarantee,
+which is the whole reason `$addToSet` was chosen. It grows without bound at the
+stat pass's frequency (GD-30's budget lives one document away).
+
+Every other operator is closed to it:
+
+```
+$set  sources.0.present -&gt; REFUSED: OperatorError: $set on accumulable field
+                           'sources.0.present' of sessions
+$max  sources.0.present -&gt; validate_update ACCEPTS
+                           apply_update REFUSES: cannot create field '0' in element
+                           'sources': it holds a list, not a sub-document
+$set  sources (whole)   -&gt; REFUSED: OperatorError: $set on accumulable field 'sources'
+```
+
+…while mongod accepts the write the module refuses:
+
+```
+server after $max on sources.0.present: [{'path': '/a/b.jsonl', 'present': True}]   # no-op: False &lt; True
+server after $set on sources.0.present: [{'path': '/a/b.jsonl', 'present': False}]  # works
+```
+
+So the one operator that does the job on the server is the one this table fences
+off, and the fenced-off decision belongs to **this** sub-plan. sp-07 owns
+`sessions.py` and not `mongo_store.py` (GD-15), so it cannot fix the row it will
+break against — the same &quot;the failure surfaces in the *next* sub-plan rather
+than in the one that owns the table&quot; hazard `CollectionSpec`'s own docstring
+(`:200-237`) argues against for `id_kind`.
+
+**Fix** (either is cheap; the first keeps `$addToSet` honest):
+
+1. Keep `sources` as an `$addToSet` set of **immutable identities** (path
+   strings, or `{path}` only) and give the mutable per-source state its own
+   keyed sub-document, which the existing dotted-path machinery already handles
+   (it is `agents.spawn`'s shape):
+
+```python
+        types={..., &quot;sources&quot;: _ARRAY, &quot;sourceState&quot;: _OBJ},
+        set_fields=(&quot;sessionIds&quot;, &quot;slugs&quot;, &quot;sources&quot;),
+        accumulable=(&quot;firstTs&quot;, &quot;lastTs&quot;, &quot;sessionIds&quot;, &quot;slugs&quot;, &quot;sources&quot;),
+        note=&quot;… GD-26's sources[].present/lastSeenTs live in sourceState.&lt;escaped path&gt;, &quot;
+             &quot;which a stat pass writes with $set/$max; the sources set itself is immutable &quot;
+             &quot;identities, because $addToSet cannot revise an element it already holds&quot;,
+```
+
+2. Or drop `sources` from `accumulable` and state in the row's `note` that the
+   stat pass rewrites the whole array with `$set` (idempotent because the pass
+   recomputes it from `stat()`, not from the stored value) — weaker, but it is
+   at least expressible.
+
+Whichever is chosen, add the assertion that would have caught it:
+
+```python
+    state = {}
+    for present, ts in ((True, &quot;T1&quot;), (True, &quot;T2&quot;), (False, &quot;T3&quot;)):
+        apply_operations(state, [(&quot;sessions&quot;, key, &lt;the stat-pass op&gt;)])
+    doc = state[&quot;sessions&quot;][key]
+    check(&lt;exactly one entry for /a/b.jsonl, present False&gt;,
+          &quot;a source that disappeared reads as absent ONCE, not as three contradictory &quot;
+          &quot;elements that grow by one per stat pass (GD-26)&quot;)
+```
+
+---
+
+## MINOR
+
+### m1 — the two write shapes are silently sync-only, so GD-21's mandated `AsyncMongoClient` breaks them **outside** the `MongoStoreError` hierarchy
+
+`aggregator/mongo_store.py:36-41` (the module docstring's promise), `:1516-1518`
+(`bulk_write`), `:1674` / `:1685` / `:1706` (`update_one`/`insert_one`).
+
+The module docstring says:
+
+&gt; **The two write shapes** — `bulk_upsert` … and `guarded_update` … Both apply
+&gt; the same guards, so **no caller downstream has a reason to reach for a raw
+&gt; collection handle** — which is how a mapper would acquire the ability to invent
+&gt; a collection or an `_id` after all.
+
+GD-21 fixes the live driver: &quot;**pymongo's async API (`AsyncMongoClient`)** inside
+the one asyncio process&quot;. Handed one, both shapes fail, and not in the hierarchy
+the drainer is documented to catch (`:1485-1490`, `test_every_refusal_…`):
+
+```
+bulk_upsert    with AsyncMongoClient RAISED AttributeError: 'coroutine' object has no attribute 'matched_count'
+  is MongoStoreError? False
+guarded_update with AsyncMongoClient RAISED AttributeError: 'coroutine' object has no attribute 'upserted_id'
+  is MongoStoreError? False
+```
+
+`open_client` says &quot;**synchronous** … for schema bootstrap, rebuild tooling and
+tests&quot; (`:1366-1374`), and that is honest — but nothing says it about the two
+functions the docstring points `mirror.py` at, and their own docstrings name
+`mirror.py` as the caller (`:1481-1483`). It fails loudly rather than silently,
+so it is not a major; it does mean sp-06 either wraps every call in
+`asyncio.to_thread` (legal under GD-21 only &quot;if the async API is unusable&quot;) or
+reaches for the raw handle this docstring says it must not.
+
+**Fix.** State the contract where it is made, and pick one:
+
+```python
+    Driver mode: this function is **synchronous** — it is `bulk_write` on a
+    sync `Collection`. GD-21 puts the live path on `AsyncMongoClient`, so
+    `mirror.py`'s drainer either awaits an async twin (`bulk_upsert_async`,
+    identical guards, `await handle.bulk_write(...)`) or calls this one inside
+    `asyncio.to_thread` with a sync client. Handing an `AsyncMongoClient` to
+    THIS function returns un-awaited coroutines and fails as an AttributeError,
+    outside MongoStoreError.
+```
+
+An async twin is ~15 lines and keeps the &quot;no raw handle downstream&quot; promise
+true; a documented `to_thread` contract keeps it honest. Silence is the only
+answer that is wrong.
+
+### m2 — `validate_update` accepts positional array paths that `apply_update` then refuses, so the two halves of one write path disagree
+
+`aggregator/mongo_store.py:1018-1084` vs `:1131-1159`.
+
+`validate_update({&quot;$max&quot;: {&quot;sources.0.present&quot;: False}}, &quot;sessions&quot;)` passes;
+`apply_update` on a document whose `sources` is a list raises `OperatorError`
+(&quot;cannot create field '0' in element 'sources': it holds a list&quot;). mongod accepts
+the write (verified above). The direction is the safe one by `_set_path`'s own
+rule — the model is *more restrictive* than the server, not more permissive —
+but the split means `bulk_upsert` will send to the wire an update that
+`apply_operations` cannot replay, so `--rebuild`'s comparison (R-45) and the
+GD-25 oracle silently stop covering any mapper that uses a positional path.
+
+**Fix.** Decide once, in `validate_update`: either refuse a path component that
+is all digits (&quot;positional array paths are not part of the algebra: the memory
+model is the GD-25 oracle and cannot replay one&quot;), or teach `_set_path`/
+`_get_path` to index a list. Refusing is the smaller change and matches the
+module's stance elsewhere.
+
+### m3 — the `$set` fence has holes on two fields the module's own writers accumulate
+
+`aggregator/mongo_store.py:380-390` (`run_nodes`, `accumulable=(&quot;startedAt&quot;,
+&quot;endedAt&quot;)`), `:442-454` (`custom_state`, `accumulable=(&quot;seq&quot;,)`).
+
+`run_nodes.journalSeq` is written with `$min` by this suite's own mapper
+(`tests/test_mongo_store.py:962`) precisely because &quot;the `started` line (always
+the earlier one) wins whichever operation happens to insert the document&quot;
+(`:943-947`) — that is the definition of an accumulable, and `$set` on it is
+accepted today. `custom_state.fromSeq` is the same shape one collection over:
+GD-24 gives the head `derived:true, fromSeq`, and a head whose `seq` advances by
+`$max` while `fromSeq` is `$set` is write-order dependent in exactly the way the
+row's own `note` says it must not be.
+
+**Fix.** `accumulable=(&quot;startedAt&quot;, &quot;endedAt&quot;, &quot;journalSeq&quot;)` and
+`accumulable=(&quot;seq&quot;, &quot;fromSeq&quot;)`, with one assertion each in
+`test_forbidden_operators`:
+
+```python
+    check(raises(OperatorError, validate_update, op_set({&quot;journalSeq&quot;: 3}), &quot;run_nodes&quot;),
+          &quot;journalSeq is a $min — the earlier journal line wins whichever operation &quot;
+          &quot;inserts the node, which is what makes the shuffled pass agree&quot;)
+```
+
+---
+
+## NIT
+
+### n1 — the attempt-3 pin fix stopped three fields short
+
+`aggregator/mongo_store.py:402-416` (`events`), `:431-441`
+(`custom_state_events`), `:380-390` (`run_nodes`).
+
+GD-24's table names `ref{}` and `data{}` on `events`, `ref{}` and
+`data.custom{}` on `custom_state_events`, and `result` on `run_nodes` — the same
+`{}`-shaped key fields that earned `spawn`, `harnessTotals` and `sources` their
+pins last round. None of the three carries one, so the container type is
+unenforced on the server while its declared `raw_paths` assume it is a
+sub-document. Add `{&quot;ref&quot;: _OBJ, &quot;data&quot;: _OBJ}` to the two event rows and
+`{&quot;result&quot;: _OBJ}` to `run_nodes` (members stay open, per `json_schema`'s
+open-tail rule), and extend the loop at `tests/test_mongo_store.py:197-205`.
+
+### n2 — a normal R-52 late event inflates the number GD-29 reads as &quot;a second writer or a key bug&quot;
+
+`aggregator/mongo_store.py:1707-1710`.
+
+When the guard loses to a head that already exists **and** the update happens to
+carry the full identity, the create is attempted and comes back a duplicate key,
+counted. That is the shape `_live_checks:1558-1563` sends twice in a loop, so a
+steady stream of late custom-state events produces a steady stream of tolerated
+dups on a perfectly healthy single writer. The payload-only shape (the one R-52
+actually describes) correctly returns `_guard_lost(0)`, so the exposure is
+narrow — but the counter's documented meaning is &quot;a burst at startup is healthy,
+a nonzero steady state means a second writer or a key bug&quot;, and this is neither.
+Either skip the create when `update_one` already proved the guard was evaluated
+against an existing document (a `find_one({&quot;_id&quot;: key}, {&quot;_id&quot;: 1})` is one more
+round trip and settles it), or say in the docstring that a guard lost to an
+existing document counts a dup by design.
+
+### n3 — `$addToSet` dedup distinguishes `1` from `1.0`; mongod does not
+
+`aggregator/mongo_store.py:1267-1288` (`_bson_text` / `_bson_identity`),
+`:1198-1211`.
+
+```
+server fragments: [{'n': 1}]
+memory fragments: [{'n': 1}, {'n': 1.0}]
+```
+
+BSON equality compares numbers across int/double; `_bson_text` compares their
+JSON spellings. This is the direction `_set_path`'s docstring calls a defect —
+&quot;a model MORE permissive than the server it is the oracle for … would certify a
+fingerprint no mongod can reproduce&quot; — and it is reachable in principle wherever
+a harness JSON value is sometimes `1` and sometimes `1.0` inside a set field
+(`fragments`, `sources`). It does not occur on the frozen corpus (the live arm's
+fingerprint matches the server byte for byte), which is why this is a nit and not
+more. Normalize integral floats in `_bson_identity`, or state the limit in the
+docstring.
+
+---
+
+## Checks that came back clean
+
+- **GD-21** — `refs.py` imports `{__future__, re}` only (AST-asserted, plus a
+  banned-call and no-clock walk); every `pymongo` import in `mongo_store.py` is
+  inside a function body, re-derived through `test_stdlib_only.imports_of` so the
+  two guards cannot rot apart. Both suites rc=0 on a `venv --without-pip`
+  interpreter, and `test_the_pure_path_works_with_pymongo_unimportable` blocks
+  the import on `sys.meta_path` (restored in a `finally`) so the arm runs on a
+  pymongo-having machine too. `CLIENT_OPTIONS` is GD-21's
+  500/500/2000/retryWrites verbatim and an override does not mutate it.
+- **GD-22 / GD-30** — no module-level client, no runtime state, no clock (AST
+  guard on `now`/`utcnow`/`time`/`monotonic`); nothing here can block a poll
+  loop. (m1 above is about *which* client, not about blocking.)
+- **GD-24** — all 15 rows, re-derived row by row against the plan text: `_id`
+  grammars, padding widths, index sets. `sessions` is a real tagged union with
+  both arms round-tripped through `check_id`/`validate_document`/
+  `apply_operations`; `refs.collection_of(kind)` ↔ `COLLECTIONS[…].id_kinds` is
+  asserted bidirectionally. Escaping is exact on the hard cases: `run:a:b` keeps
+  its first colon structural, `a:b` and `a%3Ab` stay distinct, a `custom_state`
+  `_id` over an `events` refId splits at the right `#`, `legacyplan:t|p||` keeps
+  fixed arity, and `ref_key == store.cursor_key` byte for byte on five stream
+  shapes. The uppercase-hex rejection now covers the whole uuid family.
+- **GD-25** — `$inc`/`$push`/`$pull`/`$pop`/`$unset`/`$rename`/`$bit`/
+  `$currentDate` each refused with a named reason; a typo'd collection raises
+  rather than disabling the fence; deltas appear nowhere. The acceptance test is
+  non-vacuous in both halves: the retry journal is in the corpus,
+  `{0,1} &lt;= ordinals`, `9 nodes over 6 keys`, `expected_counts` derives
+  `run_nodes`/`runs` from the journals without calling `journal_ops`, and the two
+  negative arms genuinely fail. BSON type ranking is correct (bool 8 ahead of int
+  2, dates 9) and `$addToSet` dedupes on field-order-sensitive identity (modulo
+  n3).
+- **GD-26** — `index_def` refuses `expireAfterSeconds` structurally;
+  `ensure_schema` reads the server's indexes back and refuses a hand-added TTL
+  (re-confirmed live); the AST walk plus the string-literal scan means no delete
+  verb is callable *or* spellable in the module. (M2 is about the `sources`
+  clause of the same GD, not about deletes.)
+- **GD-27** — `grep -rE 'mongodb(\+srv)?://' aggregator/` empty; no host, port
+  or credential anywhere; the live arm takes its URI from `TOUCH_MONGO_URI`,
+  constructs `touch_test_&lt;pid&gt;`, asserts the prefix immediately above both the
+  per-collection wipe and the drop, and no skip or error message echoes the URI.
+- **GD-28** — `provenance` is appended in `CollectionSpec.__init__` so a new row
+  cannot forget it, projected into the server's `required` (proven server-side:
+  mongod refuses a `records` document without one), enum-pinned per row,
+  `legacy_events` refuses `harness` and admits `unknown`, `events` keeps the full
+  five, and the two exempt rows say why in their `note=`.
+- **GD-29 (lease half)** — the writer lease is exercised against the real server
+  through all four states (acquire-on-create, contended, lapsed takeover,
+  partial renewal) and the loser writes nothing. The module holds no client and
+  no lease state. (M1 is about the *other* meaning of a duplicate key.)
+- **GD-15 / ownership / no-commit** — only the four owned files have mtimes in
+  the attempt window; `git rev-parse HEAD` unchanged at `579446e`; no commit.
+- **Regression** — all eight suites rc=0, no new failures.
+
+## Bottom line
+
+R-43 is done and I have no finding against `refs.py` beyond the shared oracle
+nits. R-44 is close: attempt-3's M1 is properly fixed and proven against a real
+validator, and the whole GD-25 acceptance apparatus is the real thing.
+
+Two things still stand between this and approval, and both are cases where the
+suite drives the one shape that works. **M1**: every 11000 is called a tolerated
+duplicate, so `slots.agentId` — a unique index this table declares and this
+test file calls &quot;the conflict signal R-53 renders&quot; — loses its write and reports
+success. **M2**: `sources` is fenced as accumulable, which leaves `$addToSet` as
+the only writer and makes GD-26's `sources[].present:false` unwritable, with the
+array growing one element per stat pass in the meantime; sp-07 will meet that
+wall in a file it does not own. Fix those two (each is a small, local change with
+one assertion), and take m1–m3 in the same pass — m1 in particular is a
+one-paragraph docstring that decides how sp-06 is allowed to call this module.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

@@ -1,0 +1,571 @@
+<title>sp-custom-state — cycle 1</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-custom-state — implement→test→critique, attempt 1/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Implemented sp-custom-state (R-52 + R-53) in the four owned files; both new test files pass in the pure arm and against a real mongod.
+
+NEW `aggregator/custom_state.py` (~1780 lines, stdlib-only, no driver import — three halves like the other entity modules):
+- WAL-first (R-52). `Writer` appends to `.touch/custom-state.jsonl` through `store.py`'s existing append machinery; `store.py` is untouched (asserted by a test). R-52's rules run before a byte reaches the file: closed 8-kind list, refId validation, the annotation cap, the provenance door.
+- `custom_state_events` is insert-only (`map_custom_state` emits `$setOnInsert` and nothing else); `custom_state` is the head, `_id = &lt;refId&gt;#&lt;stateKey&gt;`, `$max` on `seq` with the payload behind `require={&quot;seq&quot;:{&quot;$lt&quot;:newSeq}}`. `replay()` and `rebuild_heads()` are order-independent; `apply_guarded()` is the in-memory twin of `mongo_store.guarded_update`, so rebuild and every test run with no database.
+- ONE events + ONE head collection installation-wide, kind-discriminated (CUSTOMSTATE-17). Deletes are tombstone events; no delete verb appears in the module (static guard).
+- Provenance pinned `{asserted, touch}` at three layers; a test walks the module AST and asserts every provenance literal is inside the enums.
+- Annotations: `author:&quot;local&quot;` literal, own 16 KB cap that raises `PayloadTooLarge` with `.status = 413` rather than truncating; machine payloads are not capped.
+- Slots (R-53): `slot:&lt;sessionKey&gt;|&lt;root&gt;|&lt;name&gt;|&lt;attempt:03d&gt;`, `pending|bound|orphaned|conflict` with `pendingSince`, monotone `RESOLUTION_RANK` so every advance is guarded and replay order cannot demote. `SlotTable` carries the unique sparse `agentId` index in memory; `bind_slot(db, …)` is the driver path.
+- SD-8: control ingest reads `TOUCH_CONTROL_PATHS`, records `pathSource`, and never restates the control-file path (a test greps for that).
+- Registers `MIRROR_MAPPERS = {customState, slot}` and the matching `MIRROR_SOURCES`; `mirror.discover_mappers`/`iter_sources` pick both up with no kind collision.
+
+TWO DOCUMENTED DECISIONS worth the reviewer's attention:
+1. **refId widening for `topology`.** R-52 restricts a custom-state refId to the agents/run_nodes/slots grammars, but sp-10's handoff binds a topology head to `refId = refs.run_key(runId)` (`agents.topology_index` joins on that and nothing else). Refusing it would leave every run silently on the &quot;absent topology&quot; arm forever, so `REF_KINDS_BY_KIND` widens that one kind, in one table entry, documented in the module docstring and asserted in `test_an_unknown_refid_is_rejected`.
+2. **`claim_op` exists because of a real integration defect the live arm found.** `mongo_store.guarded_update` funnels every driver error on its *guarded* path into `MongoUnavailable`, carving out only validation code 121 — so a duplicate key on the unique sparse `agentId` index arrives as &quot;the database is gone&quot;, propagates out of the tick and would trip GD-30's breaker. Verified against mongod 7 (the first live run raised `MongoUnavailable: E11000`). R-53 requires the collision to never raise, so the one index-touching write is isolated in `claim_op` and driven through `bulk_upsert`, the only write API here that answers a duplicate key with `tolerated_dups`. **Handoff to whoever owns `aggregator/mongo_store.py` (sp-05): carving code 11000 out of `_driver_error`'s guarded path, the way 121 is carved out, would let the whole bind go back through `guarded_update` in one call.** Not done here — that file is not this sub-plan's.
+
+TESTS — `tests/test_custom_state.py` (17 tests) and `tests/test_slots.py` (12 tests), each a standalone executable, both green. Every R-52/R-53 clause has its own test (3 out-of-order writes ⇒ head at highest seq and 3 log rows; unknown refId rejected; Mongo wipe + WAL replay identical; drop-and-rebuild document-for-document equal; no code path to a mirrored-fact provenance; 413 not truncation; pending→bound; duplicate bind ⇒ conflict with both ids and the process alive; same-named roots in two sessions do not cross-link; markerless ⇒ orphaned after TTL and at a run terminal). Live mongod arms (R-42 loopback+auth recipe) prove the head guard and the tolerated duplicate key against mongod 7 and skip cleanly without `TOUCH_MONGO_URI`; I ran them against a throwaway container on port 27021 and removed the container and its volume afterwards, leaving the sp05/sp06 containers alone.
+
+`.claude/skills/touch-orchestrate/SKILL.md` — ONLY the :52-56 ledger-line amendment: the JSON gains `root` and `sessionKey` (`&lt;pid&gt;-&lt;procStart&gt;`, field 22 of `/proc/&lt;pid&gt;/stat` as a string), with the reason (two sessions picking the same `ROOT_NAME` from near-identical task names would key the same slot) and the pre-amendment fallback (`sessionKeySource:&quot;path&quot;`). `test_the_ledger_line_carries_root_and_sessionkey` asserts the file and the ingest cannot drift apart.
+
+REGRESSION CHECK: `tests/run_all.sh --keep-going` → 20 passed, 2 failed (`test_mirror.py` 3 checks, `test_sessions.py` 1 check). Both failures reproduce byte-identically with my module removed from the tree — they are the two prior loops that closed RED, and this sub-plan adds none.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites 100% green: tests/test_custom_state.py (rc 0, 135 ok) and tests/test_slots.py (rc 0, 94 ok). Both live-mongod arms were actually exercised, not just skipped — a fresh authenticated mongo:7 was stood up per the R-42 loopback recipe on 127.0.0.1:27317, both suites re-run green (real {seq:{$lt:n}} head guard; real DuplicateKeyError→conflict on the unique sparse agentId index), container+volume removed after. No-mongod arm still skips cleanly with rc 0; test_stdlib_only green and custom_state.py imports no driver. Full suite 20/22 pass; the 2 failures (tests/test_mirror.py FAILED(3), tests/test_sessions.py FAILED(1)) are the recorded pre-existing baseline from sp-mirror-deploy/sp-sessions-arm — proven not merely assumed: the tree was copied to scratchpad, sp-11's three files deleted, and both suites reproduced identical failure strings. Every R-52/R-53 clause maps to a named assertion; 4 mutation probes (drop seq guard, widen 16KB cap, raise on duplicate key, neuter validate_ref_id) — 3 of 4 caught, confirming non-tautological tests. SKILL.md diff is +13/-1 confined to the :52-56 ledger-line amendment. Ownership clean (only .claude/skills/touch-orchestrate/SKILL.md newly modified in git; mtimes confirm only the 4 owned files written), no commits, HEAD still 579446e. Two non-blocking notes: the 16 KB constant's value is unpinned (test derives its payload from ANNOTATION_LIMIT, so widening it stays green — suggest one check on the literal), and the two new test files lack the +x bit the rest of tests/ carries.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 4 major, 5 minor, 4 nits. The algebra half is sound (GD-21/24/25/26/28/29 all verified, keys round-trip, shuffle-invariant, dup-key isolated into claim_op, ownership clean). The foreign-file reading half is not. M1: read_control_file requires `root` on every line and derives sessionKey from the path, so it ingests ZERO lines of the only control format that exists — reproduced against a literal SKILL.md-shaped `.touch/control.jsonl`, result `[]` — while its own docstring claims it parses exactly those two shapes; the test feeds hand-built lines carrying `root`, a fixture written to the implementation rather than the documented input. M2: both foreign readers drop lines silently with no counters, while `:1713` and `:134` both claim &quot;the caller's counters say how many&quot; — this is what makes M1 invisible in production. M3: `attempt` defaults to 1 three lines above the comment &quot;a fabricated address is worse than none&quot;, and SKILL.md:95 makes re-runs attempt+1, so a stop intent binds to a stale attempt-1 slot (verified: refId `slot:700-11|auth|auth_impl1|001`); the ledger reader correctly skips the same field. M4: nothing in aggregator/ calls head_write/bind_slot/SlotTable/replay — mirror discovers only MIRROR_MAPPERS/MIRROR_SOURCES — so `custom_state` heads are never written and slots never leave `pending` in production, leaving agents.topology_index permanently empty (the failure the topology widening exists to prevent), and no handoff names the owner the way the topology case names sp-10.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 2/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Implemented sp-custom-state (R-52 + R-53) in the four owned files; both new test files pass in the pure arm and against a real mongod.
+
+NEW `aggregator/custom_state.py` (~1780 lines, stdlib-only, no driver import — three halves like the other entity modules):
+- WAL-first (R-52). `Writer` appends to `.touch/custom-state.jsonl` through `store.py`'s existing append machinery; `store.py` is untouched (asserted by a test). R-52's rules run before a byte reaches the file: closed 8-kind list, refId validation, the annotation cap, the provenance door.
+- `custom_state_events` is insert-only (`map_custom_state` emits `$setOnInsert` and nothing else); `custom_state` is the head, `_id = &lt;refId&gt;#&lt;stateKey&gt;`, `$max` on `seq` with the payload behind `require={&quot;seq&quot;:{&quot;$lt&quot;:newSeq}}`. `replay()` and `rebuild_heads()` are order-independent; `apply_guarded()` is the in-memory twin of `mongo_store.guarded_update`, so rebuild and every test run with no database.
+- ONE events + ONE head collection installation-wide, kind-discriminated (CUSTOMSTATE-17). Deletes are tombstone events; no delete verb appears in the module (static guard).
+- Provenance pinned `{asserted, touch}` at three layers; a test walks the module AST and asserts every provenance literal is inside the enums.
+- Annotations: `author:&quot;local&quot;` literal, own 16 KB cap that raises `PayloadTooLarge` with `.status = 413` rather than truncating; machine payloads are not capped.
+- Slots (R-53): `slot:&lt;sessionKey&gt;|&lt;root&gt;|&lt;name&gt;|&lt;attempt:03d&gt;`, `pending|bound|orphaned|conflict` with `pendingSince`, monotone `RESOLUTION_RANK` so every advance is guarded and replay order cannot demote. `SlotTable` carries the unique sparse `agentId` index in memory; `bind_slot(db, …)` is the driver path.
+- SD-8: control ingest reads `TOUCH_CONTROL_PATHS`, records `pathSource`, and never restates the control-file path (a test greps for that).
+- Registers `MIRROR_MAPPERS = {customState, slot}` and the matching `MIRROR_SOURCES`; `mirror.discover_mappers`/`iter_sources` pick both up with no kind collision.
+
+TWO DOCUMENTED DECISIONS worth the reviewer's attention:
+1. **refId widening for `topology`.** R-52 restricts a custom-state refId to the agents/run_nodes/slots grammars, but sp-10's handoff binds a topology head to `refId = refs.run_key(runId)` (`agents.topology_index` joins on that and nothing else). Refusing it would leave every run silently on the &quot;absent topology&quot; arm forever, so `REF_KINDS_BY_KIND` widens that one kind, in one table entry, documented in the module docstring and asserted in `test_an_unknown_refid_is_rejected`.
+2. **`claim_op` exists because of a real integration defect the live arm found.** `mongo_store.guarded_update` funnels every driver error on its *guarded* path into `MongoUnavailable`, carving out only validation code 121 — so a duplicate key on the unique sparse `agentId` index arrives as &quot;the database is gone&quot;, propagates out of the tick and would trip GD-30's breaker. Verified against mongod 7 (the first live run raised `MongoUnavailable: E11000`). R-53 requires the collision to never raise, so the one index-touching write is isolated in `claim_op` and driven through `bulk_upsert`, the only write API here that answers a duplicate key with `tolerated_dups`. **Handoff to whoever owns `aggregator/mongo_store.py` (sp-05): carving code 11000 out of `_driver_error`'s guarded path, the way 121 is carved out, would let the whole bind go back through `guarded_update` in one call.** Not done here — that file is not this sub-plan's.
+
+TESTS — `tests/test_custom_state.py` (17 tests) and `tests/test_slots.py` (12 tests), each a standalone executable, both green. Every R-52/R-53 clause has its own test (3 out-of-order writes ⇒ head at highest seq and 3 log rows; unknown refId rejected; Mongo wipe + WAL replay identical; drop-and-rebuild document-for-document equal; no code path to a mirrored-fact provenance; 413 not truncation; pending→bound; duplicate bind ⇒ conflict with both ids and the process alive; same-named roots in two sessions do not cross-link; markerless ⇒ orphaned after TTL and at a run terminal). Live mongod arms (R-42 loopback+auth recipe) prove the head guard and the tolerated duplicate key against mongod 7 and skip cleanly without `TOUCH_MONGO_URI`; I ran them against a throwaway container on port 27021 and removed the container and its volume afterwards, leaving the sp05/sp06 containers alone.
+
+`.claude/skills/touch-orchestrate/SKILL.md` — ONLY the :52-56 ledger-line amendment: the JSON gains `root` and `sessionKey` (`&lt;pid&gt;-&lt;procStart&gt;`, field 22 of `/proc/&lt;pid&gt;/stat` as a string), with the reason (two sessions picking the same `ROOT_NAME` from near-identical task names would key the same slot) and the pre-amendment fallback (`sessionKeySource:&quot;path&quot;`). `test_the_ledger_line_carries_root_and_sessionkey` asserts the file and the ingest cannot drift apart.
+
+REGRESSION CHECK: `tests/run_all.sh --keep-going` → 20 passed, 2 failed (`test_mirror.py` 3 checks, `test_sessions.py` 1 check). Both failures reproduce byte-identically with my module removed from the tree — they are the two prior loops that closed RED, and this sub-plan adds none.</li><li>Test gate PASSED: PASS. Owned suites 100% green: tests/test_custom_state.py (rc 0, 135 ok) and tests/test_slots.py (rc 0, 94 ok). Both live-mongod arms were actually exercised, not just skipped — a fresh authenticated mongo:7 was stood up per the R-42 loopback recipe on 127.0.0.1:27317, both suites re-run green (real {seq:{$lt:n}} head guard; real DuplicateKeyError→conflict on the unique sparse agentId index), container+volume removed after. No-mongod arm still skips cleanly with rc 0; test_stdlib_only green and custom_state.py imports no driver. Full suite 20/22 pass; the 2 failures (tests/test_mirror.py FAILED(3), tests/test_sessions.py FAILED(1)) are the recorded pre-existing baseline from sp-mirror-deploy/sp-sessions-arm — proven not merely assumed: the tree was copied to scratchpad, sp-11's three files deleted, and both suites reproduced identical failure strings. Every R-52/R-53 clause maps to a named assertion; 4 mutation probes (drop seq guard, widen 16KB cap, raise on duplicate key, neuter validate_ref_id) — 3 of 4 caught, confirming non-tautological tests. SKILL.md diff is +13/-1 confined to the :52-56 ledger-line amendment. Ownership clean (only .claude/skills/touch-orchestrate/SKILL.md newly modified in git; mtimes confirm only the 4 owned files written), no commits, HEAD still 579446e. Two non-blocking notes: the 16 KB constant's value is unpinned (test derives its payload from ANNOTATION_LIMIT, so widening it stays green — suggest one check on the literal), and the two new test files lack the +x bit the rest of tests/ carries.</li><li>Critique REJECTED: REJECTED — 4 major, 5 minor, 4 nits. The algebra half is sound (GD-21/24/25/26/28/29 all verified, keys round-trip, shuffle-invariant, dup-key isolated into claim_op, ownership clean). The foreign-file reading half is not. M1: read_control_file requires `root` on every line and derives sessionKey from the path, so it ingests ZERO lines of the only control format that exists — reproduced against a literal SKILL.md-shaped `.touch/control.jsonl`, result `[]` — while its own docstring claims it parses exactly those two shapes; the test feeds hand-built lines carrying `root`, a fixture written to the implementation rather than the documented input. M2: both foreign readers drop lines silently with no counters, while `:1713` and `:134` both claim &quot;the caller's counters say how many&quot; — this is what makes M1 invisible in production. M3: `attempt` defaults to 1 three lines above the comment &quot;a fabricated address is worse than none&quot;, and SKILL.md:95 makes re-runs attempt+1, so a stop intent binds to a stale attempt-1 slot (verified: refId `slot:700-11|auth|auth_impl1|001`); the ledger reader correctly skips the same field. M4: nothing in aggregator/ calls head_write/bind_slot/SlotTable/replay — mirror discovers only MIRROR_MAPPERS/MIRROR_SOURCES — so `custom_state` heads are never written and slots never leave `pending` in production, leaving agents.topology_index permanently empty (the failure the topology widening exists to prevent), and no handoff names the owner the way the topology case names sp-10.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-custom-state-test-attempt-1.md</summary><pre># sp-custom-state — test gate, attempt 1
+
+**Verdict: PASS.** Both owned suites 100 % green (including their live-mongod
+arms, driven under a real authenticated `mongo:7`); 0 NEW failures in the full
+suite; 0 ownership violations; 0 commits; nothing in the repo was edited by this
+gate (all probes ran on copies under the scratchpad).
+
+Environment: Python 3.13, pymongo 4.17.0 present, Docker daemon available,
+`TOUCH_MONGO_URI` unset for the baseline run.
+
+Implementer's changed set — all four are exactly the files
+`plan/touch-mongo-live-subplans.md` §&quot;sp-11 — custom-state&quot; assigns:
+`aggregator/custom_state.py`, `tests/test_custom_state.py`,
+`tests/test_slots.py`, `.claude/skills/touch-orchestrate/SKILL.md`.
+
+---
+
+## 1. Targeted suites — GREEN
+
+Run from the repo root, stdlib only, standalone executables.
+
+| suite | rc | `ok:` assertions | skips |
+|---|---|---|---|
+| `python3 tests/test_custom_state.py` | **0** | 135 | 1 (live arm, no URI) |
+| `python3 tests/test_slots.py` | **0** | 94 | 1 (live arm, no URI) |
+
+Final lines: `all custom-state checks passed`, `all slots checks passed`.
+
+17 `def test_*` in `test_custom_state.py`, 12 in `test_slots.py`; every one is
+reached (each prints its own name and all names appear in the output).
+
+### 1a. The live-mongod arms were actually exercised (R-42 / R-56)
+
+The two skips are the designed conditional arms. Rather than accept them on
+faith, this gate stood up the R-42 recipe verbatim — loopback-only publish,
+`--auth`, root credentials from `openssl rand`, named volume — as
+`touch-mongo-sp11` on `127.0.0.1:27317`, exported `TOUCH_MONGO_URI`, and re-ran
+both suites. Both went green with the arms live, and the container + volume were
+removed afterwards:
+
+`tests/test_custom_state.py::test_live_head_guard_matches_the_model`
+```
+ok: mongod's guard agrees with the model: seq=3
+ok: …and the payload is the newest event's, not the last one attempted
+ok: …with all three lines still in the append-only log
+```
+This is R-52's stated test (&quot;3 out-of-order writes ⇒ head = highest seq, log has
+3&quot;) verified against a real server's `{seq:{$lt:newSeq}}` update, not only
+against the in-process model.
+
+`tests/test_slots.py::test_live_duplicate_key_is_tolerated_not_raised`
+```
+ok: the first bind acquires: bound
+ok: …and the second is a tolerated duplicate, never raised: conflict
+ok: …counted, per GD-29's exposed tolerated-dup number:
+      {'bound': 1, 'duplicate_key': 1, 'conflict': 1}
+ok: …recording the id that collided without ever claiming it
+ok: the tailer lives: a collision is a document, not a crash
+```
+That is R-53's `DuplicateKeyError` clause proven against the real unique sparse
+`{agentId:1}` index — the one assertion an in-process fake cannot honestly make.
+
+**No-mongod arm still clean.** With `TOUCH_MONGO_URI` unset both suites skip with
+an explicit line and rc 0; `tests/test_stdlib_only.py` is rc 0 and
+`aggregator/custom_state.py` imports no driver
+(`test_the_module_is_pure_and_carries_no_driver` passes).
+
+## 2. Full-suite regression gate — no NEW failure
+
+22 files: the four `.claude/shared/monitoring/tests/test_*.py` each from its own
+directory, then 18 `tests/test_*.py` from the repo root.
+
+- **PASS (20):** monitoring `test_frontend`, `test_server`, `test_shell`,
+  `test_watcher`; repo `test_agents`, `test_bootstrap`, `test_custom_state`,
+  `test_fixtures`, `test_ingest`, `test_legacy`, `test_mongo_deploy`,
+  `test_mongo_store`, `test_reducer`, `test_refs`, `test_slots`,
+  `test_stdlib_only`, `test_store`, `test_tailer`, `test_usage`, `test_ws`.
+- **FAIL (2) — pre-existing baseline, not attributable to this change:**
+  - `tests/test_mirror.py` (rc 1), `FAILED (3)`:
+    `…proven by the call count: the held ticks made no attempt`;
+    `the first generation lands`;
+    `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  - `tests/test_sessions.py` (rc 1), `FAILED (1)`:
+    `wipe + --rebuild reproduces a byte-identical fingerprint`.
+
+**Attribution — proven, not assumed.** These strings are character-for-character
+the baseline recorded in `sp-agents-reducer-test-attempt-4.md` §2 (and attempts
+1–3 before it); both belong to loops that closed RED (`sp-mirror-deploy`,
+`sp-sessions-arm`). Because `custom_state.py` registers two new SD-1 mapper
+kinds (`customState`, `slot`) that `mirror.discover_mappers` picks up, &quot;same
+strings&quot; was not treated as sufficient — the tree was copied to a scratchpad,
+this sub-plan's three code/test files were **deleted**, and both suites re-run:
+
+```
+tests/test_mirror.py    → FAILED (3)  — identical three strings
+tests/test_sessions.py  → FAILED (1)  — identical string
+```
+
+So the failures reproduce with sp-11 absent: sp-11 neither caused nor worsened
+them. Baseline failures do not fail this gate.
+
+`tests/run_all.sh` reproduces the same picture (fail-fast stops at
+`test_mirror.py`; 6 passed before it).
+
+## 3. Verification against the plans
+
+Owned items are `R-52` and `R-53`
+(`plan/touch-mongo-live-plan.md` §&quot;Phase M3&quot;, `plan/touch-mongo-live-subplans.md`
+§sp-11). Every clause has a matching, non-tautological assertion:
+
+| plan clause | asserting test |
+|---|---|
+| 3 out-of-order writes ⇒ head = highest seq, log keeps 3 | `test_three_out_of_order_writes_leave_the_head_at_the_highest_seq` + live arm |
+| `{seq:{$lt:newSeq}}` — a late old write never clobbers | `test_a_late_old_write_never_clobbers_a_fresher_head` |
+| unknown `refId` rejected (agents/run_nodes/slots grammars) | `test_an_unknown_refid_is_rejected` |
+| Mongo wipe + WAL replay reproduces both collections | `test_a_mongo_wipe_plus_wal_replay_reproduces_both_collections` |
+| drop head, rebuild, document-for-document equal | `test_drop_the_head_rebuild_and_it_is_document_for_document_equal` |
+| writer cannot emit `provenance:&quot;harness&quot;`; pinned `{asserted,touch}` | `test_the_writer_has_no_code_path_to_a_mirrored_fact_provenance` |
+| annotations: `author:&quot;local&quot;` literal, caller cannot invent one; 16 KB cap **rejects** 413, never truncates; machine payloads uncapped | `test_annotations_reject_at_16kb_rather_than_truncating` |
+| deletes are tombstone events, no delete verb | `test_deletes_are_tombstone_events_and_no_delete_verb_exists` |
+| ONE events + ONE head collection installation-wide, kind-discriminated, insert-only | `test_the_events_collection_is_insert_only_and_installation_wide`, `test_the_module_writes_only_its_own_three_collections` |
+| WAL-first at `.touch/custom-state.jsonl` via store.py's existing append machinery, `store.py` UNCHANGED | `test_the_wal_stream_is_the_durable_one_store_already_names`, `test_store_py_was_not_edited_by_this_sub_plan` |
+| SD-1 mapper purity + no kind registered twice (GD-15) | `test_the_module_is_pure_and_carries_no_driver` |
+| SD-8 `TOUCH_CONTROL_PATHS` + `pathSource` | `test_control_paths_are_configured_and_the_path_is_never_restated` |
+| R-53 `pending\|bound\|orphaned\|conflict` + `pendingSince` | `test_pre_spawn_state_binds_when_the_marker_lands`, `test_a_markerless_node_is_orphaned_after_the_ttl_and_at_a_terminal` |
+| bind monotone under any replay order (GD-25) | `test_the_bind_is_idempotent_and_never_demoted`, `test_the_state_machine_is_monotone_under_any_replay_order` |
+| duplicate key ⇒ `conflict` with BOTH ids, caught + counted, tailer lives | `test_a_duplicate_bind_writes_a_conflict_with_both_ids_and_the_process_lives` + live arm |
+| unique **sparse** `{agentId:1}`, name-side index, no TTL (GD-26) | `test_the_schema_indexes_the_hop_in_both_directions` |
+| bind evidence channels (marker / ledger / `boundBy`) | `test_the_conclusion_is_a_guarded_write_and_the_evidence_is_a_triple`, `test_the_marker_channel_needs_a_name_a_root_and_an_integer_attempt` |
+| same name in two sessions must not cross-link | `test_two_same_named_roots_in_different_sessions_do_not_cross_link` |
+| pre-amendment ledger lines ⇒ `sessionKey` from path, `sessionKeySource:&quot;path&quot;` | `test_ledger_ingest_uses_the_stated_session_and_derives_the_rest` |
+
+**SKILL.md scope.** `git diff` on `.claude/skills/touch-orchestrate/SKILL.md` is
++13/−1, confined to the `:52-56` ledger-line block: the JSON line gains `root`
+and `sessionKey` (`&lt;pid&gt;-&lt;procStart&gt;`), plus prose stating the pre-amendment
+`sessionKeySource:&quot;path&quot;` fallback. Exactly the amendment the sub-plan permits —
+no other section touched, and no R-20 material leaked in (R-20 is not in this
+pass).
+
+### Anti-tautology probes (4 mutations, run on scratchpad copies only)
+
+| mutation | caught? |
+|---|---|
+| A: drop the head write's `{seq:{$lt:obs.seq}}` guard | **yes** — 4 FAILs incl. `a seq-1 event arriving after seq 3 loses its guard`, and the GD-25 shuffled-replay fingerprint |
+| B: widen `ANNOTATION_LIMIT` 16 KB → 16 MB | *no* — see the observation below |
+| C: raise instead of writing a `conflict` on duplicate key | **yes** — `test_slots.py` aborts on the injected `RuntimeError` |
+| D: make `validate_ref_id` a pass-through | **yes** — 6 FAILs incl. `the WRITER refuses it too — the WAL never holds a line the mirror must refuse` |
+
+Three of four mutations are caught by a *named behavioural* assertion, so the
+suites are driving real code paths, not restating constants.
+
+## 4. Non-blocking observations (do NOT fail this gate)
+
+1. **The 16 KB number itself is unpinned (probe B).**
+   `test_annotations_reject_at_16kb_rather_than_truncating` derives its oversize
+   payload from the imported `ANNOTATION_LIMIT`
+   (`prose = &quot;x&quot; * (ANNOTATION_LIMIT + 1)`) and asserts
+   `raised.limit == ANNOTATION_LIMIT`. The *behaviour* — reject-not-truncate,
+   `status == 413`, nothing written, `author == &quot;local&quot;`, machine payload
+   exempt — is genuinely asserted, which is what R-52 is about; but the cap's
+   **value** slides with the constant, so changing 16 KB to 16 MB leaves the
+   suite green. Suggested one-liner for whoever next owns the file:
+   `check(ANNOTATION_LIMIT == 16 * 1024, &quot;R-52's cap is 16 KB, stated as a number&quot;)`.
+   Cosmetic — no plan clause is left unasserted.
+2. **Missing `+x` bit.** `tests/test_custom_state.py` and `tests/test_slots.py`
+   are `-rw-r--r--` while every other file in `tests/` is `-rwxr-xr-x`. Both
+   carry `#!/usr/bin/env python3`, and `run_all.sh` invokes them as
+   `$PY &lt;file&gt;`, so nothing breaks and no test enforces the bit — but the repo's
+   &quot;every test file is a standalone executable&quot; convention would prefer
+   `chmod +x`.
+
+## 5. Ownership, git, and cleanliness
+
+- `git status` shows exactly one newly-modified tracked file:
+  `.claude/skills/touch-orchestrate/SKILL.md`. Every other modified tracked path
+  (`.claude/shared/monitoring/*`, other skills, `CLAUDE.md`, `.gitignore`,
+  `.claude/local-orchestrators/**`) was already dirty before this sub-plan and
+  is unrelated in-flight orchestrator state.
+- `aggregator/` and `tests/` are wholly untracked, so ownership was cross-checked
+  by mtime: the three newest files in the tree are `aggregator/custom_state.py`
+  (16:18), `tests/test_slots.py` (16:15), `tests/test_custom_state.py` (16:08),
+  followed by `.claude/skills/touch-orchestrate/SKILL.md` (16:05); the next file
+  down is sp-10's `aggregator/agents.py` at 15:32. No file outside the ownership
+  list was written.
+- No commit was made; `HEAD` is unchanged at `579446e`. Nothing was reverted or
+  stashed. The gate created no file in the repo other than this findings file.
+- The `mongo:7` container this gate started (`touch-mongo-sp11`, loopback
+  `27317`) and its named volume were removed after use; the two pre-existing
+  containers from earlier gates (`touch-mongo-sp05`, `touch-mongo-sp06`) were
+  left untouched.
+</pre></details>
+<details><summary>Critique findings — sp-custom-state-critique-attempt-1.md</summary><pre># sp-custom-state — adversarial critique, attempt 1
+
+**Verdict: REJECTED** (4 major, 5 minor, 4 nits; 0 blockers).
+Depth: **in-scope** — every fix lands inside the four owned files.
+critical_defect: **false**.
+
+Reviewed: `aggregator/custom_state.py` (1776 lines, new),
+`tests/test_custom_state.py` (664, new), `tests/test_slots.py` (620, new),
+`.claude/skills/touch-orchestrate/SKILL.md` (+13/−1).
+Against: subplans §`sp-11 — custom-state`, amendment R-52/R-53 + GD-21…GD-30,
+base plan GD-1…GD-20, SD-1/SD-8/SD-11.
+
+## What holds up (checked, not assumed)
+
+- **GD-21.** `pymongo` appears nowhere in the module (asserted by source text,
+  and by `test_stdlib_only`); every Mongo concern is routed through
+  `mongo_store`'s pure helpers. Both suites run green with no driver present.
+- **GD-24.** Every `_id` is a string from `refs` (`custom_state_event_key`,
+  `custom_state_key`, `slot_key`); no sub-document `_id`, no sub-document
+  equality match. `slot:622-10028|auth|auth_impl1|001` verified sessionKey-first
+  and round-trip-lossless through `refs.parse_ref_key` including `#|:%` in
+  `root`/`name`.
+- **GD-25.** `custom_state_events` is `$setOnInsert`-only; `map_slot` emits only
+  `$setOnInsert/$min/$max/$addToSet`; `seq` advances by `$max` and `custom_state`
+  fences `$set` off it; the head payload rides `require={&quot;seq&quot;:{&quot;$lt&quot;:n}}`.
+  Shuffle/reverse fingerprint equality is asserted for both arms and reproduces.
+- **GD-26.** Deletes are tombstone events; no `deleteOne/deleteMany/drop_collection/
+  $unset/remove(` token anywhere in the module; no TTL in the `slots` index set.
+- **GD-28.** `validate_provenance` is the single door, `harness/derived/unknown`
+  refused, and the AST walk over the module's own provenance literals is a real
+  structural check (not a call-site check).
+- **GD-29.** No client is held; `claim_op` isolates the one index-touching write
+  onto `bulk_upsert` so `DuplicateKeyError` returns as `tolerated_dups` instead
+  of `MongoUnavailable`. This is a genuinely good call and the comment explaining
+  it is accurate.
+- **GD-15 / ownership.** `_only_ours` fences the three collections; `store.py`
+  untouched and asserted untouched; `git status` shows only
+  `.claude/skills/touch-orchestrate/SKILL.md` newly modified; the SKILL.md diff is
+  confined to the §2 ledger-line bullet, which is exactly the granted slice.
+- Tests are non-tautological in the places that matter (the guard matcher is
+  compared against `mirror._matches`; the `agentId`-writer set is derived from the
+  AST and pinned to `{claim_op, bind_write}`).
+
+The findings below are all about the **foreign-file reading half** and about
+what drives the module in production — not about the algebra, which is sound.
+
+---
+
+## MAJOR
+
+### M1 — The control-intent/ack arm ingests **zero** lines of the only control-file format that exists, silently
+`aggregator/custom_state.py:1682-1731` (`read_control_file`), esp. `:1710`
+
+`read_control_file`'s own docstring says:
+
+&gt; The two shapes touch-orchestrate writes: `{&quot;action&quot;:&quot;stop&quot;,&quot;name&quot;:…}` and
+&gt; `{&quot;ack&quot;:&quot;stop&quot;,&quot;name&quot;:…,&quot;taskId&quot;:…,&quot;result&quot;:…}`.
+
+Line 1710 then rejects both:
+
+```python
+if not kind or not name or not root or not key:
+    continue
+```
+
+Neither documented shape carries `root`, and `.touch/control.jsonl` (the path
+`touch-orchestrate/SKILL.md:86` mandates) yields no `sessionKey` from
+`session_key_from_path` either — so `key` is `None` as well. Reproduced against a
+literal SKILL.md-shaped file:
+
+```
+$ cat .touch/control.jsonl
+{&quot;action&quot;:&quot;stop&quot;,&quot;name&quot;:&quot;auth_impl1&quot;}
+{&quot;ack&quot;:&quot;stop&quot;,&quot;name&quot;:&quot;auth_impl1&quot;,&quot;taskId&quot;:&quot;t1&quot;,&quot;result&quot;:&quot;stopped&quot;,&quot;ts&quot;:&quot;…&quot;}
+$ read_control_file(&quot;.touch/control.jsonl&quot;, &quot;env&quot;)  -&gt;  []
+```
+
+SD-8 scopes this arm as &quot;reads a configured path list from `TOUCH_CONTROL_PATHS`,
+records `pathSource`, **until R-20 lands**&quot; — i.e. it is supposed to work *now*
+against a configured path. As written it cannot: every real line is dropped. The
+only lines it accepts are lines nothing in the repo writes, which is also why the
+test passes — `test_control_paths_are_configured_and_the_path_is_never_restated`
+feeds hand-built lines carrying `root` and `attempt`, a fixture written to the
+implementation rather than to the documented input. There is no test at all for
+the shape SKILL.md actually specifies.
+
+Worse, the resolution the code needs is already available: SKILL.md:90 says the
+orchestrator &quot;resolve[s] the name to its `taskId` **via the spawn ledger**&quot;, and
+the ledger is what `read_ledger_file` already parses into slots carrying
+`root` + `sessionKey` + `attempt`. Name→slot is precisely the hop `slots` exists
+to perform (R-53: &quot;the SINGLE place the name↔agentId hop happens&quot;); demanding the
+control line restate `root` re-implements the join by fiat and then fails it.
+
+**Fix:** resolve `(name[, attempt]) → slot` against the observed slot set (pass
+the slot keys/`SlotTable` in, or take a resolver callable) instead of requiring
+`root` on the line; keep the skip for names that resolve to nothing, and count
+those (see M2). If the maintainers judge that the join belongs to a later
+sub-plan, then the docstring must stop claiming it parses those two shapes and
+must say plainly that the arm is inert against today's format — and a handoff has
+to name the owner.
+
+### M2 — Both foreign-file readers drop lines silently, while two comments claim they are counted
+`aggregator/custom_state.py:1711-1714`, `:126-135` (module docstring),
+`:1656-1679` (`read_ledger_file`), `:1696-1720` (`read_control_file`)
+
+`:1713` — &quot;Skipped, and the caller's counters say how many.&quot;
+`:134` — &quot;the source yields nothing and **says so through its counters**&quot;.
+
+Neither reader has a counter. `read_control_file` and `read_ledger_file` return
+plain lists; `_read_lines` swallows `OSError` and returns `[]`; malformed JSON,
+non-dict payloads, missing `root`/`name`/`sessionKey` and non-int `attempt` all
+`continue` with no record anywhere. `Writer` and `SlotTable` both maintain
+counters, so the omission is inconsistent within the same file as well as untrue
+to the comments.
+
+This is what makes M1 invisible in production: an operator with a real control
+file configured sees zero documents, zero errors, zero counters, and no way to
+tell &quot;nothing happened yet&quot; from &quot;everything I wrote was rejected&quot; — the quiet
+drop GD-26's posture and D13's honesty rule both exist to forbid.
+
+**Fix:** give both readers a `counters` mapping (same shape as `Writer.counters`:
+`{&quot;read&quot;, &quot;parsed&quot;, &quot;skipped_unaddressable&quot;, &quot;skipped_malformed&quot;, &quot;unreadable&quot;}`),
+populate it, return it (or accept one from the caller as `bind_slot` does), and
+assert non-zero skip counts in the tests for each skip reason.
+
+### M3 — `attempt` silently defaults to 1, fabricating the component of the address the code says it must never fabricate
+`aggregator/custom_state.py:1707` (`attempt = payload.get(&quot;attempt&quot;, 1)`)
+
+Three lines below, `:1711-1714` states the rule: &quot;a fabricated address is worse
+than none (D13)&quot;. Defaulting `attempt` to 1 breaks exactly that rule, and it is
+not harmless: `touch-orchestrate/SKILL.md:95` — &quot;A stopped slot may be re-run only
+as a fresh spawn with `attempt` + 1&quot;. So an intent for a slot on its third attempt
+is addressed, with no warning, to `slot:&lt;session&gt;|&lt;root&gt;|&lt;name&gt;|001` — a stale,
+already-terminal slot. The rendered result is a stop card attached to the wrong
+agent, which is a strictly worse outcome than a skipped line. Verified:
+
+```python
+read_control_file(&lt;line without &quot;attempt&quot;&gt;) -&gt; refId &quot;slot:700-11|auth|auth_impl1|001&quot;
+```
+
+Note `read_ledger_file:1670` does the opposite and correct thing for the same
+field (non-int `attempt` ⇒ skip). The two readers disagree about the same rule.
+
+**Fix:** require `attempt` on a control line the same way the ledger reader does,
+or — better, together with M1 — resolve it from the slot set (latest live attempt
+for that name), and if a default is ever kept, record it as
+`attemptSource:&quot;default&quot;` on the document so the UI can say the address was
+inferred.
+
+### M4 — Nothing drives `head_write` / `bind_slot` / `SlotTable` outside the tests, and no handoff records who must
+`aggregator/custom_state.py:44-62`, `:1064-1069`, `:1094-1137`, `:1494-1555`
+
+`mirror.py` discovers exactly two things from an entity module: `MIRROR_MAPPERS`
+(triples) and `MIRROR_SOURCES` (files). Grepping the whole `aggregator/` package,
+no module references `head_write`, `apply_guarded`, `replay`, `rebuild_heads`,
+`bind_slot` or `SlotTable`. So in the running system:
+
+- `custom_state` (the derived head) is **never written** — only
+  `custom_state_events` is;
+- `slots` documents never leave `resolution:&quot;pending&quot;` — no bind, no orphan
+  sweep, no conflict ever materializes.
+
+The consequence is not local. `agents.py:1966` builds `topology_index` from
+`custom_state` heads of kind `topology`; with the head permanently empty, SD-9's
+&quot;absent topology&quot; arm becomes permanent for every run — which is precisely the
+failure the module docstring (`:64-75`) says the `topology` refId widening exists
+to prevent. sp-12 also reads these collections.
+
+The module docstring is admirably explicit that the split exists (&quot;two kinds of
+work, declared separately and honestly&quot;), but &quot;honestly declared&quot; is not the same
+as &quot;assigned&quot;. The topology case is handled correctly — it names `agents.topology_index`
+and sp-10's deviation record. The head/bind case names nobody, and no
+deviation/handoff note exists in `findings/`.
+
+**Fix (documentation-scale, inside owned files):** add a short handoff paragraph
+to the module docstring and a deviation note in `findings/` naming which sub-plan
+must call `head_write` after each `map_custom_state` on the mirror tick and
+`bind_slot` on marker/ledger evidence (sp-12 or sp-14 by elimination — sp-06 is
+closed), and state that until then `custom_state` and every non-`pending` slot
+state are test-only surfaces. Without that, the gap is invisible to the remaining
+sub-plans.
+
+---
+
+## MINOR
+
+### m1 — A control stream's scope is the *parent directory's basename*, so two configured files can collide into insert-only ids
+`aggregator/custom_state.py:1691-1693`
+
+`scope = session_key or session_key_from_path(path) or basename(dirname(path))`.
+Two configured control files whose parent directories share a name — e.g.
+`&lt;taskA&gt;/state/control.jsonl` and `&lt;taskB&gt;/state/control.jsonl`, both scoping to
+`state` — produce the same stream id, so line 1 of each maps to the same
+`custom_state_events` `_id`. Because that collection is `$setOnInsert`-only, the
+second file's line is swallowed as a *tolerated duplicate*: silent collapse, the
+exact failure mode MONGOSCHEMA-1/GD-25's count assertion was written to catch.
+(GD-27's per-repo database name limits the blast radius to one repo; it does not
+remove it.)
+
+**Fix:** derive the scope from the full realpath — e.g.
+`f&quot;{basename}-{sha1(realpath)[:8]}&quot;` — or reject a scope that is already claimed
+by a different path within one run.
+
+### m2 — The 16 KB cap's *value* is unpinned; widening it keeps every test green
+`aggregator/custom_state.py:288`, `tests/test_custom_state.py:320`
+
+The test builds its payload from `ANNOTATION_LIMIT` itself, so changing the
+constant to 16 MB is a passing mutation. CUSTOMSTATE-16's number is part of the
+contract, not an implementation detail. **Fix:** one line —
+`check(ANNOTATION_LIMIT == 16 * 1024, …)`, the way `PENDING_TTL_SECONDS == 300`
+and `len(KINDS) == 8` are already pinned.
+
+### m3 — `ref` and `ref_id` may contradict each other and both get stored
+`aggregator/custom_state.py:824-827`, `:948-952`
+
+When a caller supplies both, `ref_id` is validated in isolation and `ref` is
+stored verbatim; nothing checks `refs.ref_id(ref) == ref_id`. GD-24's
+&quot;flat + denormalized&quot; pairing then admits a document whose `ref{}` and `refId`
+point at different entities, which is undetectable downstream.
+**Fix:** when both are given, require agreement and raise `RefRejected` otherwise
+(one comparison); assert it.
+
+### m4 — `session_key_from_path` accepts any `&lt;int&gt;-&lt;int&gt;` path component
+`aggregator/custom_state.py:350`, `:599-614`
+
+`^[1-9]\d*-\d+$` matches `2026-07`, `1-2`, etc. A pre-amendment ledger under a
+date- or version-named folder is therefore attributed to an invented
+&quot;session&quot; and becomes an addressable slot that can never bind — a phantom the
+sweep will later render as `orphaned`. It is recorded as `sessionKeySource:&quot;path&quot;`,
+so it is not dishonest, but it is fabricated identity where the surrounding code
+prefers to skip. **Fix:** tighten the derivation to components under a directory
+the session layout actually names (`sessions/&lt;key&gt;/…`), rather than any component
+anywhere in the path.
+
+### m5 — The &quot;Mongo wipe + WAL replay&quot; test does not exercise a wipe
+`tests/test_custom_state.py:240-244`
+
+```python
+before = replay(writer.observations())
+after  = replay(writer.observations())   # &quot;the wipe&quot;
+```
+
+Two independent replays from an empty dict are trivially equal; nothing is ever
+populated and then cleared. R-52's clause is &quot;Mongo wipe + WAL replay reproduces
+both collections **exactly**&quot;. **Fix:** replay into a `state`, mutate/populate it
+further (or `state.clear()`), then replay again into a fresh dict and compare —
+and do the equivalent on the live arm, where `drop_database` makes the wipe real.
+
+---
+
+## NITS
+
+- **n1** — `tests/test_custom_state.py` and `tests/test_slots.py` are mode 644
+  while every other `tests/test_*.py` is 755 and carries the same shebang.
+  `run_all.sh` invokes `$PY &lt;file&gt;`, so nothing breaks; it is a consistency wart.
+  `chmod +x`.
+- **n2** — `custom_state.py:493` uses `legacy._stream_safe` (a *private* helper of
+  another sub-plan's file) as its correctness reference. The test asserts the two
+  agree, which is the right mitigation, but a shared escaper belongs in `refs.py`
+  where both can import it publicly. Worth a note to sp-15/sp-09 rather than a
+  change here.
+- **n3** — `_slot_advance:1145` writes `ts` on every transition, so an orphan
+  sweep overwrites the bind's timestamp. `firstSeenTs`/`lastSeenTs` survive, so
+  nothing is lost; consider naming it `resolvedTs`.
+- **n4** — `conflict_write`'s guard is `{&quot;resolutionRank&quot;: {&quot;$lt&quot;: 3}}`, so a
+  *third* colliding agentId on an already-conflicted slot is discarded while
+  `SlotTable._conflict` still returns `BindResult(&quot;conflict&quot;)` and skips the
+  counter (`:1462-1466`). Same shape in `bind_slot:1550-1555`, which returns
+  `&quot;bound&quot;` even when the guarded advance did not acquire. Both are honest enough
+  at read time (`resolution_of` re-derives from the evidence) but the returned
+  value overstates what was written.
+
+---
+
+## Checklist disposition
+
+| item | verdict |
+|---|---|
+| GD-21 lazy pymongo, only mongo_store/mirror | PASS |
+| GD-22 Mongo off the liveness path | PASS (module is pure; no blocking I/O) |
+| GD-24 string `_id`s via ref_key only | PASS |
+| GD-25 `$max/$addToSet/$min/$setOnInsert`, no `$inc`, no bare `$set` on accumulables | PASS |
+| GD-26 no delete verbs / no `$unset` / no TTL | PASS |
+| GD-27 no credential in repo/events/health/API/prompts; tests drop only `touch_test_&lt;pid&gt;` | PASS |
+| GD-28 `{asserted,touch}` pinned three ways, no `harness` path | PASS |
+| GD-29 no agent holds a client; dup-key tolerated and counted | PASS |
+| GD-30 bounded/O(delta) | N/A here (sources are the rebuild seam, documented as such) |
+| GD-15 one file one owner; no out-of-scope edits | PASS |
+| tests assert real behaviour, skip cleanly without mongod | PASS with m2/m5 gaps |
+| docs match implemented behaviour | **FAIL** (M1, M2, M4) |
+| R-52 clauses | PASS except the head has no driver (M4) |
+| R-53 clauses | PASS for ledger/marker; control arm inert (M1/M3) |
+| SD-8 control ingest | **FAIL** (M1) |
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

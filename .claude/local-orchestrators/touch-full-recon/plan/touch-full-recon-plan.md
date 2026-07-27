@@ -24,11 +24,20 @@ Disposition of D1–D14:
 | D5 `.touch/` state layout | **AMENDED** — control file becomes per-session, aggregator-owned; `server.json` holds live token 0600 | GD-6, R-34 |
 | D6 tailer/no-auto-discovery | **STANDS + clarified** — stat-ing a configured `wf_dir` is not "discovery"; checkpoint identity `(st_dev, st_ino, size, offset)` | R-23, R-27 |
 | D7 control verb table | **AMENDED** — "restart" gets ONE meaning; checkpoint is three-state | GD-4, R-35 |
-| D8 "journal `result` opaque, never parsed" | **SUPERSEDED** — `result` is polymorphic (AUDIT-2); `totalTokens` ban stands and extends to snapshot back-fill | GD-11 |
+| D8.1 Stack / stdlib-only at runtime | **AMENDED** by `touch-mongo-live-plan.md` GD-21 — it was never superseded; `pymongo` (pinned `==4.17.0`) is the ONE permitted runtime dependency, importable only from `aggregator/mongo_store.py` and `aggregator/mirror.py` | GD-21 (amendment) |
+| D8.2 "journal `result` opaque, never parsed" | **SUPERSEDED** — `result` is polymorphic (AUDIT-2); `totalTokens` ban stands and extends to snapshot back-fill | GD-11 |
 | D9 security invariants | **STANDS** — and D9.3 now wins over T11 (query-string ids) | GD-12, GD-13 |
 | D10 truncation sentinel | **STANDS + extended** to the watcher and Touch's tailer | R-07, R-23 |
 | D13 honesty rules | **STANDS** — applied harder (legacy re-labels, disabled controls carry reasons) | GD-4, GD-14 |
 | D2, D11, D12, D14 | **STAND** — unchallenged by this recon | — |
+
+**D8 anchor note (R-38).** "D8" named two different things and this table used
+to carry only one of them, which made the stdlib constraint read as already
+superseded. It is split here for good: **D8.1** is the Stack decision
+(`touch-aggregator-plan.md:217`, stdlib-only at runtime), amended — not
+superseded — by GD-21 of `touch-mongo-live-plan.md`; **D8.2** is the
+journal-`result` sub-clause, which stays superseded by GD-11. Cite the
+qualified id, never a bare "D8".
 
 Item mapping (old → this plan): T1→R-01/R-22, T3→R-29, T4→R-30/R-31,
 T5→R-24, T6→R-25, T7/T8→R-26 (amended by AUDIT-2/-4/-5/-6/-13), T11→R-31
@@ -49,10 +58,28 @@ Decided once; downstream work must not diverge. Each cites the findings that
 forced it.
 
 ### GD-1 — Repo safety gate (hard precondition)
-**No `git add` or `git commit` in this repo until R-01 (.gitignore) is green.
-No commit while any watcher is writing** (check
-`ps -eo cmd | grep "[d]ecision_watcher"`). The first thing any implementation
-session does is R-01. [PRODUCT-2, AUDIT-14, RUNSTATE-10, RUNSTATE-11]
+**No `git add` or `git commit` in this repo until R-01 (.gitignore) is green.**
+The first thing any implementation session does is R-01.
+[PRODUCT-2, AUDIT-14, RUNSTATE-10, RUNSTATE-11]
+
+**AMENDED by `touch-mongo-live-plan.md` §2 (R-40, CONVO-14) — the watcher
+clause is scoped.** As originally written ("no commit while *any* watcher is
+writing") the gate never clears: orphaned watchers from finished runs stay
+alive indefinitely, and three were live when this was written. The rule is now:
+
+> No commit while a watcher whose `ORCH_STATE_DIR` is **inside the paths being
+> committed** is writing (check
+> `ps -eo pid,cmd | grep "[d]ecision_watcher"`, then read each live watcher's
+> `ORCH_STATE_DIR` and compare it against the commit's path set). A watcher
+> writing some *other* task's stream never blocks a commit — it cannot change
+> a file in this one.
+
+The corresponding lifecycle rule is R-40's: **when a run ends, stop its
+watcher** (the watcher also self-exits after journal quiet ≥ N s AND a terminal
+`orchestrator complete` event, and the driver epilogue stops the daemons), so
+"is the loop still running" is answerable from process state instead of
+inference. Watcher self-exit is a *convenience* for this gate, never a
+precondition of it — the scoped check above stands on its own.
 
 ### GD-2 — Git bootstrap: branch, identity, commit boundary
 Branch is renamed `master` → `main` before commit #1 (environment PR default is
@@ -244,8 +271,8 @@ appears exactly once. This run's ~90 findings are disposed inline by this
 plan (§3). [AUDIT-1]
 
 ### GD-18 — Fixtures before features
-The wf_829e6f58 corpus (journal, 9 agent transcripts incl. both copies of
-`a2fc883c…`, meta stubs, snapshot, 3 `tool-results/*.txt`, the task
+The wf_829e6f58 corpus (journal, 9 agent transcripts incl. the two
+`a2fc883c…` **disjoint continuations** (not copies — R-38), meta stubs, snapshot, 3 `tool-results/*.txt`, the task
 `events.jsonl`) is frozen into `tests/fixtures/` **before** the retention
 sweep can delete it (R-03). All acceptance criteria are restated **per phase**
 against fixtures, not against live `~/.claude` (Part F's single criterion
@@ -310,7 +337,9 @@ skill templates — group accordingly.
 
 **R-03 — Freeze the reference fixtures**
 - Files: new `tests/fixtures/run-wf_829e6f58/` (journal, 9 agent transcripts
-  incl. both `a2fc883c…` copies, 7 `.meta.json`, `wf_829e6f58-b2f.json`
+  incl. the two `a2fc883c…` **disjoint continuations** — zero uuid overlap,
+  17 min apart, NOT two copies of one file (MONGOSCHEMA-9; wording corrected by
+  R-38), 7 `.meta.json`, `wf_829e6f58-b2f.json`
   snapshot, 3 `tool-results/*.txt`); new `tests/fixtures/legacy/` (verbatim
   line selections from `touch-aggregator/events.jsonl` and
   `touch-repo-recon/events.jsonl` — the two-wave respawn, the

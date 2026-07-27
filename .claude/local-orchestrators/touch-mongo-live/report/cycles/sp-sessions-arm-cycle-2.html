@@ -1,0 +1,503 @@
+<title>sp-sessions-arm — cycle 2</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-sessions-arm — implement→test→critique, attempt 2/4</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 2 of sp-sessions-arm: addressed every item in findings/sp-sessions-arm-critique-attempt-1.md against the current tree. Only the two owned files changed (tests/test_sessions.py also chmod 0755); no commits; mirror.py and all other sub-plans' files untouched. `python3 tests/test_sessions.py` is green (161 checks, exit 0); `tests/test_mirror.py` and `tests/test_stdlib_only.py` still pass, so nothing downstream regressed.
+
+M1 (blocker) — `_epoch_ms` no longer raises: `int(value)` and `datetime.fromtimestamp` are inside one `try` catching `(OverflowError, OSError, ValueError)`, so `1e18`, `Infinity`, `NaN`, `10**19` return None instead of killing `read_registry` → `scan` → `mirror.iter_rebuild_observations` (which calls `source()` with no handler). Refusals are counted on the new `skipped[&quot;registry_bad_timestamp&quot;]` (per-field), the entry itself survives without `firstTs`/`lastTs`, and the docstring's &quot;Tolerated, never fatal&quot; list names the case. New `test_an_absurd_registry_timestamp_cannot_kill_the_pass` drives all four values plus a full scan over a registry file holding `Infinity`/`10**19`.
+
+M2 (blocker) — the `Prior` gap is now stated, not implied. Added a &quot;Not yet wired&quot; section to the module docstring naming the exact seam (`source(path=None)`; `iter_rebuild_observations` → `source()`, `iter_backfill_observations` → `source(path)`; `prior` keyword-only) and who must supply a `Prior` (the component owning a mirror handle — sp-06's file, not this sub-plan's). New `test_a_promotion_is_inert_on_the_wired_path` asserts the signature is keyword-only, that a direct call with `Prior` yields one promotion and one `present:false` source, and that the same tree driven through `mirror.iter_rebuild_observations(registry_modules=[&quot;sessions&quot;])` yields only `session` observations, zero promotions, zero absent sources. HANDOFF for whoever owns the poll loop / mirror seam: read existing `sessions._id`s + `sources[].path`s and pass a `Prior` in, or R-46's promotion and GD-26's `present:false` stay dead code.
+
+M3 (blocker) — the `/clear` claim is gone. Docstring section &quot;What is deliberately NOT joined: the `/clear` pair&quot; explains that the rewritten registry entry names only the current sessionId and CONVO-4 forbids the guess, so the pre-`/clear` session stays an unlinked `hist:` document. Test renamed to `test_two_session_ids_on_one_live_id_merge_via_add_to_set`, relabelled as a mapper-algebra unit test, and extended with a `scan()`-driven assertion that discovery never produces the pair and never promotes the pre-`/clear` id.
+
+m1 — the `$setOnInsert` disagreement is fixed, but NOT the way the critique proposed: I verified on live mongod 7 (existing `touch-mongo-sp05` container) that `$setOnInsert:{sources:[]}` next to `$addToSet:{sources:…}` is &quot;Updating the path 'sources' would create a conflict at 'sources'&quot;, which `merge_ops`' `_conflicting_path` also refuses — so putting `sources` in the immutables unconditionally would have broken every session with a source. Instead `sources` is in neither payload: `map_session` always emits `$addToSet {sources:{$each: elements}}` (empty list included) and `map_promotion` emits `$addToSet {sources:{$each: []}}`. Verified on mongod 7 that an empty `$each` on an upsert-insert creates `sources: []`, and that the full generated op pair reproduces byte-identical canonical documents on server and in the memory model, in both orders, for the transcriptless and populated cases. The test's `if k != &quot;sources&quot;` filter is gone; the payloads now compare verbatim, plus a promotion-first-order check that the document still has `sources: []`.
+
+m2 — alias rejections are counted locally (`rejected_here`) instead of testing the scan-wide `skipped[&quot;alias_rejected&quot;]`, so a second unknown-format alias file is still counted after an earlier file rejected an entry; asserted with a two-file closure.
+m3 — added `scoped_slugs(cwd, root)` (memoized) + `reset_scope_cache()`; `iter_session_observations(path)` uses it, so a backfill walk derives the closure once rather than reopening `.session-aliases` per file. `scan()` deliberately never consults the memo. Test counts `project_slugs` invocations across a 14-file walk (exactly 1) and pins the cache/reset/scan semantics.
+m4 — `_with_absent` now really keys on `(path, kind)`, matching its docstring; asserted.
+m5 — `chmod +x tests/test_sessions.py` (R-22/D12).
+n1 — the rebound loop variable is `candidate`. n2 — new `_usable_slug` rejects alias entries with no ASCII alphanumeric (`/` → `-`, `//` → `--`), asserted. n3 — the mirror.py check is now an AST import scan (no static `sessions` import ⇒ no cycle), not a text split on &quot;ENTITY_MODULES&quot;. n4 — `sources` dict elements go through `_as_observation(source, Source)`, so a malformed element raises `SessionsError`, not `TypeError`.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Targeted tests/test_sessions.py: 26 test functions, 161 assertions, exit 0 (all 26 defs verified invoked from main; main sys.exit(1) on failure). Full suite 15/15 green (4 monitoring + 11 repo), RC=0, no new failures. Bare-checkout arm re-verified with a find_spec meta-path blocker proven to make pymongo/bson unimportable on 3.13: 11/11 repo tests still green, no mongod started. All four attempt-1 critique findings have landing code plus covering tests: M1 _epoch_ms now returns None on OverflowError/OSError/ValueError with a counted skipped[&quot;registry_bad_timestamp&quot;] (new test_an_absurd_registry_timestamp_cannot_kill_the_pass); M2 &quot;Not yet wired&quot; docstring section + test_a_promotion_is_inert_on_the_wired_path; M3 test renamed to test_two_session_ids_on_one_live_id_merge_via_add_to_set; m1 sources removed from $setOnInsert so both writers of one _id carry identical immutables and the comparison is unfiltered. Ownership clean: only aggregator/sessions.py (03:45:57Z) and tests/test_sessions.py (03:44:21Z) are newer than the prior sub-plan's last write (mirror.py 02:45:56Z); mirror.py untouched, fixtures MANIFEST.sha256 clean, no commits. Non-blocking for critique: the mongod-7 &quot;$setOnInsert:{sources:[]} next to $addToSet conflicts&quot; rationale is prose-only, pinned only against the in-repo memory model.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 1 major, 3 minor, 7 nits. All four attempt-1 findings genuinely landed (the _epoch_ms range guard, the &quot;Not yet wired&quot; Prior handoff asserted through mirror.iter_rebuild_observations, the /clear docstring correction + renamed test, and the unfiltered $setOnInsert comparison), and I additionally confirmed the previously prose-only mongod-7 claim against the live mongo:7.0.39 container: $addToSet {$each:[]} on an upsert really does create sources:[], and $setOnInsert:{sources:[]} beside $addToSet really does raise &quot;would create a conflict at 'sources'&quot;. The blocker is a third instance of the exact bug class this loop has already fixed twice: aggregator/sessions.py:337-341 `_realpath` catches only OSError, but os.path.realpath raises ValueError on an embedded NUL, so a NUL in history.jsonl's `project` (:734) or in a registry entry's `cwd` (:615) escapes read_history_sessions/read_registry -&gt; scan -&gt; mirror.iter_rebuild_observations (which calls source() with no handler) and kills the whole discovery pass for every session. Reproduced in 3 of 4 arms, including through the wired mirror seam; contradicts the module's own bold &quot;Discovery never raises&quot; contract, and the helper still carries `# pragma: no cover`. Fix is `except (OSError, ValueError)` plus a two-arm test. Minors: a well-formed empty/comments-only .session-aliases is falsely counted as alias_unreadable (:399-400); the new scoped_slugs memo (:478) drops the `skipped` counters so the whole per-path backfill seam is silent about alias rejections and slug_cap; the root-relative source-path invariant the fingerprint depends on is enforced only at the scan site, never in Source.as_element where dict replays enter. Full suite 15/15 RC=0, test_sessions.py 161 ok / exit 0, ownership clean (only the two owned files newer than mirror.py), no commits.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 3/4</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 2 of sp-sessions-arm: addressed every item in findings/sp-sessions-arm-critique-attempt-1.md against the current tree. Only the two owned files changed (tests/test_sessions.py also chmod 0755); no commits; mirror.py and all other sub-plans' files untouched. `python3 tests/test_sessions.py` is green (161 checks, exit 0); `tests/test_mirror.py` and `tests/test_stdlib_only.py` still pass, so nothing downstream regressed.
+
+M1 (blocker) — `_epoch_ms` no longer raises: `int(value)` and `datetime.fromtimestamp` are inside one `try` catching `(OverflowError, OSError, ValueError)`, so `1e18`, `Infinity`, `NaN`, `10**19` return None instead of killing `read_registry` → `scan` → `mirror.iter_rebuild_observations` (which calls `source()` with no handler). Refusals are counted on the new `skipped[&quot;registry_bad_timestamp&quot;]` (per-field), the entry itself survives without `firstTs`/`lastTs`, and the docstring's &quot;Tolerated, never fatal&quot; list names the case. New `test_an_absurd_registry_timestamp_cannot_kill_the_pass` drives all four values plus a full scan over a registry file holding `Infinity`/`10**19`.
+
+M2 (blocker) — the `Prior` gap is now stated, not implied. Added a &quot;Not yet wired&quot; section to the module docstring naming the exact seam (`source(path=None)`; `iter_rebuild_observations` → `source()`, `iter_backfill_observations` → `source(path)`; `prior` keyword-only) and who must supply a `Prior` (the component owning a mirror handle — sp-06's file, not this sub-plan's). New `test_a_promotion_is_inert_on_the_wired_path` asserts the signature is keyword-only, that a direct call with `Prior` yields one promotion and one `present:false` source, and that the same tree driven through `mirror.iter_rebuild_observations(registry_modules=[&quot;sessions&quot;])` yields only `session` observations, zero promotions, zero absent sources. HANDOFF for whoever owns the poll loop / mirror seam: read existing `sessions._id`s + `sources[].path`s and pass a `Prior` in, or R-46's promotion and GD-26's `present:false` stay dead code.
+
+M3 (blocker) — the `/clear` claim is gone. Docstring section &quot;What is deliberately NOT joined: the `/clear` pair&quot; explains that the rewritten registry entry names only the current sessionId and CONVO-4 forbids the guess, so the pre-`/clear` session stays an unlinked `hist:` document. Test renamed to `test_two_session_ids_on_one_live_id_merge_via_add_to_set`, relabelled as a mapper-algebra unit test, and extended with a `scan()`-driven assertion that discovery never produces the pair and never promotes the pre-`/clear` id.
+
+m1 — the `$setOnInsert` disagreement is fixed, but NOT the way the critique proposed: I verified on live mongod 7 (existing `touch-mongo-sp05` container) that `$setOnInsert:{sources:[]}` next to `$addToSet:{sources:…}` is &quot;Updating the path 'sources' would create a conflict at 'sources'&quot;, which `merge_ops`' `_conflicting_path` also refuses — so putting `sources` in the immutables unconditionally would have broken every session with a source. Instead `sources` is in neither payload: `map_session` always emits `$addToSet {sources:{$each: elements}}` (empty list included) and `map_promotion` emits `$addToSet {sources:{$each: []}}`. Verified on mongod 7 that an empty `$each` on an upsert-insert creates `sources: []`, and that the full generated op pair reproduces byte-identical canonical documents on server and in the memory model, in both orders, for the transcriptless and populated cases. The test's `if k != &quot;sources&quot;` filter is gone; the payloads now compare verbatim, plus a promotion-first-order check that the document still has `sources: []`.
+
+m2 — alias rejections are counted locally (`rejected_here`) instead of testing the scan-wide `skipped[&quot;alias_rejected&quot;]`, so a second unknown-format alias file is still counted after an earlier file rejected an entry; asserted with a two-file closure.
+m3 — added `scoped_slugs(cwd, root)` (memoized) + `reset_scope_cache()`; `iter_session_observations(path)` uses it, so a backfill walk derives the closure once rather than reopening `.session-aliases` per file. `scan()` deliberately never consults the memo. Test counts `project_slugs` invocations across a 14-file walk (exactly 1) and pins the cache/reset/scan semantics.
+m4 — `_with_absent` now really keys on `(path, kind)`, matching its docstring; asserted.
+m5 — `chmod +x tests/test_sessions.py` (R-22/D12).
+n1 — the rebound loop variable is `candidate`. n2 — new `_usable_slug` rejects alias entries with no ASCII alphanumeric (`/` → `-`, `//` → `--`), asserted. n3 — the mirror.py check is now an AST import scan (no static `sessions` import ⇒ no cycle), not a text split on &quot;ENTITY_MODULES&quot;. n4 — `sources` dict elements go through `_as_observation(source, Source)`, so a malformed element raises `SessionsError`, not `TypeError`.</li><li>Test gate PASSED: PASS. Targeted tests/test_sessions.py: 26 test functions, 161 assertions, exit 0 (all 26 defs verified invoked from main; main sys.exit(1) on failure). Full suite 15/15 green (4 monitoring + 11 repo), RC=0, no new failures. Bare-checkout arm re-verified with a find_spec meta-path blocker proven to make pymongo/bson unimportable on 3.13: 11/11 repo tests still green, no mongod started. All four attempt-1 critique findings have landing code plus covering tests: M1 _epoch_ms now returns None on OverflowError/OSError/ValueError with a counted skipped[&quot;registry_bad_timestamp&quot;] (new test_an_absurd_registry_timestamp_cannot_kill_the_pass); M2 &quot;Not yet wired&quot; docstring section + test_a_promotion_is_inert_on_the_wired_path; M3 test renamed to test_two_session_ids_on_one_live_id_merge_via_add_to_set; m1 sources removed from $setOnInsert so both writers of one _id carry identical immutables and the comparison is unfiltered. Ownership clean: only aggregator/sessions.py (03:45:57Z) and tests/test_sessions.py (03:44:21Z) are newer than the prior sub-plan's last write (mirror.py 02:45:56Z); mirror.py untouched, fixtures MANIFEST.sha256 clean, no commits. Non-blocking for critique: the mongod-7 &quot;$setOnInsert:{sources:[]} next to $addToSet conflicts&quot; rationale is prose-only, pinned only against the in-repo memory model.</li><li>Critique REJECTED: REJECTED — 1 major, 3 minor, 7 nits. All four attempt-1 findings genuinely landed (the _epoch_ms range guard, the &quot;Not yet wired&quot; Prior handoff asserted through mirror.iter_rebuild_observations, the /clear docstring correction + renamed test, and the unfiltered $setOnInsert comparison), and I additionally confirmed the previously prose-only mongod-7 claim against the live mongo:7.0.39 container: $addToSet {$each:[]} on an upsert really does create sources:[], and $setOnInsert:{sources:[]} beside $addToSet really does raise &quot;would create a conflict at 'sources'&quot;. The blocker is a third instance of the exact bug class this loop has already fixed twice: aggregator/sessions.py:337-341 `_realpath` catches only OSError, but os.path.realpath raises ValueError on an embedded NUL, so a NUL in history.jsonl's `project` (:734) or in a registry entry's `cwd` (:615) escapes read_history_sessions/read_registry -&gt; scan -&gt; mirror.iter_rebuild_observations (which calls source() with no handler) and kills the whole discovery pass for every session. Reproduced in 3 of 4 arms, including through the wired mirror seam; contradicts the module's own bold &quot;Discovery never raises&quot; contract, and the helper still carries `# pragma: no cover`. Fix is `except (OSError, ValueError)` plus a two-arm test. Minors: a well-formed empty/comments-only .session-aliases is falsely counted as alias_unreadable (:399-400); the new scoped_slugs memo (:478) drops the `skipped` counters so the whole per-path backfill seam is silent about alias rejections and slug_cap; the root-relative source-path invariant the fingerprint depends on is enforced only at the scan site, never in Source.as_element where dict replays enter. Full suite 15/15 RC=0, test_sessions.py 161 ok / exit 0, ownership clean (only the two owned files newer than mirror.py), no commits.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-sessions-arm-test-attempt-2.md</summary><pre># sp-sessions-arm — test gate, attempt 2 — **PASS**
+
+Read-only gate. No source or test file was edited by this agent.
+
+Implementer-declared change set:
+- `/home/laniakea/Projects/touch/aggregator/sessions.py` (1208 lines, 51611 B, mtime 2026-07-26 03:45:57Z)
+- `/home/laniakea/Projects/touch/tests/test_sessions.py` (1063 lines, 56266 B, mtime 2026-07-26 03:44:21Z)
+
+## 1. Targeted suite (owned by this sub-plan)
+
+```
+cd /home/laniakea/Projects/touch &amp;&amp; python3 tests/test_sessions.py
+→ exit 0 — &quot;all sessions tests passed&quot;
+```
+
+**26 test functions, 161 individual `ok:` assertions, 0 failures.**
+All 26 defined `test_*` functions are actually invoked from `main()` (checked
+programmatically: defined 26 / invoked 26, none orphaned), and `main()` exits
+`sys.exit(1)` whenever `failures` is non-empty — so a red assertion really does
+fail the file.
+
+Item coverage:
+
+**R-25 (base, as amended)** — `test_slug_rule_reproduces_the_directory_names_on_disk`
+(slug arithmetic against real on-disk names, incl. the doubled `--` of a nested
+slug), `test_proc_start_is_field_22_even_when_comm_has_spaces_and_parens`
+(parses past the last `)`, and shows the naive `split()[21]` reads the wrong
+field), `test_registry_tolerates_lost_found_and_zero_byte_files`,
+`test_a_reused_pid_is_not_a_live_session`,
+`test_a_registry_entry_for_another_project_is_out_of_scope`,
+`test_history_scope_is_the_project_field_not_a_slug_guess` (scope is the
+`project` field, not a slug guess; missing `history.jsonl` is empty, not an
+error), `test_session_aliases_widen_scope_in_both_plausible_formats`,
+`test_alias_closure_is_cycle_safe_and_bounded` (NUL/`..` refused *and counted*,
+cycles terminate, closure capped at 32 with the cap counted).
+
+**R-46 (amendment)** — `test_the_project_dir_yields_six_documents_exactly_one_live`
+(6 docs, exactly one `live:&lt;pid&gt;-&lt;procStart&gt;`; sessionId lives in `sessionIds`,
+never in `_id`), `test_the_four_foreign_slug_dirs_are_not_ingested` (zero
+foreign ids; records that an unscoped enumerator would have found 14),
+`test_the_transcriptless_seventh_session_is_sources_empty` (`sources: []`
+present as a field; empty ≠ missing; history prompt text never reaches a
+document), `test_promotion_annotates_the_hist_doc_and_rewrites_no_id`
+(`promotedTo` set, `hist:` `_id` untouched, live doc gains the id via
+`$addToSet`).
+
+**SD-1 / SD-11 / GD-21 / GD-24 / GD-26 / GD-28** —
+`test_mappers_are_registered_pure_and_write_only_sessions` (purity by AST
+inspection: no I/O, no clock reads; an op for any collection but `sessions` is
+refused in code; `&quot;pymongo&quot; not in source`), `test_the_algebra_is_order_independent`
+(normal/shuffled/reversed fingerprint identically; double ingest is a fixed
+point), `test_a_disappeared_source_is_a_field_not_a_removal` (GD-26
+`present:false`), `test_source_elements_have_a_pinned_field_order`,
+`test_class_and_provenance_are_immutables_not_verdicts`,
+`test_the_union_is_gd24s_and_refs_owns_both_grammars`,
+`test_a_rebuild_through_mirror_reproduces_the_scan` (wipe + `--rebuild`
+reproduces a byte-identical fingerprint),
+`test_mirror_sources_answer_only_for_paths_they_own`,
+`test_claude_root_agrees_with_mirrors`,
+`test_the_per_path_seam_does_not_reread_the_alias_closure`.
+
+### Attempt-1 critique items — landed and covered by a test
+
+- **M1** (absurd registry timestamp killed the whole pass): `_epoch_ms` now
+  wraps the conversion — `except (OverflowError, OSError, ValueError): return
+  None` (`sessions.py:559-563`) — and the refusal is counted via a new
+  `skipped[&quot;registry_bad_timestamp&quot;]` (`:294`, incremented at `:632`). New test
+  `test_an_absurd_registry_timestamp_cannot_kill_the_pass` drives `1e18`,
+  `inf`, `nan`, `10**19`, negative and a string, asserts the entry survives
+  with no timestamp, both refusals counted (2), the full 6-document pass
+  completes, and no timestamp is fabricated on the live doc.
+- **M2** (promotion unreachable through the real seam): the module docstring
+  gained an explicit **&quot;Not yet wired&quot;** section (`sessions.py:92-107`) naming
+  who must supply `Prior`, and a new test
+  `test_a_promotion_is_inert_on_the_wired_path` asserts the wired path yields
+  nothing today — the mapper test is now labelled a unit test of the contract,
+  not end-to-end evidence.
+- **M3** (`/clear` join claimed but not implemented): test renamed to
+  `test_two_session_ids_on_one_live_id_merge_via_add_to_set`, i.e. it now says
+  it exercises the mapper's algebra rather than a discovery behaviour.
+- **m1** ($setOnInsert payload disagreement): resolved by removing `sources`
+  from the immutables entirely — the empty case is now `{$addToSet: {sources:
+  {$each: []}}}` (`sessions.py:1067-1077`), which creates `sources: []` on
+  upsert. The assertion is now unfiltered (`promo == map_session(hist)[0][2]
+  [&quot;$setOnInsert&quot;]`, verbatim, with an explicit `&quot;sources&quot; not in promo` check
+  and a promotion-first ordering check that the resulting doc still has
+  `sources == []`). The stated mongod-7 conflict rationale is a claim about
+  server behaviour I did not re-run against a live mongod — flagging it for the
+  critique gate, not as a failure.
+
+## 2. Full-suite regression gate
+
+```
+cd /home/laniakea/Projects/touch &amp;&amp; rc=0
+for t in .claude/shared/monitoring/tests/test_*.py; do (cd $(dirname $t) &amp;&amp; python3 $(basename $t)) || rc=1; done
+for t in tests/test_*.py; do python3 &quot;$t&quot; || rc=1; done
+exit $rc     → RC=0
+```
+
+15/15 files pass, zero failures:
+`test_frontend`, `test_server`, `test_shell`, `test_watcher` (monitoring
+baselines, all green) + `test_bootstrap`, `test_fixtures`, `test_mirror`,
+`test_mongo_deploy`, `test_mongo_store`, `test_refs`, `test_sessions`,
+`test_stdlib_only`, `test_store`, `test_tailer`, `test_ws`.
+
+No new failures; no baseline failures either.
+
+### Bare-checkout arm (GD-21 / R-56) — verified, not assumed
+
+`pymongo 4.17.0` is installed in this sandbox, so a plain run does not prove the
+requirement. The gate re-ran the whole repo suite under a `sitecustomize.py`
+meta-path finder whose `find_spec` raises `ImportError` for `pymongo*`, `bson*`
+and `gridfs*`. The blocker was first proved effective
+(`import pymongo → ImportError: blocked: pymongo`; note the older `find_module`
+hook is silently ignored on Python 3.13, so `find_spec` is the only form that
+works here):
+
+```
+PYTHONPATH=&lt;blocker-dir&gt; python3 tests/test_&lt;x&gt;.py   → 11/11 PASS, RC=0
+```
+
+`tests/test_sessions.py` is green with pymongo genuinely unimportable, and so is
+every other repo test — the Mongo-dependent arms skip cleanly. No mongod was
+started; nothing hung or timed out.
+
+## 3. Plan conformance and ownership
+
+- Both owned files exist and are substantive; no other file in `aggregator/`,
+  `tests/` or `docs/` was written after the previous sub-plan's last write
+  (`mirror.py` 02:45:56Z). Newest others: `test_mirror.py` 02:44, `mongo.md`
+  02:39 — all older than this attempt. `aggregator/` and `tests/` are untracked
+  as whole directories so `git status` cannot discriminate per file; mtimes can,
+  and they show exactly the two declared files touched.
+- `aggregator/mirror.py` was **not** modified: `sessions.py` plugs into the
+  pre-existing generic mapper/source discovery seams by declaring
+  `MIRROR_MAPPERS` (`:1127`) / `MIRROR_SOURCES` (`:1205`) on its own module —
+  SD-1's registry pattern, satisfied without touching another sub-plan's file.
+  `test_claude_root_agrees_with_mirrors` re-asserts that `mirror.py` imports
+  `sessions` only dynamically.
+- Frozen fixtures intact: `cd tests/fixtures &amp;&amp; sha256sum -c MANIFEST.sha256`
+  → 0 non-`OK` lines.
+- No commits made (SD-6); working tree otherwise untouched; unrelated `.claude/`
+  in-flight state left alone.
+
+## 4. Observations (non-blocking, for the critique gate)
+
+1. The mongod-7 `$setOnInsert`/`$addToSet` &quot;would create a conflict at
+   'sources'&quot; rationale in `sessions.py:1065-1076` is asserted in prose; the
+   test only pins the in-repo memory-model behaviour. If a live-mongod arm is
+   cheap for the critique gate, it is the one claim here worth re-running.
+2. In-scope transcripts are still synthesized by the test inside a temp
+   `~/.claude` (sp-02 froze only the foreign slug dirs and the real
+   `sessions/15934.json`); no assertion depends on transcript bytes, since this
+   module never reads transcript content (GD-15 gives that to `ingest.py`). The
+   test docstring states the trade-off.
+3. Runtime is a few seconds; no network, no Docker, no mongod required.
+
+## Verdict
+
+**PASS** — targeted suite 100% green (26 tests / 161 assertions), full suite
+15/15 green, bare-checkout (no-pymongo) arm green, no ownership violations,
+assertions substantive rather than tautological, and all four attempt-1
+critique findings have landing code plus a covering test.
+</pre></details>
+<details><summary>Critique findings — sp-sessions-arm-critique-attempt-2.md</summary><pre># sp-sessions-arm — adversarial critique, attempt 2
+
+**Verdict: REJECTED.** 1 major, 3 minor, 7 nits.
+Reviewed: `aggregator/sessions.py` (new, 1209 lines) and `tests/test_sessions.py`
+(new, 1090 lines) — both untracked, so full-file review — against
+`plan/touch-mongo-live-subplans.md` §&quot;sp-07 — sessions-arm&quot;, R-46 + GD-21…GD-30
+of the amendment, R-25 of the base plan, and SD-1/SD-11/GD-15.
+
+## Attempt-1 findings: all four land, and two of them land properly
+
+Verified, not taken on the test gate's word:
+
+* **M1 (absurd registry timestamp)** — `_epoch_ms` (`:536-565`) now returns
+  `None` for `inf`/`NaN`/`1e18`/`10**19`/`-1`/a string, the conversion is inside
+  one `try` catching `OverflowError, OSError, ValueError`, the refusal is counted
+  on `skipped[&quot;registry_bad_timestamp&quot;]` (`:629-632`), and
+  `test_an_absurd_registry_timestamp_cannot_kill_the_pass` drives it through a
+  real registry file with `Infinity`/`10**19` and asserts the pass completes with
+  six documents and no fabricated timestamp. Real fix, real test.
+* **M2 (`Prior` unwired)** — the &quot;Not yet wired&quot; docstring section (`:92-110`)
+  names the seam, the two call sites and both inert features;
+  `test_a_promotion_is_inert_on_the_wired_path` asserts the inertness *through*
+  `mr.iter_rebuild_observations`, not by inspection alone. This is the right
+  shape: a stated gap instead of a wrong green.
+* **M3 (`/clear` claim)** — the docstring section is retitled &quot;What is
+  deliberately NOT joined&quot; and now says the opposite of what it used to; the test
+  is renamed and its second half drives `scan()` and asserts the pre-`/clear`
+  session is *not* promoted and has no `promotedTo`. Honest.
+* **m1 (`$setOnInsert` disagreement)** — `sources` is out of the immutables in
+  both mappers; the comparison at `:783-786` is now unfiltered.
+
+I also settled the one item the test gate flagged as prose-only, against the
+running `mongo:7` container (7.0.39), because a permanent store's shape should
+not rest on an unpinned assertion. **Both halves of the `:1066-1076` rationale
+are true:**
+
+```
+$addToSet:{sources:{$each:[]}} + upsert  -&gt;  {&quot;_id&quot;:&quot;k1&quot;,&quot;cls&quot;:&quot;observed&quot;,&quot;sources&quot;:[]}
+$setOnInsert:{sources:[]} + $addToSet:{sources:{$each:[{path:&quot;p&quot;}]}}
+                                         -&gt;  MongoServerError: Updating the path
+                                             'sources' would create a conflict at 'sources'
+```
+
+So R-46's &quot;transcriptless seventh ⇒ `sources: []`&quot; really does survive a real
+server, in both insert orders. Not a finding — recorded so the next reader does
+not have to re-derive it.
+
+Also verified clean: no `pymongo` string in the module (GD-21); no DB I/O
+anywhere (GD-22); every `_id` is a `refs` string, both grammars declared on
+`COLLECTIONS[&quot;sessions&quot;].id_kinds`, no sub-document `_id` (GD-24); only
+`$setOnInsert`/`$addToSet`/`$min`/`$max`/`$set`, `$set` confined to `cwd`,
+`registry`, `promotedTo`, none of them in the collection's `accumulable` tuple
+(GD-25); no delete verb, no `$unset`, no TTL, `present` is a field (GD-26); no
+credential, URI or secret path (GD-27); `provenance:&quot;harness&quot;` `$setOnInsert` on
+every document (GD-28); no client, no lease, no write path (GD-29). Ownership is
+clean — `aggregator/sessions.py` and `tests/test_sessions.py` are the only two
+`.py` files newer than the prior sub-plan's last write, `mirror.py` is untouched,
+no commits. `tests/test_sessions.py` is now 0755 (attempt-1 m5). Full suite
+`run_all.sh`: 15 passed, 0 failed, RC=0; `test_sessions.py` alone: 161 `ok`,
+exit 0, 26 defs and 26 entries in `main()`.
+
+---
+
+## Major
+
+### M1 — the third instance of the bug class this loop has already fixed twice: `_realpath` catches `OSError` only, so one NUL byte in `history.jsonl` or in a registry `cwd` kills the entire discovery pass (`aggregator/sessions.py:337-341`, reached from `:705`, `:734`, `:587`, `:615-616`)
+
+```python
+def _realpath(path):
+    try:
+        return os.path.realpath(os.fspath(path))
+    except OSError:                                              # pragma: no cover
+        return os.fspath(path)
+```
+
+`os.path.realpath` does not raise only `OSError`. `posixpath.realpath` wraps its
+`os.lstat` calls in `except OSError`, and an embedded NUL raises **`ValueError`**
+out of `lstat` — which the stdlib does not catch and neither does this helper:
+
+```
+&gt;&gt;&gt; os.path.realpath(&quot;\x00&quot;)
+ValueError: lstat: embedded null character in path
+```
+
+Two of this module's three untrusted string inputs flow straight into it:
+
+* `read_history_sessions:734` — `_realpath(project)`, where `project` is a
+  `str` taken verbatim from a `history.jsonl` line;
+* `read_registry:615` — `_realpath(entry_cwd)`, where `entry_cwd` is a `str`
+  taken verbatim from `~/.claude/sessions/&lt;pid&gt;.json`.
+
+Reproduced against the frozen fixture tree (script:
+`.claude/local-orchestrators/touch-mongo-live/findings/sp-sessions-arm-critique-attempt-2-probe_nul.py`, four arms):
+
+```
+A history NUL:    SCAN CRASHED: ValueError lstat: embedded null character in path
+B registry NUL:   SCAN CRASHED: ValueError lstat: embedded null character in path
+C long path:      OK 7                      # ENAMETOOLONG is an OSError — caught
+D wired rebuild:  CRASHED: ValueError lstat: embedded null character in path
+```
+
+Arm D is the one that matters: it goes through
+`mirror.iter_rebuild_observations(registry_modules=[&quot;sessions&quot;])`, which calls
+`source()` with **no** exception handler, so the blast radius is the whole
+`--rebuild`/poll pass for *every* session, not the one bad line. Arm C is
+included to show the guard is not useless — it is just incomplete.
+
+This is not a new class of defect for this file. It is the *same* class, for the
+third time:
+
+* the alias-file NUL, already fixed and tested (`_SLUG_OK_RE` at `:279`, whose
+  own comment says &quot;an entry containing a NUL raised `ValueError: embedded null
+  byte` out of `open()` and took the whole scan with it, which is a discovery
+  pass killed by a file it was tolerating&quot;);
+* the absurd registry timestamp, fixed this attempt (`_epoch_ms:563` catches
+  `ValueError` explicitly, with a docstring explaining exactly this escape
+  route);
+* and this one, in the helper that exists *for* absorbing path failures, still
+  carrying `# pragma: no cover` — a marker asserting the fallback is unreachable
+  when it is reachable from two files on disk.
+
+The module's contract is stated in bold twice and is unambiguous:
+`SessionsError`'s docstring (`:214-215`) — *&quot;Discovery never raises — every
+unreadable thing on disk is counted and skipped&quot;* — and the &quot;Tolerated, never
+fatal&quot; section (`:149-158`), which even enumerates &quot;a registry timestamp that is
+out of range or not finite (`json.load` accepts bare `Infinity`)&quot; while missing
+the sibling case one field over.
+
+**Fix (small, and the correct fallback is already written):**
+
+```python
+    except (OSError, ValueError):
+        return os.fspath(path)
+```
+
+Drop the `# pragma: no cover`. Returning the raw string is the right answer for
+both call sites: a NUL-bearing `project` then simply fails the `!= target`
+comparison and the record is passed over, and a NUL-bearing registry `cwd` fails
+both the realpath check and `slug_for(...) in slug_set`, so the entry is counted
+as `registry_out_of_scope` — no new counter needed, though a distinct one would
+be more honest. Test both arms end to end (a `history.jsonl` line and a
+`sessions/15934.json` whose `cwd` carries `chr(0)`), asserting `scan()` completes
+with the expected document count and the skip is counted — the same shape as
+`test_an_absurd_registry_timestamp_cannot_kill_the_pass`, which is the model to
+copy.
+
+---
+
+## Minor
+
+### m1 — a well-formed *empty* `.session-aliases` is counted as unreadable (`sessions.py:399-400`)
+
+```python
+if not out and stripped and not rejected_here and skipped is not None:
+    skipped[&quot;alias_unreadable&quot;] += 1
+```
+
+A file whose whole content is `[]` — the obvious spelling of &quot;this project has
+no aliases&quot;, and what `recordSessionAlias` would leave behind after the last
+alias was removed — parses fine, yields `entries == []`, rejects nothing, and is
+counted as unreadable. Same for a file that is only comments
+(`# written by recordSessionAlias\n`), which the test's own second format proves
+is a shape this module expects to meet. The counters exist so *&quot;we ingested
+nothing&quot;* and *&quot;we ingested nothing because six files were unreadable&quot;* stay
+different answers (`:149-158`); a false positive here corrupts exactly that
+distinction, in the direction that manufactures alarm.
+
+**Fix:** track whether the file was *understood* rather than whether it produced
+entries — e.g. set `parsed = True` when `json.loads` returned a list, or when at
+least one non-blank, non-comment line was seen, and only count
+`alias_unreadable` when `not parsed`. Test `[]` and a comments-only file
+explicitly.
+
+### m2 — the new memo drops the counters on the floor (`sessions.py:478`)
+
+```python
+slugs = tuple(project_slugs(cwd, root))
+```
+
+`scoped_slugs` — the function attempt-1's m3 asked for, and the one the whole
+per-path backfill seam now goes through — calls `project_slugs` with **no**
+`skipped`. So on a `--backfill` (the mode that reads every `.jsonl` in the
+corpus) every rejected alias entry, every unreadable alias file and every
+`slug_cap` hit is silent. The module's counted-never-silent rule is applied to
+`scan()` and to nothing else, and the newly added path is precisely where a
+widened or truncated scope is hardest to notice.
+
+**Fix:** give `scoped_slugs` an optional `skipped=` it forwards (cache the
+slug tuple, not the counting), or memoize `(slugs, skips)` together and expose
+the accumulated counts so `mirror.iter_backfill_observations`' caller can report
+them. Assert in a test that a rejected alias entry seen only through the
+per-path seam is still counted somewhere.
+
+### m3 — the root-relative invariant that the fingerprint depends on is enforced at the scan site, never at the mapping boundary (`sessions.py:763-773`, `:1077-1078`)
+
+`Source`'s docstring is explicit about why paths are root-relative: *&quot;an absolute
+path would make a rebuild's fingerprint depend on the home directory it ran in,
+and GD-25's acceptance test compares fingerprints across passes&quot;* (`:749-752`).
+The only thing that makes it true is `_rel()` at the four `scan`/per-path
+construction sites. `as_element` validates `kind` against `SOURCE_KINDS` and
+nothing about `path`, and `map_session` explicitly accepts plain dicts for
+replay/fixture use (`:1077`, tested at `test_source_elements_have_a_pinned_field_order`),
+so `map_session({&quot;session_id&quot;: …, &quot;sources&quot;: [{&quot;path&quot;: &quot;/home/x/y.jsonl&quot;}]})`
+stores an absolute path and silently makes that document's fingerprint
+machine-dependent. The module's stated contract for the mapping half is that a
+malformed observation surfaces as `SessionsError` *before* a wrong value reaches
+a permanent store (`:212-220`) — path shape is exactly such a value.
+
+**Fix:** in `as_element`, refuse a `path` that is empty, starts with `/`, or
+contains `\\` or a `..` segment, with a `SessionsError` naming the invariant;
+add a test that a dict source with an absolute path is refused.
+
+---
+
+## Nits
+
+* **n1** — `_usable_slug` is annotated `-&gt; str` and returns `bool(...)`
+  (`sessions.py:404`, `:413`).
+* **n2** — `read_registry:637`'s `cwd=entry_cwd or (cwd or &quot;&quot;)` fallback is
+  unreachable from `scan`: when `target is not None` (always, from `scan`) an
+  empty `entry_cwd` is already refused as out of scope at `:614-619`. Dead
+  branch implying a tolerated case that is not tolerated.
+* **n3** — the SD-1 purity check
+  (`test_sessions.py:723-736`) inspects only *direct* calls inside four named
+  functions. `map_session` reaches `_as_observation`, `Source.as_element` and
+  `ms.merge_ops`, none of which are walked, so a helper doing I/O would pass.
+  Cheap upgrade: resolve the module-local callees transitively (one level is
+  enough here).
+* **n4** — three `check(True, &quot;…&quot;)` calls (`test_sessions.py:317`, `:369`,
+  `:743`) stand in for &quot;the loop above did not raise&quot;. They do fail the run (the
+  traceback escapes `main`), but as an unhandled traceback rather than a `FAIL:`
+  line in the report the file is otherwise careful to produce. Wrap in
+  `try/except` and `check(False, …)`.
+* **n5** — the per-path ownership test is
+  `os.path.basename(os.path.dirname(path)) in slugs` (`sessions.py:1173-1175`),
+  not a rooted prefix test: any path anywhere on disk whose *parent directory
+  name* equals a scoped slug is claimed as owned. Harmless while only
+  `mirror`'s rooted walk calls it; one `os.path.commonpath`-style check against
+  `&lt;root&gt;/projects/&lt;slug&gt;` would close it at the same cost.
+* **n6** — `scan()` re-reads all of `history.jsonl` and re-lists every slug
+  directory on every call, and `:883` says it is &quot;the one a live poll uses&quot;.
+  33 KB and 5 directories today, so nowhere near GD-30's budget — but it is
+  O(corpus) by construction where GD-30 asks for O(delta) ticks. Worth one
+  sentence for the poll-loop owner (a `(st_ino, size)` checkpoint on
+  `history.jsonl`, or a lower discovery cadence than the 250 ms tailer tick).
+* **n7** — `_SCOPE_CACHE` (`:454`) is a module-global dict with no eviction. One
+  entry in practice; a long-lived process serving several `(cwd, root)` pairs
+  grows it forever. A two-entry bound or an explicit &quot;last key wins&quot; would cost
+  nothing.
+
+---
+
+## Verdict fields
+
+* **approved:** false — one major.
+* **depth:** in-scope. M1 is a two-token change to one `except` clause plus a
+  test; m1–m3 and the nits are all inside these two files. Nothing here crosses
+  a sub-plan boundary or wants new research. (The `Prior` wiring gap is real but
+  is correctly *recorded* rather than fixed here — it belongs to whoever owns the
+  poll loop and the `mirror` handle, and this attempt hands it over properly.)
+* **critical_defect:** false. Nothing here corrupts or wastes the remaining
+  sub-plans; `sessions.py`'s schema, `_id` grammar and upsert algebra are sound
+  and verified against a real mongod, so sp-08…sp-11 can be built on top of them
+  while this fix lands.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

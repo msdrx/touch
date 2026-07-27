@@ -1,0 +1,496 @@
+<title>sp-server-api — cycle 2</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-server-api — implement→test→critique, attempt 2/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 2 addressed every item from both attempt-1 findings files (test gate + critique). All fixes landed inside the three owned files; no other file touched, no commit.
+
+TEST GATE (the single new regression)
+- `_usage()` no longer spells a mongod port (&quot;Never publish the mongod port … its port comes from .touch/mongo.json, never from source&quot;), so `tests/test_mongo_deploy.py`'s static guard over `aggregator/*.py` passes. Verified by running the full `test_mongo_deploy.py` including the live `mongo:7` Docker arm — green. The contradicting assertion in `test_server_core.py` was rewritten to require the prose AND assert `&quot;27017&quot; not in _usage()`, so the two suites can no longer demand opposite things.
+
+BLOCKERS
+- B2 timeline pagination loss: the cursor is now the whole sort key `(lineNo, _id)` via one `_row_key()` used by both the sort and the filter; `?since=&amp;sinceId=` in, `nextSince`/`nextSinceId` out. A missing `sinceId` is `&quot;&quot;` (the position *before* a line) so half a cursor re-reads a line instead of losing the rest of a group. New test pages the frozen `live-run-shape` corpus (671 records, 100 lineNo groups of 9) at limit 100 and 7 and asserts set AND order equality with the unpaged answer.
+- B3 header injection / crash: `Response.head_bytes` validates header names against RFC 7230 `token` (raises `ServerError` — a bad name is a code bug) and passes every value through the new `header_value()` (CR/LF/NUL removed, non-ASCII replaced). `X-Touch-Basename` is additionally `urllib.parse.quote`d so the real name stays recoverable. Tests cover the CRLF split, the non-latin-1 `UnicodeEncodeError`, and the route end-to-end.
+
+MAJORS
+- M1: `/api/events` `run=`/`stream=` now 404 when the stream has never been observed (malformed still 400, checked first); the `session=` arm keeps its own existence check.
+- M2: `_current_run_stream()` picks the most recently *written* run stream by `os.stat(...).st_mtime` with a name tie-break, not the alphabetically last; docstring corrected. Test builds three runs out of alphabetical order with explicit mtimes and asserts both `currentRun` and the &quot;current run replays whole, others capped&quot; consequence.
+- M3: `ReadModel.bucket()` now returns a snapshot (`_snapshot`, retry-then-503, never a 500), `lookup()` added for the O(1) reads that must not pay for a copy, `sizes()`/`state_snapshot()` added, and `reduce` is handed a generation snapshot. `ReadModel`'s docstring documents the rule. Test: 120 requests against a state churned by another thread at `setswitchinterval(1e-6)` — all 200.
+- M4: `/health` publishes no observation — tailer `path` replaced by a 12-hex `target` hash (basename deliberately NOT published: for a transcript it *is* the session uuid), `store.root` replaced by `configured`/`streamCount`. Test registers a real `tailer.Tailer` and asserts no uuid, no slug, no run id and nothing path-shaped on the untokened route.
+
+MINORS/NITS
+- m1 `flag()`: bare `?full` is now True (matches its docstring). m2: `positive_int(..., minimum=1)` on every page limit, so `limit=0` can no longer yield an empty page claiming `hasMore`. m3: `start_server(limit=MAX_HEAD_BYTES*2)` makes the 413 branch reachable — asserted over a real socket. m4: `?from=` reports `from`/`fromApplied` on the hello frame instead of vanishing. m5: a stream appearing after the mode switch is backfilled `live:false` via the shared `_emit_backfill()` rather than replayed as live. n1: `READ_ROUTES`/`CONTROL_ROUTES` (empty) whose union is `ROUTES`, with a test. n2: `write_server_json` chmods an existing `.touch/` to 0700, with a test.
+
+Both owned suites pass: `tests/test_server_core.py` (163 assertions) and `tests/test_api.py` (139 assertions), plus `test_mongo_deploy.py` and `test_stdlib_only.py` re-run green.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites green: tests/test_server_core.py rc 0 (150 ok assertions, up from 127) and tests/test_api.py rc 0 (128, up from 102). The attempt-1 regression is fixed — tests/test_mongo_deploy.py now exits 0 including the live mongo:7 Docker arm; the only remaining 27017 literal under aggregator/ is mirror.py:1791 (a real # comment, another sub-plan's file), and the fix removed the numeral from server.py _usage() rather than working around the guard with a #. Full suite: 24 files run, 22 PASS, 2 FAIL — tests/test_mirror.py (3) and tests/test_sessions.py (1), character-for-character identical to the recorded baseline from the RED sp-mirror-deploy / sp-sessions-arm loops, so not attributable. Bare-checkout arm verified by shadowing pymongo with an ImportError stub: test_server_core, test_api, test_mongo_deploy, test_mongo_store all rc 0; server.py imports no driver (GD-21). Ownership clean — mtimes show only the three owned files changed (19:12–19:15), git status matches the pre-attempt snapshot, and no commit was made (HEAD still 579446e). sp-12 items R-30/R-31/R-55:server are all backed by behavioural assertions.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 0 blockers, 2 majors, 4 minors, 3 nits. All 13 attempt-1 findings verified fixed by execution (test_mongo_deploy rc 0 incl. the live mongo:7 arm; timeline set-equality over the 671-record corpus; header sanitizer in head_bytes; 404 on unknown run/stream; mtime-ordered current run; snapshot-based concurrency fix; /health path redaction). Both owned suites green, ownership clean, HEAD still 579446e, GD-21/22/24/25/26/27/29/30 re-verified clean. Two majors remain, both contract-vs-code drift in the docstring sp-13 is told to restate verbatim: (M1) the hello frame's documented `oldest`/`truncated` are structurally ALWAYS empty — they are populated in _emit_backfill during replay(), which runs after hello() is sent, and the real anchors ride an undocumented `mode` frame; reproduced (HELLO oldest {} vs SWITCH oldest {session:...:46, run:...:1}), so a page coding against the stated contract never renders R-55's load-older affordance. (M2) one malformed `?cursor=` on the WS handshake silently discards EVERY resume position (parse_cursor_params raises on the first bad entry and stream() swallows the 400), reproduced: a valid cursor + &quot;garbage&quot; yields cursors={} and a full 10-frame replay — R-55's named duplicate-on-reconnect failure, and the exact silent-drop class this attempt just fixed for `?from=` with fromApplied; the function's documented 400 is unreachable from its only caller. Minors: malformed `?stream=` falls back to serving every stream; resume deeper than MAX_REPLAY_EVENTS gaps while the docstring promises &quot;no gap&quot;; tick() advances the cursor past a token record the coalescer still holds (reproduced: subscribe ack publishes seq 3, unsent, pending 1); Content-Type bypasses the header sanitizer.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 3/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 2 addressed every item from both attempt-1 findings files (test gate + critique). All fixes landed inside the three owned files; no other file touched, no commit.
+
+TEST GATE (the single new regression)
+- `_usage()` no longer spells a mongod port (&quot;Never publish the mongod port … its port comes from .touch/mongo.json, never from source&quot;), so `tests/test_mongo_deploy.py`'s static guard over `aggregator/*.py` passes. Verified by running the full `test_mongo_deploy.py` including the live `mongo:7` Docker arm — green. The contradicting assertion in `test_server_core.py` was rewritten to require the prose AND assert `&quot;27017&quot; not in _usage()`, so the two suites can no longer demand opposite things.
+
+BLOCKERS
+- B2 timeline pagination loss: the cursor is now the whole sort key `(lineNo, _id)` via one `_row_key()` used by both the sort and the filter; `?since=&amp;sinceId=` in, `nextSince`/`nextSinceId` out. A missing `sinceId` is `&quot;&quot;` (the position *before* a line) so half a cursor re-reads a line instead of losing the rest of a group. New test pages the frozen `live-run-shape` corpus (671 records, 100 lineNo groups of 9) at limit 100 and 7 and asserts set AND order equality with the unpaged answer.
+- B3 header injection / crash: `Response.head_bytes` validates header names against RFC 7230 `token` (raises `ServerError` — a bad name is a code bug) and passes every value through the new `header_value()` (CR/LF/NUL removed, non-ASCII replaced). `X-Touch-Basename` is additionally `urllib.parse.quote`d so the real name stays recoverable. Tests cover the CRLF split, the non-latin-1 `UnicodeEncodeError`, and the route end-to-end.
+
+MAJORS
+- M1: `/api/events` `run=`/`stream=` now 404 when the stream has never been observed (malformed still 400, checked first); the `session=` arm keeps its own existence check.
+- M2: `_current_run_stream()` picks the most recently *written* run stream by `os.stat(...).st_mtime` with a name tie-break, not the alphabetically last; docstring corrected. Test builds three runs out of alphabetical order with explicit mtimes and asserts both `currentRun` and the &quot;current run replays whole, others capped&quot; consequence.
+- M3: `ReadModel.bucket()` now returns a snapshot (`_snapshot`, retry-then-503, never a 500), `lookup()` added for the O(1) reads that must not pay for a copy, `sizes()`/`state_snapshot()` added, and `reduce` is handed a generation snapshot. `ReadModel`'s docstring documents the rule. Test: 120 requests against a state churned by another thread at `setswitchinterval(1e-6)` — all 200.
+- M4: `/health` publishes no observation — tailer `path` replaced by a 12-hex `target` hash (basename deliberately NOT published: for a transcript it *is* the session uuid), `store.root` replaced by `configured`/`streamCount`. Test registers a real `tailer.Tailer` and asserts no uuid, no slug, no run id and nothing path-shaped on the untokened route.
+
+MINORS/NITS
+- m1 `flag()`: bare `?full` is now True (matches its docstring). m2: `positive_int(..., minimum=1)` on every page limit, so `limit=0` can no longer yield an empty page claiming `hasMore`. m3: `start_server(limit=MAX_HEAD_BYTES*2)` makes the 413 branch reachable — asserted over a real socket. m4: `?from=` reports `from`/`fromApplied` on the hello frame instead of vanishing. m5: a stream appearing after the mode switch is backfilled `live:false` via the shared `_emit_backfill()` rather than replayed as live. n1: `READ_ROUTES`/`CONTROL_ROUTES` (empty) whose union is `ROUTES`, with a test. n2: `write_server_json` chmods an existing `.touch/` to 0700, with a test.
+
+Both owned suites pass: `tests/test_server_core.py` (163 assertions) and `tests/test_api.py` (139 assertions), plus `test_mongo_deploy.py` and `test_stdlib_only.py` re-run green.</li><li>Test gate PASSED: PASS. Owned suites green: tests/test_server_core.py rc 0 (150 ok assertions, up from 127) and tests/test_api.py rc 0 (128, up from 102). The attempt-1 regression is fixed — tests/test_mongo_deploy.py now exits 0 including the live mongo:7 Docker arm; the only remaining 27017 literal under aggregator/ is mirror.py:1791 (a real # comment, another sub-plan's file), and the fix removed the numeral from server.py _usage() rather than working around the guard with a #. Full suite: 24 files run, 22 PASS, 2 FAIL — tests/test_mirror.py (3) and tests/test_sessions.py (1), character-for-character identical to the recorded baseline from the RED sp-mirror-deploy / sp-sessions-arm loops, so not attributable. Bare-checkout arm verified by shadowing pymongo with an ImportError stub: test_server_core, test_api, test_mongo_deploy, test_mongo_store all rc 0; server.py imports no driver (GD-21). Ownership clean — mtimes show only the three owned files changed (19:12–19:15), git status matches the pre-attempt snapshot, and no commit was made (HEAD still 579446e). sp-12 items R-30/R-31/R-55:server are all backed by behavioural assertions.</li><li>Critique REJECTED: REJECTED — 0 blockers, 2 majors, 4 minors, 3 nits. All 13 attempt-1 findings verified fixed by execution (test_mongo_deploy rc 0 incl. the live mongo:7 arm; timeline set-equality over the 671-record corpus; header sanitizer in head_bytes; 404 on unknown run/stream; mtime-ordered current run; snapshot-based concurrency fix; /health path redaction). Both owned suites green, ownership clean, HEAD still 579446e, GD-21/22/24/25/26/27/29/30 re-verified clean. Two majors remain, both contract-vs-code drift in the docstring sp-13 is told to restate verbatim: (M1) the hello frame's documented `oldest`/`truncated` are structurally ALWAYS empty — they are populated in _emit_backfill during replay(), which runs after hello() is sent, and the real anchors ride an undocumented `mode` frame; reproduced (HELLO oldest {} vs SWITCH oldest {session:...:46, run:...:1}), so a page coding against the stated contract never renders R-55's load-older affordance. (M2) one malformed `?cursor=` on the WS handshake silently discards EVERY resume position (parse_cursor_params raises on the first bad entry and stream() swallows the 400), reproduced: a valid cursor + &quot;garbage&quot; yields cursors={} and a full 10-frame replay — R-55's named duplicate-on-reconnect failure, and the exact silent-drop class this attempt just fixed for `?from=` with fromApplied; the function's documented 400 is unreachable from its only caller. Minors: malformed `?stream=` falls back to serving every stream; resume deeper than MAX_REPLAY_EVENTS gaps while the docstring promises &quot;no gap&quot;; tick() advances the cursor past a token record the coalescer still holds (reproduced: subscribe ack publishes seq 3, unsent, pending 1); Content-Type bypasses the header sanitizer.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-server-api-test-attempt-2.md</summary><pre># sp-server-api — test gate, attempt 2
+
+**Verdict: PASS.** Both owned suites 100 % green, the attempt-1 regression is
+gone, the full suite shows only the two known baseline failures, ownership is
+clean, and no commit was made.
+
+Environment: Python 3.13, pymongo 4.17.0 present, Docker daemon available
+(`mongo:7` local), `TOUCH_MONGO_URI` unset, no services running.
+
+Implementer's changed set (all three sub-plan-owned — no violation):
+`aggregator/server.py`, `tests/test_server_core.py`, `tests/test_api.py`.
+
+---
+
+## 1. Targeted suites (sp-server-api owned) — GREEN
+
+Run from the repo root as standalone executables:
+
+| suite | rc | `ok:` assertions | banner |
+|---|---|---|---|
+| `tests/test_server_core.py` | **0** | 150 | `all server core tests passed` |
+| `tests/test_api.py` | **0** | 128 | `all read API + wire tests passed` |
+
+Assertion counts grew over attempt 1 (127 → 150, 102 → 128) — the fix did not
+come at the cost of coverage. Assertions remain behavioural, not tautological:
+they bind real sockets and exercise the real wire contract, e.g. GD-13
+(`an unauthenticated API call is 401 on the wire`, `a cross-origin WS upgrade
+is 403`, `an unsupported WS version is 426 advertising 13, never the page
+body`, `the accept key is RFC 6455's`, `nosniff is on the wire`); R-55 replay/
+resume (`the bounded replay arrives with live:false`, `exactly one mode frame
+marks the replay-&gt;tail boundary`, `a reconnect replays exactly the records
+after the client's (stream, seq)`, `no record is delivered twice`, `the union
+of the two sessions equals a full replay — no gap either`, and its
+`(stream, seq)` cursor, so the client can resume from it); absolute-token
+coalescing (`the LAST absolute value … never a sum of deltas`, `coalescing is
+per (stream, ref)`); R-45 health (`the R-45 mirror block is served verbatim`,
+`a tailer whose target is gone is visible (AUDIT-15)`, `no mirror configured
+reports absent — never an error (GD-22)`); route-table posture (`a garbage
+head does not raise — it yields no method, which the table 404s`).
+
+## 2. Full suite regression gate — PASS (no new failures)
+
+`for t in .claude/shared/monitoring/tests/test_*.py … ; for t in tests/test_*.py …`
+at the repo root, no services running, `TOUCH_MONGO_URI` unset. 24 files run.
+
+- **PASS (22):** monitoring `test_frontend`, `test_server`, `test_shell`,
+  `test_watcher`; repo `test_agents`, `test_api`, `test_bootstrap`,
+  `test_custom_state`, `test_fixtures`, `test_ingest`, `test_legacy`,
+  **`test_mongo_deploy`**, `test_mongo_store`, `test_reducer`, `test_refs`,
+  `test_server_core`, `test_slots`, `test_stdlib_only`, `test_store`,
+  `test_tailer`, `test_usage`, `test_ws`.
+- **FAIL (2) — pre-existing baseline, NOT attributable:**
+  - `tests/test_mirror.py` rc 1, `FAILED (3)`:
+    `…proven by the call count: the held ticks made no attempt`;
+    `the first generation lands`;
+    `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  - `tests/test_sessions.py` rc 1, `FAILED (1)`:
+    `wipe + --rebuild reproduces a byte-identical fingerprint`.
+
+  Character-for-character identical to the baseline recorded in
+  `sp-server-api-test-attempt-1.md` §2 and `sp-custom-state-test-attempt-4.md`
+  §2, predating this attempt. They belong to the loops that closed RED
+  (`sp-mirror-deploy`, `sp-sessions-arm`) and their files were not touched
+  here. Baseline failures do not fail this gate.
+
+### The attempt-1 regression is FIXED
+
+`tests/test_mongo_deploy.py` now exits **0** (including the live `mongo:7`
+Docker arm). `grep -n 27017 aggregator/*.py` yields exactly one hit —
+`aggregator/mirror.py:1791`, a genuine `#` comment owned by another sub-plan.
+`aggregator/server.py` no longer spells a mongod port anywhere; the `_usage()`
+text at line 2396 now reads
+
+```
+&quot;                   Never publish the mongod port (GD-27: Mongo stays\n&quot;
+```
+
+i.e. the advice is preserved and the numeral is gone. The guard was **not**
+worked around by inserting a `#` before the literal (the escape hatch the
+attempt-1 findings warned against) — the literal is simply absent.
+
+## 3. Bare-checkout / no-third-party arm (GD-21 / R-56)
+
+Re-ran with `pymongo` shadowed by a stub that raises `ImportError` on import
+(`PYTHONPATH` shim): `test_server_core`, `test_api`, `test_mongo_deploy`,
+`test_mongo_store` all rc 0 — Mongo-dependent tests skip cleanly and the
+server path needs no driver. `grep 'import pymongo\|from pymongo'
+aggregator/server.py` → no hits (GD-21 respected; the suite's own static guard
+also asserts the server does not import `mirror.py` — the health block is
+injected).
+
+## 4. Plan conformance (sp-12 / R-30 / R-31 / R-55:server)
+
+Owned files present and non-empty: `aggregator/server.py` (113 355 B),
+`tests/test_server_core.py` (37 756 B), `tests/test_api.py` (46 445 B).
+Every owned item is backed by live assertions: GD-13 in full (loopback
+default, opt-in `0.0.0.0`, per-boot token via `hmac.compare_digest` on every
+route but `/health`, Origin/Host allowlist at WS upgrade), the static
+`(method,route)` dict with a default 404 and no fallback, `safe_artifact_path`
+containment plus CSP sandbox and nosniff, `/health` per-tailer liveness +
+parse-failure counters extended with the R-45 `mirror:{…}` block served
+verbatim, R-31 query-string-only endpoints with one shared regex id validator
+and `(stream,seq)` cursors, and R-55:server (bounded default replay window,
+explicit `?from=` load-older, reconnect resume from the client's last
+`(stream,seq)` with no duplicate and no gap, `live:true|false` frames with a
+single mode-switch frame at the replay→tail boundary, ≥1 s absolute-token
+coalescing per `(stream, ref)`). Reads stay memory-authoritative (GD-22); the
+server serves the sp-10 reduction and derives nothing.
+
+**Ownership:** clean. `ls -lt` over `aggregator/ tests/ docs/` shows only
+`tests/test_api.py` (19:15), `aggregator/server.py` (19:15) and
+`tests/test_server_core.py` (19:12) in this attempt's window; every other
+module predates it (next newest `aggregator/custom_state.py` at 18:21).
+`git status --short` matches the pre-attempt snapshot — no file outside the
+three owned paths changed.
+
+**Commits:** none. `git log --oneline -1` is still `579446e orchestration
+history`, the prior pass's HEAD. Unrelated in-flight `.claude/` state was left
+untouched.
+
+## 5. Nothing outstanding
+
+No new failures, no ownership violation, no unmet owned item. Gate is green.
+</pre></details>
+<details><summary>Critique findings — sp-server-api-critique-attempt-2.md</summary><pre># sp-server-api — adversarial critique, attempt 2
+
+**Verdict: REJECTED.** 0 blockers, 2 majors, 4 minors, 3 nits.
+Depth: **in-scope** — every fix lands inside the three owned files
+(`aggregator/server.py`, `tests/test_server_core.py`, `tests/test_api.py`);
+none of them needs another module, another sub-plan, or new research.
+critical_defect: **false**.
+
+Reviewed: full content of the three untracked files (no diff base) against
+`touch-mongo-live-subplans.md` §sp-12, R-30/R-31 (base), R-55/GD-21…GD-30
+(amendment), GD-11/GD-12/GD-13/GD-20/GD-23.
+
+## Attempt-1 findings: all thirteen verified fixed
+
+Re-checked each by execution, not by reading the diff:
+
+| # | attempt-1 finding | status |
+|---|---|---|
+| B1 | `27017` literal in `_usage()` | fixed — numeral gone (`server.py:2396`), the owned assertion now pins the *prose* (`test_server_core.py:509-515`), and `python3 tests/test_mongo_deploy.py` exits **0** including the live `mongo:7` Docker arm |
+| B2 | timeline lost records on a paged round-trip | fixed — the cursor is the whole sort key `(lineNo, _id)` (`_row_key`, `server.py:1016-1024`), and `test_the_timeline_cursor_is_the_whole_sort_key…` asserts **set equality** with the unpaged answer over the frozen 671-record corpus at limits 100 and 7 |
+| B3 | header-injection + `UnicodeEncodeError` via `X-Touch-Basename` | fixed in one place — `header_value()` (`server.py:253-270`) scrubs CR/LF/NUL and non-latin-1 for *every* header, the name is validated and raises `ServerError`, and the basename is percent-encoded at `:1841` |
+| M1 | unknown `run=`/`stream=` answered 200 + empty list | fixed — `server.py:1690-1692` 404s, with a test that names the run |
+| M2 | &quot;current run&quot; was the alphabetically largest | fixed — `_current_run_stream` orders by stream-file mtime (`:1262-1291`) with a test whose fixture is deliberately anti-alphabetical |
+| M3 | handlers iterated the shared state dict on a worker thread | fixed — `_snapshot()` + `ReadModel.bucket/lookup/sizes/state_snapshot` (`:736-831`), and a 120-request test under `setswitchinterval(1e-6)` with a churning writer, all 200 |
+| M4 | `/health` published `~/.claude` paths on the open route | fixed — `target_hash()` (`:909-924`), `store: {configured, streamCount}`, and a test asserting *nothing path-shaped* is on the open route |
+| m1–m5, n1, n2 | flag/limit=0/413/`?from=`/late-stream backfill/route groups/dir mode | all fixed, each with a behavioural assertion |
+
+Both owned suites are green (`test_server_core.py` rc 0, `test_api.py` rc 0),
+ownership is clean (only the three files carry 19:12–19:15 mtimes, `HEAD` is
+still `579446e`, no commit), and the checklist items I could falsify by
+execution — GD-21 (no `pymongo`/`bson`/`dns`/`mirror` import; every absolute
+import stdlib), GD-22 (no DB call on any liveness path; `/health` reports a
+raising mirror as `down` rather than 500), GD-24/25/26 (no `_id` construction,
+no `$`-verb, no `$unset`, no TTL index, no subtraction on a token field —
+AST- and tokenizer-guarded), GD-27 (no credential in any response; `.touch/`
+is gitignored so `server.json` cannot be committed), GD-29, GD-30 — are clean.
+`store.validate_stream`/`stream_path` were re-attacked with `..`, `.`, `#` and
+`|` payloads through `?run=`/`?stream=`; containment holds.
+
+So this rejection is narrow: two of them are contract statements that are
+false about the code they document, in the one docstring the plan says sp-13
+copies verbatim, plus one silent-drop that is the exact defect attempt 2 just
+fixed for a *different* parameter.
+
+---
+
+## MAJORS
+
+### M1 — the hello frame's `oldest`/`truncated` are structurally always empty, and the normative frame table says otherwise
+`aggregator/server.py:54-76` (the wire contract), `:1320-1340` (`hello`),
+`:1395-1406` (`switch`), `:1369-1393` (`_emit_backfill`)
+
+The module docstring is introduced as *&quot;The wire contract (R-55), restated here
+because sp-13 restates it verbatim&quot;*, and its frame table reads:
+
+```
+{&quot;type&quot;:&quot;hello&quot;,&quot;live&quot;:false,&quot;mode&quot;:&quot;replay&quot;,&quot;streams&quot;:{...},
+ &quot;cursors&quot;:{&quot;&lt;stream&gt;&quot;:&lt;seq&gt;},&quot;oldest&quot;:{&quot;&lt;stream&gt;&quot;:&lt;seq&gt;},
+ &quot;truncated&quot;:{&quot;&lt;stream&gt;&quot;:true},&quot;window&quot;:500,&quot;reducerVersion&quot;:&quot;1&quot;}
+{&quot;type&quot;:&quot;mode&quot;,&quot;live&quot;:true,&quot;mode&quot;:&quot;tail&quot;}        &lt;- the ONE boundary
+```
+
+Both lines are wrong, in opposite directions. `self.oldest` and
+`self.truncated` are populated **only** in `_emit_backfill` (`:1380-1383`),
+which runs during `replay()`; `HttpServer.stream` sends `hello()` *before*
+`replay()` (`:2300-2303`). Reproduced against a store with a 50-record run
+stream, a 50-record session stream and `window=5`:
+
+```
+HELLO  oldest: {}  truncated: {}
+(55 replay frames)
+SWITCH oldest: {'session:1234-1700000000': 46, 'run:wf_aaaaaaaa-aaa': 1}
+       truncated: {'session:1234-1700000000': True}
+```
+
+`hello()`'s own docstring — *&quot;Declares the mode, the window and where to load
+older&quot;* — is false for the same reason, and the docstring bullet at `:74-76`
+(*&quot;whatever the window cut off is reported per stream as `oldest`/`truncated`
+so the page's 'load older' button knows it has work and where to start&quot;*)
+attaches the fact to the wrong frame.
+
+Why this is major rather than cosmetic: the keys are **present and empty**,
+not absent. sp-13 is instructed to restate this contract verbatim, so the
+page it writes will read `hello.truncated` (`{}` — falsy), conclude nothing
+was cut, and never render the load-older affordance R-55 requires — while the
+real anchors sail past on an undocumented `mode` frame. A missing key would
+have crashed loudly in development; an empty one renders a wrong UI silently.
+`switch()`'s docstring already knows the truth (*&quot;both are only known after
+the replay&quot;*) — the contract at the top of the file was simply not updated to
+match it.
+
+**Fix:** make the table describe the code. Move `cursors`/`oldest`/`truncated`
+onto the `mode` frame in the docstring at `:58-65`, drop them from the hello
+example (or keep them and say explicitly that hello's copies are the
+*client-supplied* position and are empty on a fresh connect), and reword
+`hello()`'s docstring so it stops promising load-older anchors it cannot have.
+Add a test to `test_api.py` that walks hello → replay → switch and asserts the
+anchors are on the frame the contract names, with the truncated stream's real
+`oldest` — nothing in either suite currently asserts `oldest`/`truncated` on
+any frame, which is why the drift survived.
+
+### M2 — one malformed `?cursor=` on the WS handshake silently discards **every** resume position
+`aggregator/server.py:2245-2248` (`stream`), `:1477-1492`
+(`parse_cursor_params`)
+
+```python
+try:
+    cursors = parse_cursor_params(query)
+except HttpError:
+    cursors = {}
+```
+
+`parse_cursor_params` raises on the *first* bad entry, so a handshake carrying
+three cursors of which one is malformed loses all three. Reproduced with a
+valid `run:wf_aaaaaaaa-aaa#000000000005` plus a junk `&quot;garbage&quot;`:
+
+```
+parse_cursor_params -&gt; HttpError 400 &quot;malformed cursor 'garbage'&quot;
+stream() swallows it -&gt; cursors {} -&gt; replay() emits 10 frames
+                                      (records 1-10, all already held)
+hello.resumed = False
+```
+
+That is R-55's named failure — *&quot;reconnect mid-stream ⇒ no duplicate events&quot;* —
+reached by a client that got 2 of 3 cursors right. It is also the **same defect
+class attempt 2 just fixed for `?from=`**: after the 101 there is no status code
+left, so the fix was to publish `fromApplied` on the hello frame
+(`:1293-1301`, `:1334`) rather than drop the parameter silently. `?cursor=`
+never got the same treatment, and it is the parameter with the larger blast
+radius.
+
+Second half, and the reason this is a contract defect and not just a
+robustness one: `parse_cursor_params`' docstring says *&quot;A malformed one is a
+400: unlike the socket's `subscribe` (where ignoring is kinder than dropping
+the connection), a handshake has nothing to recover to.&quot;* The function has
+exactly one caller (`stream`) and that caller catches the 400 and continues, so
+**no client can ever observe the documented 400**. The docstring describes a
+policy the code does not implement.
+
+**Fix:** parse per-entry — keep the well-formed pairs, collect the rejected raw
+strings, and publish them on the hello frame the way `fromApplied` is published
+(`&quot;cursorsRejected&quot;: [&quot;garbage&quot;]`, or `&quot;cursorsAccepted&quot;/&quot;cursorsRejected&quot;`).
+Then correct the docstring to say the handshake reports rejects on the hello
+frame while `subscribe` reports them in its ack (which it already does, at
+`:1473-1474` — the two paths should read the same). Add a test: two cursors,
+one junk, assert the good one still resumes and the junk one is named in
+hello.
+
+---
+
+## MINORS
+
+### m1 — a malformed `?stream=` makes the socket serve **every** stream
+`aggregator/server.py:2251-2254`
+
+```python
+selected = [s for s in (query.get(&quot;stream&quot;) or []) if _is_stream(s)] or None
+```
+
+If the only `?stream=` given is malformed, `selected` is `None`, which
+`WsSession.streams()` reads as &quot;no selection&quot; and serves the whole store.
+Reproduced: `?stream=run:nonexistent#bad` →
+`['session:1234-1700000000', 'run:wf_aaaaaaaa-aaa']`. The client asked for one
+target and got a superset — the &quot;never a fallback to another target&quot; rule
+(GD-12) that this file's own module docstring cites, arriving through the
+query parser. `hello.streams` does publish what is being served, so it is
+observable, but so was `?from=` before it got `fromApplied`.
+**Fix:** keep the same shape as M2's — if any `?stream=` was given and none
+survived validation, serve nothing and publish `streamsRejected` on hello (or
+refuse the upgrade with a 400 *before* the 101, which is still available at
+`upgrade()`).
+
+### m2 — a resume further back than `MAX_REPLAY_EVENTS` produces a real gap while the docstring promises none
+`aggregator/server.py:77-81` (contract), `:1356-1358` (resume arm)
+
+The contract says resume yields *&quot;exactly the records after them. No
+duplicates, no gap&quot;*. The resume arm caps at `MAX_REPLAY_EVENTS` (5000), so a
+client whose cursor is 6000 records back is silently advanced to the newest
+5000 — a gap. It *is* reported (`truncated`/`oldest`, via the `mode` frame —
+see M1), which is the right behaviour; only the sentence is wrong.
+**Fix:** finish the sentence — &quot;…no gap, up to `MAX_REPLAY_EVENTS`; a deeper
+backlog is truncated and reported as `truncated`/`oldest`, and `?before=` is
+how the page walks the rest.&quot; One test with a 6000-record stream and a cursor
+at 1 pins it.
+
+### m3 — `tick()` advances the cursor past a token record the coalescer is still holding
+`aggregator/server.py:1439-1448`
+
+```python
+self.cursors[stream] = seq
+if _is_token_record(record):
+    released = self.coalescer.offer(stream, record, now)
+    if released is None:
+        continue
+```
+
+The cursor moves before the hold decision, so `self.cursors` can name a seq
+that was never sent — and `switch()` (`:1405`) and `subscribe()` (`:1473`)
+publish that dict to the client. Reproduced: three absolute token records for
+one agent; after the third is held, the `subscribe` ack returns
+`{'run:wf_tok00000-aaa': 3}` while seq 3 has not gone out and
+`coalescer.pending == 1`. A client that adopts the ack cursor and reconnects
+inside the ≤1 s window skips the record permanently — and if it was the last
+token record of a finished agent, the page shows a stale count forever. Narrow,
+but it is exactly the &quot;silently low counters, and nothing in the UI can notice&quot;
+failure the module docstring opens with.
+**Fix:** advance the cursor only for records actually emitted, and let
+`due()`'s release set it (`self.cursors[stream] = max(current, seq)` at the
+point of `out.append`). Test: hold a token frame, take the ack cursors, build a
+new `WsSession` from them, assert the held record still arrives.
+
+### m4 — `Content-Type` bypasses the header sanitizer the same method just installed
+`aggregator/server.py:311-321`
+
+`head_bytes` routes `self.headers` through `header_value()` and validates every
+name, but interpolates `self.content_type` directly into the head. Every
+content type is server-authored today, so this is defence-in-depth only — but
+the whole point of B3's fix was *&quot;the sanitizer lives here rather than at any
+one call site: every header this server will ever add passes through it,
+including the ones a later change adds without reading this docstring.&quot;* One
+field in the same method is exempt from that sentence.
+**Fix:** `f&quot;Content-Type: {header_value(self.content_type)}&quot;`, and extend
+`test_a_header_value_can_never_split_the_response` with a CRLF-bearing
+`content_type`.
+
+---
+
+## NITS
+
+### n1 — `query_source.find(collection, criteria, limit=)` is a seam nothing in the repo implements
+`aggregator/server.py:1937-1939`. `grep -rn &quot;def find&quot; aggregator/` finds only
+`find_spawns`, `find_persisted_output`, `find_snapshot`, `find_run_dirs` — no
+`find(collection, criteria, limit=)` on `mongo_store`, `mirror` or anything
+else; the only implementation is `FakeQuerySource` in `tests/test_api.py:600`.
+The injection is the right shape (GD-22 keeps Mongo optional and this file may
+not import a driver), but an interface with one fake and no producer drifts.
+**Fix:** state the expected provider and the exact signature in `h_query`'s
+docstring (&quot;whatever sub-plan wires the Mongo read supplies
+`find(collection, criteria, limit) -&gt; iterable[dict]`&quot;), so the next
+implementer matches it instead of inventing `query()`.
+
+### n2 — `inject_token`'s docstring is true of only one of its two arms
+`aggregator/server.py:690-712`. *&quot;The token is JSON-encoded, so a value
+containing a quote or a `&lt;` cannot break out of the string&quot;* describes the
+`&lt;script&gt;` fallback; the `__TOUCH_TOKEN__` arm (`:704`) substitutes the raw
+token. Harmless for `token_urlsafe`, and the docstring even says the safe
+alphabet is &quot;not a reason to build the string by hand&quot; — which is exactly what
+the placeholder arm does.
+**Fix:** say the placeholder arm substitutes the raw token and that sp-13 must
+therefore place `__TOUCH_TOKEN__` where a raw URL-safe token is valid.
+
+### n3 — `Api.hits` is collected and never published
+`aggregator/server.py:2039`, `:2077`. Per-route hit counts would be a natural
+`/health` operational field (counts, not observations — exactly what the open
+route is for). Either publish them or drop the dict.
+
+---
+
+## Checklist items verified clean (re-run, not inherited)
+
+- **GD-21** — `ast`-walked imports: `{asyncio, datetime, hashlib, hmac, json,
+  os, re, secrets, sys, time, urllib, dataclasses, __future__}`; no `pymongo`,
+  `bson`, `dns`, no `mirror`. `tests/test_mongo_deploy.py` rc 0.
+- **GD-22** — every route reads `model.state`/`model.store`; `/api/query`'s
+  Mongo arm is injected, optional and labelled; `/health` over a raising mirror
+  returns `state: down`, `ok: true`.
+- **GD-24/25/26** — no `_id` built here (only `store.cursor_key`, which
+  round-trips through `parse_cursor_key`); grep for `$set`/`$inc`/`$unset`/
+  `deleteMany`/`expireAfter` finds nothing (the only `TTL` is
+  `REDUCE_TTL_SECONDS`, a reduction cache); the AST guard on token subtraction
+  and the tokenizer guard on the word &quot;delta&quot; both hold.
+- **GD-27** — no token/URI/password on any response; `.touch/` is gitignored
+  (`.gitignore:20-21`) so `server.json` cannot be committed; `/health` carries
+  no path, no uuid, no run id (asserted with a real `tailer.Tailer` and a real
+  `store.Store`).
+- **GD-29/GD-30** — no client held; `tick()` is `store.follow`-incremental with
+  a per-stream checkpoint; `REDUCE_TTL_SECONDS` bounds reduction cost; token
+  coalescing is ≥1 s and wired to the store's real `kind: &quot;token&quot;`
+  (`store.KNOWN_KINDS`).
+- **GD-15 / ownership** — only `aggregator/server.py`,
+  `tests/test_server_core.py`, `tests/test_api.py` changed; `git status`
+  otherwise unchanged; `HEAD` still `579446e`.
+- **Tests assert behaviour** — the two suites I could most easily dismiss as
+  tautologies are not: the timeline paging test runs the frozen 671-record
+  corpus and asserts set equality plus order at two page sizes, and the
+  current-run test builds an anti-alphabetical fixture with real `os.utime`
+  mtimes. The concurrency test drives 120 real requests against a churning
+  writer. No skip-without-mongod arm is needed here — this file touches no
+  database.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

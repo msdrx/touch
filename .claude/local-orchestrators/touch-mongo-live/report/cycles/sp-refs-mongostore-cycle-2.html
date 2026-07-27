@@ -1,0 +1,825 @@
+<title>sp-refs-mongostore — cycle 2</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-refs-mongostore — implement→test→critique, attempt 2/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 2 addressed every item in sp-refs-mongostore-critique-attempt-1.md (1 blocker, 4 major, 4 minor, 4 nit); each fix was reproduced first and the three server-side claims re-verified against the live `mongo:7` container (`touch-mongo-sp05`, loopback+auth, throwaway `touch_probe_&lt;pid&gt;` db dropped by constructed name). No commit; only the four owned files touched.
+
+BLOCKER B1 — `CollectionSpec.id_kind` is now `id_kinds`, a tuple; `sessions` declares `(&quot;session&quot;,&quot;histSession&quot;)`, so GD-24's tagged union is storable on both arms. `check_id` accepts a key canonical under any declared kind and reports every grammar in the rejection. Verified: a `hist:&lt;sessionId&gt;` doc now writes through `bulk_upsert` to a real mongod. New `test_sessions_id_is_a_tagged_union`, plus a table test asserting every `refs` kind with a collection is DECLARED there (a grammar refs.py can emit but mongo_store rejects is an unwritable entity).
+
+MAJOR M1 — `validate_document` no longer skips a present `None` (the server's `$jsonSchema` pins a property whenever present; `null` fails an `[&quot;int&quot;,&quot;long&quot;]` pin), `_type_ok` gained an explicit `&quot;null&quot;` type so a nullable field can be pinned, and `guard_oversize` omits `sourcePath`/`byteOffset` rather than writing nulls. Re-verified on mongod: null `byteOffset` REJECTED, omitted ACCEPTED.
+
+M2 — `bulk_upsert` now calls `spec_for` once and `check_id` per operation, before pymongo is imported, so both refusals are testable with a stub `db` and nothing third-party installed; `validate_update` uses `spec_for` (not `.get`) so a typo'd collection raises instead of silently disabling the `$set`-on-accumulable fence.
+
+M3 — `$addToSet` dedupes on BSON equality (field-order-sensitive JSON text) instead of Python `==`; `fingerprint`'s set sort gained an order-sensitive tie-break. Probe confirms model and server now both keep 2 elements for `{path,present}` vs `{present,path}`, with equal fingerprints.
+
+M4 — `provenance` is appended to `required` structurally whenever a spec declares the enum, and `spec.required` is projected into `json_schema()[&quot;$jsonSchema&quot;][&quot;required&quot;]`. Live arm now asserts the server itself refuses a `records` doc with no provenance.
+
+MINOR m1 — `_conflicting_path` compares dotted prefixes in `merge_ops` and `validate_update` (`spawn` vs `spawn.fileHint`); server confirmed to refuse exactly that pair. m2 — `is_raw_wrapper` requires the exact wrapper field set and a string `_raw`, closing the `_check_keys` short-circuit. m3 — `expected_counts`' `stream_meta` half no longer calls the mapper's `session_of`/`line_number` (plain non-record line count, 34 = 34 distinct keys today, so a keying collapse now fails the assertion). m4 — added an AST string-literal guard so a delete verb cannot be reached via `getattr`.
+
+NIT n1 — new `refs.ref_id_kinds()` + a `refId` field validator: a `custom_state` `_id`'s left half must itself be a canonical `ref_key` output (docstring states honestly what it cannot decide — a runs/usage key is an escaped arbitrary string, so R-52's agents/run_nodes/slots rule stays with the writer). n2 — `ensure_schema` reads `list_indexes()` back and refuses to boot on any `expireAfterSeconds`, tested live by adding a TTL index by hand. n3 — parenthesised the `ts_fields` conditional. Also funneled parser failures in `refs.parse_ref_key` into `RefError` — `check_id(&quot;stream_meta&quot;, &quot;sess#notanumber&quot;)` previously escaped as a bare `ValueError` past every caller's except clause.
+
+Testing: `tests/test_refs.py` and `tests/test_mongo_store.py` both exit 0 in the pure arm; with `TOUCH_MONGO_URI` pointed at the running container the live arm is green too (one fingerprint across normal/shuffled/reversed, in-memory model byte-equal to the server, IXSCAN on both cursor forms). Full `tests/run_all.sh`: 12 passed, 0 failed. Note: I `pip install --break-system-packages pymongo==4.17.0 dnspython` so the live arm could run — the no-pymongo degrade path is still asserted statically, but a gate wanting the pymongo-absent arm should uninstall it.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">test gate</div><div class="verdict" style="color:var(--bad)">✗ FAIL</div><div class="sum">FAILED. Both owned suites (test_refs, test_mongo_store) and all 12 suites are green with pymongo installed, and the live mongo:7 arm passes fully (order-independent fingerprint b72e4348, IXSCAN, GD-26/27/28/29 all verified server-side). But the gate's stated baseline — green on a bare checkout with NO third-party packages — fails: with a real pymongo-free interpreter (venv --without-pip), tests/test_mongo_store.py exits 1 at test_bulk_upsert_applies_the_same_guards_as_the_memory_pass:396, assertion &quot;an empty batch is a no-op, not a connection&quot;. aggregator/mongo_store.py:1350-1358 imports pymongo one line BEFORE the `if not requests: return {...}` short-circuit, so bulk_upsert(NoDb(), &quot;records&quot;, []) raises MongoUnavailable and aborts the whole file (8 later test functions never run). New in attempt 2, introduced by the M2 critique fix, and it contradicts bulk_upsert's own docstring. Fix: move the empty-batch return above the pymongo import; add a call-granularity pymongo-absent arm. All other attempt-1 critique findings (B1 sessions tagged union, M1 null-vs-absent, M2 guards, M3 $addToSet field order, M4 mandatory provenance, m1/m2/m4/n2/n4) are now covered by non-tautological tests. Ownership clean: only the 4 owned files touched in-window, no commit.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 1 blocker, 2 major, 5 minor, 5 nit. BLOCKER (confirms the test gate, reproduced with a `venv --without-pip` interpreter): aggregator/mongo_store.py:1351-1358 imports pymongo one line before bulk_upsert's own `if not requests: return {...}` short-circuit, so `bulk_upsert(db, coll, [])` raises MongoUnavailable; tests/test_mongo_store.py exits 1 at line 396 and 8 later test functions never run on a bare checkout — contradicting the sub-plan's &quot;every module imports without pymongo installed&quot;, GD-21's &quot;absence never blocks a test&quot;, and bulk_upsert's own docstring (mongo_store.py:1333). Fix: move the empty-batch return above the import. MAJOR-1: no arm in either owned suite runs with pymongo unimportable — with pymongo installed both suites are green and the blocker is invisible, so the whole failure class is undetectable in the normal environment (existing GD-21 coverage is import-granularity only); add a sys.meta_path blocker arm exercising bulk_upsert/prepare_document/guard_oversize/ts_fields. MAJOR-2 (new, not previously reported): GD-25's count half is never applied to run_nodes/runs, and the retry-topology fixture journal_ops' docstring credits (fixtures/mirror/wf_455b348c-e17) is NOT in transcripts() — measured: distinct ordinals exercised = {0}, and replacing the whole ordinal derivation with a constant 0 leaves the corpus fingerprint byte-identical; with the fixture included the same break collapses 9 run_nodes into 6. Minors: uppercase-hex UUIDs give two canonical _ids for one record (refs.py:226 vs the strictly-lowercase _AGENT_ID_RE); bulk_upsert can only express {_id:key} filters so R-52's seq-guarded head and GD-29's lease have no guarded helper (the attempt-1 M2 bypass, one sub-plan later); wrap_raw raises bare TypeError outside MongoStoreError; two in-memory/mongod divergences (_set_path clobbers a scalar intermediate; $setOnInsert _id mismatch silently overwritten); non-BulkWriteError pymongo errors escape bulk_upsert raw. All attempt-1 findings (B1/M1/M2/M3/M4 and the minors) verified fixed with non-tautological tests. GD-24 table, GD-26, GD-27, GD-28, GD-29 checks clean; ownership clean (only the 4 owned files in-window, no commit, git log unchanged at 579446e).</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 3/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 2 addressed every item in sp-refs-mongostore-critique-attempt-1.md (1 blocker, 4 major, 4 minor, 4 nit); each fix was reproduced first and the three server-side claims re-verified against the live `mongo:7` container (`touch-mongo-sp05`, loopback+auth, throwaway `touch_probe_&lt;pid&gt;` db dropped by constructed name). No commit; only the four owned files touched.
+
+BLOCKER B1 — `CollectionSpec.id_kind` is now `id_kinds`, a tuple; `sessions` declares `(&quot;session&quot;,&quot;histSession&quot;)`, so GD-24's tagged union is storable on both arms. `check_id` accepts a key canonical under any declared kind and reports every grammar in the rejection. Verified: a `hist:&lt;sessionId&gt;` doc now writes through `bulk_upsert` to a real mongod. New `test_sessions_id_is_a_tagged_union`, plus a table test asserting every `refs` kind with a collection is DECLARED there (a grammar refs.py can emit but mongo_store rejects is an unwritable entity).
+
+MAJOR M1 — `validate_document` no longer skips a present `None` (the server's `$jsonSchema` pins a property whenever present; `null` fails an `[&quot;int&quot;,&quot;long&quot;]` pin), `_type_ok` gained an explicit `&quot;null&quot;` type so a nullable field can be pinned, and `guard_oversize` omits `sourcePath`/`byteOffset` rather than writing nulls. Re-verified on mongod: null `byteOffset` REJECTED, omitted ACCEPTED.
+
+M2 — `bulk_upsert` now calls `spec_for` once and `check_id` per operation, before pymongo is imported, so both refusals are testable with a stub `db` and nothing third-party installed; `validate_update` uses `spec_for` (not `.get`) so a typo'd collection raises instead of silently disabling the `$set`-on-accumulable fence.
+
+M3 — `$addToSet` dedupes on BSON equality (field-order-sensitive JSON text) instead of Python `==`; `fingerprint`'s set sort gained an order-sensitive tie-break. Probe confirms model and server now both keep 2 elements for `{path,present}` vs `{present,path}`, with equal fingerprints.
+
+M4 — `provenance` is appended to `required` structurally whenever a spec declares the enum, and `spec.required` is projected into `json_schema()[&quot;$jsonSchema&quot;][&quot;required&quot;]`. Live arm now asserts the server itself refuses a `records` doc with no provenance.
+
+MINOR m1 — `_conflicting_path` compares dotted prefixes in `merge_ops` and `validate_update` (`spawn` vs `spawn.fileHint`); server confirmed to refuse exactly that pair. m2 — `is_raw_wrapper` requires the exact wrapper field set and a string `_raw`, closing the `_check_keys` short-circuit. m3 — `expected_counts`' `stream_meta` half no longer calls the mapper's `session_of`/`line_number` (plain non-record line count, 34 = 34 distinct keys today, so a keying collapse now fails the assertion). m4 — added an AST string-literal guard so a delete verb cannot be reached via `getattr`.
+
+NIT n1 — new `refs.ref_id_kinds()` + a `refId` field validator: a `custom_state` `_id`'s left half must itself be a canonical `ref_key` output (docstring states honestly what it cannot decide — a runs/usage key is an escaped arbitrary string, so R-52's agents/run_nodes/slots rule stays with the writer). n2 — `ensure_schema` reads `list_indexes()` back and refuses to boot on any `expireAfterSeconds`, tested live by adding a TTL index by hand. n3 — parenthesised the `ts_fields` conditional. Also funneled parser failures in `refs.parse_ref_key` into `RefError` — `check_id(&quot;stream_meta&quot;, &quot;sess#notanumber&quot;)` previously escaped as a bare `ValueError` past every caller's except clause.
+
+Testing: `tests/test_refs.py` and `tests/test_mongo_store.py` both exit 0 in the pure arm; with `TOUCH_MONGO_URI` pointed at the running container the live arm is green too (one fingerprint across normal/shuffled/reversed, in-memory model byte-equal to the server, IXSCAN on both cursor forms). Full `tests/run_all.sh`: 12 passed, 0 failed. Note: I `pip install --break-system-packages pymongo==4.17.0 dnspython` so the live arm could run — the no-pymongo degrade path is still asserted statically, but a gate wanting the pymongo-absent arm should uninstall it.</li><li>Test gate FAILED: FAILED. Both owned suites (test_refs, test_mongo_store) and all 12 suites are green with pymongo installed, and the live mongo:7 arm passes fully (order-independent fingerprint b72e4348, IXSCAN, GD-26/27/28/29 all verified server-side). But the gate's stated baseline — green on a bare checkout with NO third-party packages — fails: with a real pymongo-free interpreter (venv --without-pip), tests/test_mongo_store.py exits 1 at test_bulk_upsert_applies_the_same_guards_as_the_memory_pass:396, assertion &quot;an empty batch is a no-op, not a connection&quot;. aggregator/mongo_store.py:1350-1358 imports pymongo one line BEFORE the `if not requests: return {...}` short-circuit, so bulk_upsert(NoDb(), &quot;records&quot;, []) raises MongoUnavailable and aborts the whole file (8 later test functions never run). New in attempt 2, introduced by the M2 critique fix, and it contradicts bulk_upsert's own docstring. Fix: move the empty-batch return above the pymongo import; add a call-granularity pymongo-absent arm. All other attempt-1 critique findings (B1 sessions tagged union, M1 null-vs-absent, M2 guards, M3 $addToSet field order, M4 mandatory provenance, m1/m2/m4/n2/n4) are now covered by non-tautological tests. Ownership clean: only the 4 owned files touched in-window, no commit.</li><li>Critique REJECTED: REJECTED — 1 blocker, 2 major, 5 minor, 5 nit. BLOCKER (confirms the test gate, reproduced with a `venv --without-pip` interpreter): aggregator/mongo_store.py:1351-1358 imports pymongo one line before bulk_upsert's own `if not requests: return {...}` short-circuit, so `bulk_upsert(db, coll, [])` raises MongoUnavailable; tests/test_mongo_store.py exits 1 at line 396 and 8 later test functions never run on a bare checkout — contradicting the sub-plan's &quot;every module imports without pymongo installed&quot;, GD-21's &quot;absence never blocks a test&quot;, and bulk_upsert's own docstring (mongo_store.py:1333). Fix: move the empty-batch return above the import. MAJOR-1: no arm in either owned suite runs with pymongo unimportable — with pymongo installed both suites are green and the blocker is invisible, so the whole failure class is undetectable in the normal environment (existing GD-21 coverage is import-granularity only); add a sys.meta_path blocker arm exercising bulk_upsert/prepare_document/guard_oversize/ts_fields. MAJOR-2 (new, not previously reported): GD-25's count half is never applied to run_nodes/runs, and the retry-topology fixture journal_ops' docstring credits (fixtures/mirror/wf_455b348c-e17) is NOT in transcripts() — measured: distinct ordinals exercised = {0}, and replacing the whole ordinal derivation with a constant 0 leaves the corpus fingerprint byte-identical; with the fixture included the same break collapses 9 run_nodes into 6. Minors: uppercase-hex UUIDs give two canonical _ids for one record (refs.py:226 vs the strictly-lowercase _AGENT_ID_RE); bulk_upsert can only express {_id:key} filters so R-52's seq-guarded head and GD-29's lease have no guarded helper (the attempt-1 M2 bypass, one sub-plan later); wrap_raw raises bare TypeError outside MongoStoreError; two in-memory/mongod divergences (_set_path clobbers a scalar intermediate; $setOnInsert _id mismatch silently overwritten); non-BulkWriteError pymongo errors escape bulk_upsert raw. All attempt-1 findings (B1/M1/M2/M3/M4 and the minors) verified fixed with non-tautological tests. GD-24 table, GD-26, GD-27, GD-28, GD-29 checks clean; ownership clean (only the 4 owned files in-window, no commit, git log unchanged at 579446e).</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-refs-mongostore-test-attempt-2.md</summary><pre># sp-refs-mongostore — test gate, attempt 2
+
+**Verdict: FAILED** — 1 new failure. Everything else is green, including a full
+live-`mongo:7` arm and every prior-attempt critique item.
+
+Files under review (implementer-reported, all four confirmed touched in this
+attempt's window 22:31–22:33):
+
+- `/home/laniakea/Projects/touch/aggregator/refs.py`
+- `/home/laniakea/Projects/touch/aggregator/mongo_store.py`
+- `/home/laniakea/Projects/touch/tests/test_refs.py`
+- `/home/laniakea/Projects/touch/tests/test_mongo_store.py`
+
+---
+
+## 1. Targeted suites (this sub-plan's owned files)
+
+Run from the repo root with the ambient interpreter (Python 3.13, **pymongo
+4.17.0 installed**):
+
+| suite | rc | notes |
+|---|---|---|
+| `python3 tests/test_refs.py` | **0** | all R-43 tests pass; 14 test functions, incl. purity AST guard |
+| `python3 tests/test_mongo_store.py` | **0** | all R-44 tests pass; live arm skipped cleanly (`TOUCH_MONGO_URI` unset) |
+
+## 2. Full-suite regression gate
+
+```
+PASS .claude/shared/monitoring/tests/test_frontend.py
+PASS .claude/shared/monitoring/tests/test_server.py
+PASS .claude/shared/monitoring/tests/test_shell.py
+PASS .claude/shared/monitoring/tests/test_watcher.py
+PASS tests/test_bootstrap.py
+PASS tests/test_fixtures.py
+PASS tests/test_mongo_store.py
+PASS tests/test_refs.py
+PASS tests/test_stdlib_only.py
+PASS tests/test_store.py
+PASS tests/test_tailer.py
+PASS tests/test_ws.py
+SUITE_RC=0
+```
+
+Green with the ambient interpreter. **But the gate's baseline is explicitly
+&quot;a bare checkout with NO services running and NO third-party packages
+installed&quot;**, and that arm is where the failure is (§3 below).
+
+## 3. FAILURE — `test_mongo_store.py` exits non-zero when pymongo is absent (GD-21)
+
+**Test id:** `test_bulk_upsert_applies_the_same_guards_as_the_memory_pass`,
+assertion `&quot;an empty batch is a no-op, not a connection&quot;` —
+`tests/test_mongo_store.py:396`.
+
+**Reproduction (two independent methods, same result):**
+
+1. A `venv --without-pip` interpreter that genuinely has no pymongo:
+   `python3 -m venv --without-pip &lt;v&gt; &amp;&amp; &lt;v&gt;/bin/python3 tests/test_mongo_store.py`
+2. A `sys.meta_path` hook that raises `ImportError` for `pymongo`/`bson`.
+
+Result of (1), the authoritative one:
+
+```
+PASS tests/test_bootstrap.py
+PASS tests/test_fixtures.py
+FAIL tests/test_mongo_store.py      &lt;-- exit 1
+PASS tests/test_refs.py
+PASS tests/test_stdlib_only.py
+PASS tests/test_store.py
+PASS tests/test_tailer.py
+PASS tests/test_ws.py
+```
+
+**Traceback essence:**
+
+```
+File &quot;tests/test_mongo_store.py&quot;, line 396, in
+     test_bulk_upsert_applies_the_same_guards_as_the_memory_pass
+  check(ms.bulk_upsert(NoDb(), &quot;records&quot;, []) == { ... },
+        &quot;an empty batch is a no-op, not a connection&quot;)
+File &quot;aggregator/mongo_store.py&quot;, line 1355, in bulk_upsert
+  raise MongoUnavailable(f&quot;pymongo is not installed: {exc}&quot;) from None
+aggregator.mongo_store.MongoUnavailable: pymongo is not installed:
+  No module named 'pymongo'
+```
+
+Note this is an **uncaught exception that aborts the whole file** — the four
+later test functions (`test_gd25_acceptance_normal_shuffled_reversed`,
+`test_the_disjoint_continuations_union`, `test_dotted_keys_…`,
+`test_oversize_…`, `test_ts_…`, `test_no_delete_verbs_…`,
+`test_client_options_are_gd21s`, `test_live_mongod_arm`) never run at all on a
+bare checkout. It is not a soft failure of one assertion.
+
+**Why it is attributable to this change.** Both halves are new in attempt 2 and
+both come from the attempt-1 critique's **M2** fix (&quot;`bulk_upsert` skips both
+guards `apply_operations` applies&quot;). The implementer correctly hoisted
+`spec_for` / `check_id` / `validate_update` **above** the pymongo import — the
+docstring even says so verbatim (&quot;Both are refused *before* pymongo is even
+imported, so the guard is testable with nothing third-party installed&quot;) — and
+added the new `NoDb()`-driven test to prove it. The empty-batch assertion on the
+last line of that new test is the one call in the block that is expected to
+*succeed* rather than raise, and it falls through the guard loop (which never
+executes for an empty `operations` list) straight into the import. The
+short-circuit that would save it, `if not requests: return {...}`
+(`aggregator/mongo_store.py:1357`), sits **one line after** the import that
+raises. So the module's stated contract and its own new test disagree with the
+code by exactly two lines of ordering.
+
+**Concrete fix (one line moved, in `aggregator/mongo_store.py:1339-1358`):**
+return the zero-result dict before touching pymongo. Either
+
+```python
+    checked = []
+    for key, update in operations:
+        ...
+        checked.append((key, update))
+    if not checked:                      # &lt;-- moved above the import
+        return {&quot;matched&quot;: 0, &quot;upserted&quot;: 0, &quot;modified&quot;: 0,
+                &quot;tolerated_dups&quot;: 0, &quot;errors&quot;: []}
+    try:
+        from pymongo import UpdateOne
+        from pymongo.errors import BulkWriteError
+    except ImportError as exc:
+        raise MongoUnavailable(...) from None
+    requests = [UpdateOne(...) for key, update in checked]
+    try:
+        result = db[collection].bulk_write(requests, ordered=ordered)
+```
+
+(and drop the now-dead `if not requests:` block), which also makes the
+assertion's own wording true — &quot;not a connection&quot; should mean not even an
+import.
+
+Recommended hardening so this class of regression cannot come back silently:
+add to `tests/test_stdlib_only.py` (or a new guard in `test_mongo_store.py`) an
+arm that re-executes the pure-path assertions under a `sys.meta_path` blocker
+for `pymongo`/`bson`, i.e. assert that `bulk_upsert(NoDb(), &quot;records&quot;, [])`
+and every `SchemaError`/`OperatorError` refusal above it behave identically with
+pymongo unimportable. GD-21's &quot;every module imports without pymongo installed&quot;
+is currently tested at *import* granularity only; this failure is at
+*call* granularity, which is where the guarantee actually has to hold.
+
+---
+
+## 4. Green evidence for everything else
+
+### 4a. Live `mongo:7` arm (R-42 loopback+auth, container `touch-mongo-sp05`,
+`127.0.0.1:27117`, `authSource=admin`)
+
+`TOUCH_MONGO_URI=... python3 tests/test_mongo_store.py` → **rc 0**, live arm
+fully exercised rather than skipped:
+
+```
+test_live_mongod_arm
+  ok: ensure_schema created GD-24's collections
+  ok: …and running it again is a no-op (it must be safe on every boot)
+  ok: no index on the server carries expireAfterSeconds (GD-26, read back)
+  ok: the unique {stream:1,seq:1} index exists on the server
+  ok: the server REFUSES a sub-document _id
+  ok: normal / shuffled / reversed ingest into a real mongod ⇒ ONE fingerprint
+      (normal=b72e4348, reversed=b72e4348, shuffled=b72e4348)
+  ok: …and equal counts: {'agents': 7, 'records': 1091, 'run_nodes': 7,
+      'runs': 1, 'stream_meta': 34, 'usage': 328}
+  ok: …and the in-memory model agrees with the server byte for byte
+  ok: the (stream, seq) cursor query is an IXSCAN
+  ok: …and so is the zero-padded _id range scan
+  ok: replaying an event we already stored is not an error
+  ok: a second writer landing on an existing (stream, seq) is COUNTED as a
+      tolerated duplicate, never swallowed (GD-29)
+  ok: the server REFUSES a mirrored document with no provenance (GD-28)
+  ok: a TTL index someone added by hand makes the next ensure_schema REFUSE
+  ok: dropping only the database this test constructed: touch_test_58353 (GD-27)
+```
+
+The GD-27 scoping is honoured: the database is `touch_test_&lt;pid&gt;` and only that
+constructed name is dropped.
+
+### 4b. Every attempt-1 critique finding is now covered by a non-tautological test
+
+| id | claim | evidence in this run |
+|---|---|---|
+| **B1** | `sessions` `_id` is a tagged union | new `test_sessions_id_is_a_tagged_union`: `check_id`/`validate_document`/`apply_operations` all accept **both** `live:622-10028` and `hist:292fc08c-…`; a bogus id is still rejected; the rejection message names **both** grammars |
+| **M1** | null-vs-absent on pinned fields | &quot;an omitted byte_offset leaves the field OUT of the stub, not null&quot;; &quot;a present null on a pinned field is refused client-side, because that is what the server's own $jsonSchema does&quot; |
+| **M2** | `bulk_upsert` guards | new `test_bulk_upsert_applies_the_same_guards_as_the_memory_pass`: off-table name, non-canonical `_id`, wrong padding, sub-document `_id`, `$inc` all refused; plus a source-text check that `check_id(`/`spec_for(` are named in `bulk_upsert`'s body. **This is also the test that fails §3** |
+| **M3** | `$addToSet` field-order semantics | &quot;two sub-documents differing ONLY in field order are two set elements, as they are on the server&quot;; byte-identical re-add still idempotent |
+| **M4** | mandatory `provenance` | live arm: &quot;the server REFUSES a mirrored document with no provenance — the $jsonSchema requires it&quot; |
+| **m1** | nested-path conflicts | &quot;a field and a path INSIDE it conflict, exactly as they do at the server&quot;; &quot;…while two paths that merely share a prefix STRING do not conflict&quot; (the negative arm makes it non-vacuous) |
+| **m2** | spoofable `_raw` wrapper | &quot;a dict carrying the wrapper's fields AND hostile siblings is not a wrapper&quot;; &quot;…so its dotted sibling is caught, not skipped over&quot;; &quot;…and a non-string _raw is not a wrapper either&quot; |
+| **m4 / n2 / n4** | `guard_oversize` ownership documented; TTL reconciled on the server; delete verbs unreachable via `getattr` | `bulk_upsert` docstring names `mirror.py` (R-45) as the caller; live &quot;a TTL index someone added by hand makes the next ensure_schema REFUSE&quot;; &quot;…and no delete verb is SPELLED as a string either&quot; |
+
+`test_stdlib_only.py` remains green, confirming GD-21 at import granularity:
+`refs.py` imports `{__future__, re}` only; `mongo_store.py` module level is
+`{__future__, datetime, hashlib, json}` with pymongo imported inside functions.
+
+### 4c. Ownership / git hygiene (GD-15, git rules)
+
+Only the four owned files carry mtimes inside this attempt's window
+(`refs.py` 22:31, `test_refs.py` 22:31, `test_mongo_store.py` 22:32,
+`mongo_store.py` 22:33). Sibling aggregator/test files are older
+(`store.py`/`test_store.py`/`test_tailer.py` 21:22, `ws.py` 21:17,
+`tailer.py` 21:07, `__init__.py` 19:28, `test_ws.py`/`test_stdlib_only.py`
+20:26, `run_all.sh` 19:41, `test_bootstrap.py`/`test_fixtures.py` 15:37–16:10)
+and the monitoring module is untouched.
+
+Tracked non-`.claude` modifications are `.gitignore` (15:37) and `CLAUDE.md`
+(22:03) — both **predate** this attempt's window; `CLAUDE.md` is sp-15's file
+and was already flagged as an out-of-band edit by the attempt-1 critique. Not
+charged to this implementer.
+
+No commit was made; nothing was reverted or stashed; the only Docker artefacts
+are the pre-existing critique/sp-05 containers, and the live arm dropped only
+its own `touch_test_&lt;pid&gt;` database.
+
+---
+
+## Bottom line
+
+One two-line ordering defect stands between this sub-plan and green. The
+substance of R-43/R-44 — GD-24's table (now including the `sessions` tagged
+union), GD-25's order-independence oracle proven against a real mongod, GD-26's
+no-delete/no-TTL laws, GD-27/28/29 — is in place and independently verified.
+Fix the `bulk_upsert` empty-batch short-circuit so it precedes the pymongo
+import, and add the pymongo-absent call-granularity arm, and this passes.
+</pre></details>
+<details><summary>Critique findings — sp-refs-mongostore-critique-attempt-2.md</summary><pre># sp-refs-mongostore — adversarial critique, attempt 2
+
+**Verdict: REJECTED** — 1 blocker, 2 major, 5 minor, 5 nit.
+
+Reviewed (full content; all four are new in an untracked tree, so there is no
+`git diff` — `git status` shows `?? aggregator/`, `?? tests/`):
+
+- `/home/laniakea/Projects/touch/aggregator/refs.py` (897 lines)
+- `/home/laniakea/Projects/touch/aggregator/mongo_store.py` (1377 lines)
+- `/home/laniakea/Projects/touch/tests/test_refs.py` (440 lines)
+- `/home/laniakea/Projects/touch/tests/test_mongo_store.py` (1025 lines)
+
+Against `plan/touch-mongo-live-subplans.md` §`sp-05 — refs-mongostore`;
+amendment items **R-43**, **R-44**, **GD-21…GD-30**; base plan **GD-11/GD-15**;
+shared decisions **SD-1, SD-2, SD-11**.
+
+Every attempt-1 finding I could re-check is genuinely fixed, and fixed with a
+real test rather than a restatement: **B1** (the `sessions` tagged union) is now
+a `tuple` of `id_kinds` with both arms round-tripped through
+`check_id`/`validate_document`/`apply_operations` and a rejection message that
+names both grammars; **M1** (null-vs-absent) is now the *stricter* reading, with
+`guard_oversize` omitting rather than nulling and a live-verified comment saying
+why; **M3** (`$addToSet` field-order) is modelled on BSON identity, not Python
+`==`; **M4** (mandatory provenance) is appended in `CollectionSpec.__init__` so a
+future row cannot forget it, and proven server-side. The grammar/inverse pairing
+in `refs.py`, the in-memory twin of the upsert algebra, and the non-vacuous
+negative arms of the GD-25 acceptance test remain better than the item asked
+for.
+
+The blocker is the one the test gate found, reproduced here independently. The
+two majors are its shadow: **the suite cannot see the blocker in the environment
+it normally runs in**, and **the acceptance test's count half — the half that
+exists to catch silent collapse — is not applied to the one collection whose
+keying rule is newest.**
+
+No source file was modified and no commit was made during this review.
+
+---
+
+## BLOCKER
+
+### B1 — `bulk_upsert` imports pymongo one line *before* its own empty-batch short-circuit, so the pure-path suite aborts on a bare checkout
+
+`aggregator/mongo_store.py:1351-1358`:
+
+```python
+    try:
+        from pymongo import UpdateOne              # 1352
+        from pymongo.errors import BulkWriteError  # 1353
+    except ImportError as exc:
+        raise MongoUnavailable(f&quot;pymongo is not installed: {exc}&quot;) from None
+    requests = [UpdateOne({&quot;_id&quot;: key}, update, upsert=True) for key, update in checked]
+    if not requests:                               # 1357  &lt;-- one line too late
+        return {&quot;matched&quot;: 0, &quot;upserted&quot;: 0, &quot;modified&quot;: 0, &quot;tolerated_dups&quot;: 0, &quot;errors&quot;: []}
+```
+
+Reproduced with a genuinely pymongo-free interpreter
+(`python3 -m venv --without-pip`):
+
+```
+$ &lt;venv&gt;/bin/python3 tests/test_refs.py        ; echo rc=$?   -&gt; rc=0
+$ &lt;venv&gt;/bin/python3 tests/test_mongo_store.py ; echo rc=$?   -&gt; rc=1
+
+  ...
+  ok: the algebra is enforced here too ($inc is forbidden — GD-25)
+Traceback (most recent call last):
+  File &quot;tests/test_mongo_store.py&quot;, line 396, in
+       test_bulk_upsert_applies_the_same_guards_as_the_memory_pass
+    check(ms.bulk_upsert(NoDb(), &quot;records&quot;, []) == { ... })
+  File &quot;aggregator/mongo_store.py&quot;, line 1355, in bulk_upsert
+    raise MongoUnavailable(...) from None
+aggregator.mongo_store.MongoUnavailable: pymongo is not installed: No module named 'pymongo'
+```
+
+This is an **uncaught exception that aborts the whole file**, not one red
+assertion: `test_gd25_acceptance_normal_shuffled_reversed`,
+`test_the_disjoint_continuations_union`,
+`test_dotted_keys_are_raw_wrapped_and_round_trip`,
+`test_oversize_becomes_a_stub_never_a_drop`, `test_ts_is_supplied_by_the_aggregator`,
+`test_no_delete_verbs_and_no_clock_in_the_module`, `test_client_options_are_gd21s`
+and `test_live_mongod_arm` never run at all on a bare checkout — including every
+GD-25, GD-26 and GD-28 assertion.
+
+**It contradicts three things at once.** The sub-plan's own acceptance line
+(&quot;All Mongo tests skip cleanly without a reachable mongod; **every module
+imports without pymongo installed**&quot;); GD-21 (&quot;its absence … never blocks a
+test&quot;); and `bulk_upsert`'s own docstring at `mongo_store.py:1333-1334` —
+&quot;Both are refused *before* pymongo is even imported, so the guard is testable
+with nothing third-party installed&quot; — which is true of the two guards and false
+of the very next call the new test makes. The assertion string
+(`&quot;an empty batch is a no-op, not a connection&quot;`, `tests/test_mongo_store.py:396`)
+states the intended contract exactly; the code is two lines away from it.
+
+**Failure scenario beyond the test.** `mirror.py` (R-45) drains a bounded queue
+into per-collection batches. A tick where one collection has no pending
+operations calls `bulk_upsert(db, coll, [])`. On a deployment without pymongo —
+the GD-21 `mirror:&quot;absent&quot;` degrade, which is a *supported* configuration —
+that raises `MongoUnavailable` out of the drainer instead of returning the
+documented zero-result, for a batch that was never going to touch the network.
+GD-21's &quot;absence degrades, never crashes&quot; is exactly what breaks.
+
+**Fix** (the gate's, and I agree with it verbatim): move the short-circuit above
+the import and delete the now-dead one.
+
+```python
+        checked.append((key, update))
+    if not checked:
+        return {&quot;matched&quot;: 0, &quot;upserted&quot;: 0, &quot;modified&quot;: 0,
+                &quot;tolerated_dups&quot;: 0, &quot;errors&quot;: []}
+    try:
+        from pymongo import UpdateOne
+        from pymongo.errors import BulkWriteError
+    except ImportError as exc:
+        raise MongoUnavailable(f&quot;pymongo is not installed: {exc}&quot;) from None
+    requests = [UpdateOne({&quot;_id&quot;: key}, update, upsert=True) for key, update in checked]
+    try:
+        result = db[collection].bulk_write(requests, ordered=ordered)
+```
+
+Do not fix this by weakening the test to `raises(MongoUnavailable, …)`. The
+docstring's contract is the correct one and the test is right.
+
+---
+
+## MAJOR
+
+### M1 — nothing in either owned suite runs with pymongo unimportable, so B1's entire failure class is invisible in the environment the suite normally runs in
+
+`tests/test_mongo_store.py:366-403` (the new guard test),
+`tests/test_stdlib_only.py:167-192` (the only pymongo-absence arm that exists).
+
+Verified: with the ambient interpreter (pymongo 4.17.0 installed) both owned
+suites exit **0** and B1 is completely silent — the import succeeds, `requests`
+is `[]`, the short-circuit fires, the assertion passes. The defect is only
+observable if the interpreter happens not to have pymongo. That is not a test;
+that is a coincidence of the runner's environment.
+
+The existing coverage is at **import granularity** only:
+`test_stdlib_only.test_every_module_imports_without_third_party_packages`
+subprocess-imports each module and asserts nothing third-party lands in
+`sys.modules`, and
+`test_mongo_store.test_no_delete_verbs_and_no_clock_in_the_module:821-825`
+asserts `pymongo` is in `lazy` and not in `top`. Both stay green with B1 in
+place — I confirmed the AST guard passes on the current file. GD-21's guarantee
+is not &quot;the module imports&quot;; it is &quot;every pure function below works with nothing
+third-party installed&quot; (`mongo_store.py:51-53`), which is a **call**-granularity
+claim with no test behind it.
+
+Note this is also why B1 shipped in the first place: it was *introduced* by the
+attempt-1 **M2** fix, in the same commit that added the test that documents the
+contract it breaks.
+
+**Failure scenario.** Any future edit that hoists a `from pymongo import …`
+above a pure branch — `guard_oversize` growing a BSON-size cross-check,
+`check_id` reaching for `bson.ObjectId`, `ensure_schema` gaining a pure
+dry-run mode — reintroduces exactly this bug, ships green on every developer
+machine that has pymongo, and only breaks on the degraded deployment GD-21
+exists to protect.
+
+**Fix.** Add a call-granularity arm to `tests/test_mongo_store.py` that blocks
+the import rather than relying on the interpreter:
+
+```python
+class _NoPymongo:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(&quot;.&quot;)[0] in (&quot;pymongo&quot;, &quot;bson&quot;):
+            raise ImportError(f&quot;blocked for this test: {name}&quot;)
+
+def test_the_pure_path_works_with_pymongo_unimportable():
+    blocker = _NoPymongo()
+    saved = {k: v for k, v in sys.modules.items()
+             if k.split(&quot;.&quot;)[0] in (&quot;pymongo&quot;, &quot;bson&quot;)}
+    for name in saved: del sys.modules[name]
+    sys.meta_path.insert(0, blocker)
+    try:
+        check(ms.bulk_upsert(NoDb(), &quot;records&quot;, []) == {...},
+              &quot;an empty batch is a no-op with pymongo UNIMPORTABLE, not merely absent&quot;)
+        check(raises(SchemaError, ms.bulk_upsert, NoDb(), &quot;recordz&quot;, [(good, op)]), ...)
+        check(raises(OperatorError, ms.bulk_upsert, NoDb(), &quot;usage&quot;, [(k, {&quot;$inc&quot;: {...}})]), ...)
+        check(ms.pymongo_available() is False, &quot;…and pymongo_available() answers False, never raises&quot;)
+        check(raises(ms.MongoUnavailable, ms.bulk_upsert, NoDb(), &quot;records&quot;, [(good, op)]),
+              &quot;…while a NON-empty batch degrades to MongoUnavailable, not ImportError&quot;)
+        # plus one call into each other pure entry point: prepare_document,
+        # validate_document, guard_oversize, ts_fields, apply_operations, fingerprint
+    finally:
+        sys.meta_path.remove(blocker); sys.modules.update(saved)
+```
+
+Run it *before* `test_live_mongod_arm` and restore `sys.modules` in a `finally`
+so the live arm still works in the same process.
+
+### M2 — GD-25's count half is never applied to `run_nodes`/`runs`, and the retry-topology fixture the test's own docstring credits is not in the corpus; the ordinal derivation is exercised only at ordinal 0
+
+`tests/test_mongo_store.py:407-412` (`transcripts()`),
+`:457-497` (`journal_ops`, docstring at `:464`),
+`:560-596` (`expected_counts`), `:623-627` (the count assertions).
+
+`journal_ops`'s docstring says:
+
+&gt; `ordinal` is the 0-based count of preceding `started` records with the same
+&gt; `key`, in file line order — derived while reading, stored, never a DB counter
+&gt; (restart-unsafe: MONGOSCHEMA-18). **The three-key retry fixture is what makes
+&gt; this more than a formality.**
+
+That fixture is `tests/fixtures/mirror/wf_455b348c-e17/journal.jsonl` (three
+keys with **two** `started` records each). `transcripts()` globs only
+`fixtures/run-wf_829e6f58/**/*.jsonl` plus two named specimen files, so the
+retry fixture is **not ingested**. Measured:
+
+```
+11 paths ingested by the acceptance test
+wf_455b348c in corpus?           False
+distinct ordinals exercised:     {0}
+counts(normal):     {'agents': 7, 'records': 1091, 'run_nodes': 7, 'runs': 1,
+                     'stream_meta': 34, 'usage': 328}
+expected_counts():  {'records': 1091, 'stream_meta': 34, 'usage': 328, 'agents': 7}
+```
+
+Two independent holes, and they compound:
+
+1. Every `(key, type)` pair in the ingested journal occurs exactly once, so
+   `started.get(key, 0)` is always `0`. I replaced the whole derivation with a
+   constant `ordinal = 0` and re-ran the corpus: **the fingerprint is
+   byte-identical.** The GD-25 oracle cannot see the derivation at all.
+2. `run_nodes` and `runs` are absent from `expected_counts`, so their counts are
+   only ever compared *pass to pass* (`counts(shuffled) == got == …`), never to
+   an expectation derived independently from the files. A keying rule that
+   collapses N journal nodes into fewer documents collapses them identically on
+   every pass — which is precisely MONGOSCHEMA-16's lesson, quoted in
+   `counts()`'s own docstring at `mongo_store.py:1192-1199`: *&quot;a fingerprint of
+   fewer documents is still a fingerprint&quot;*. The count half was invented for
+   this and is not pointed at the collection that needs it.
+
+I verified the fixture would in fact do work if included:
+
+```
+correct            run_nodes=9   fingerprint-stable-under-reversal=True
+ordinal-always-0   run_nodes=6   fingerprint-stable-under-reversal=False
+```
+
+— i.e. 3 of 9 nodes silently merge, and (only because the collapsed docs then
+take order-dependent `$set` values) reversal breaks. With the corpus as it
+stands, neither signal exists.
+
+**Failure scenario.** sp-08/sp-10 write the real journal mapper against this
+test as the reference for GD-7-as-amended. An off-by-one or a dropped ordinal
+merges every retried node onto its first attempt's `_id`. The `run_nodes`
+documents for attempts 2..N vanish, `run_nodes.resultSeen`/`result` for the last
+attempt overwrite the first, and the UI renders one node where the retry loop
+ran three — with a green acceptance test the whole way, because the fingerprint
+is stable and no count expectation exists.
+
+**Fix**, both halves:
+
+```python
+def transcripts():
+    paths = sorted((FIX / &quot;run-wf_829e6f58&quot;).rglob(&quot;*.jsonl&quot;))
+    paths += sorted((FIX / &quot;mirror&quot; / &quot;wf_455b348c-e17&quot;).rglob(&quot;journal.jsonl&quot;))
+    paths += [FIX / &quot;mirror&quot; / &quot;records&quot; / &quot;file-history-snapshot-dotted.jsonl&quot;,
+              FIX / &quot;mirror&quot; / &quot;records&quot; / &quot;queue-operation-user-pair.jsonl&quot;]
+    return [p for p in paths if p.exists()]
+```
+
+and extend `expected_counts` with a `run_nodes`/`runs` expectation read straight
+from the journals, without calling `journal_ops` (the independence rule the
+docstring at `:566-570` already states for the other three):
+
+```python
+    nodes, runs = 0, set()
+    for path in paths:
+        if path.name != &quot;journal.jsonl&quot;:
+            continue
+        runs.add(path.parent.name)
+        starts, results = collections.Counter(), collections.Counter()
+        for line in path.read_text(encoding=&quot;utf-8&quot;).splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            key = entry.get(&quot;key&quot;)
+            if key is None:
+                continue
+            (starts if entry.get(&quot;type&quot;) == &quot;started&quot; else results)[key] += 1
+        nodes += sum(max(starts[k], results[k]) for k in set(starts) | set(results))
+    return {..., &quot;run_nodes&quot;: nodes, &quot;runs&quot;: len(runs)}
+```
+
+Then assert `{0, 1} &lt;= {u[&quot;$setOnInsert&quot;][&quot;ordinal&quot;] for … in journal_ops(retry)}`
+so the derivation is exercised above zero, and keep the docstring's claim only
+once it is true.
+
+(Note when wiring the retry journal in: `journal_ops` takes `run_id` from
+`path.parent.name` — `wf_455b348c-e17` — and `session_of(path, {})` falls
+through to `SPECIMEN_SESSION` for it, which is harmless for `runs.sessionIds`
+but worth a comment rather than a surprise.)
+
+---
+
+## MINOR
+
+### m1 — `_UUID_RE` accepts uppercase hex, so one record has two canonical `_id`s
+
+`aggregator/refs.py:226-228`, `:258-262`; `_build_uuid` at `:394-395` returns the
+value verbatim.
+
+```
+refs.record_key(&quot;081b28a7-…&quot;) != refs.record_key(&quot;081B28A7-…&quot;)   -&gt; True
+mongo_store.check_id(&quot;records&quot;, &lt;both&gt;)                          -&gt; both ACCEPTED as canonical
+```
+
+`_AGENT_ID_RE` (`refs.py:229`) is strictly `[0-9a-f]{17}`, so the module already
+takes the position that identity hex is lowercase — `uuid`, `sessionId`,
+`parentUuid` and `recordUuid` just do not.
+
+**Failure scenario.** GD-11's ref union member `{uuid}` is a shape *agents*
+write into `.touch/` control and custom-state files (R-52's `refId` is a
+`ref_key` output of exactly this kind). An agent that spells a UUID uppercase
+produces a `refId` that no `records` document will ever carry, so the join is
+permanently dangling and nothing reports it — `ref_id_kinds` says the key is
+well-formed. If two ingest paths ever disagree on case, it is two `records`
+documents for one transcript line, which is the duplicate GD-24 exists to
+prevent.
+
+**Fix.** Make `_UUID_RE` `[0-9a-f]` only (matching `_AGENT_ID_RE`) and let
+`_uuid` reject the uppercase form with a message that says so — rejecting, not
+normalizing, is this module's consistent stance everywhere else. Add to
+`test_refs.py`: `raises(RefError, ref_key, {&quot;uuid&quot;: UUID.upper()})`.
+
+### m2 — `bulk_upsert` can only express `{_id: key}` filters, so the two *conditional* writes GD-24's own table implies have no guarded helper
+
+`aggregator/mongo_store.py:1356`; rows `custom_state`
+(`:417-427`, note *&quot;derived head, seq-guarded `{seq:{$lt:newSeq}}` (R-52)&quot;*) and
+`writers` (`:447-453`, *&quot;GD-29 writer lease&quot;*).
+
+`UpdateOne({&quot;_id&quot;: key}, …, upsert=True)` is the only write shape this module
+offers. R-52's seq-guarded head needs `{_id: k, seq: {$lt: n}}` and GD-29's
+lease acquisition needs `{_id: stream, leaseExpiresAt: {$lt: now}}`. Neither is
+reachable, so sp-06/sp-11 will hand-roll `update_one` against a raw collection
+handle — which is precisely the bypass attempt-1's **M2** established must not
+exist (`bulk_upsert`'s docstring at `:1324-1334` argues the case at length).
+`custom_state.accumulable = (&quot;seq&quot;,)` additionally forbids `$set` on `seq`,
+so the obvious hand-rolled form is refused too, and the author will discover
+both facts one sub-plan away from the table that caused them — the same seam
+failure as attempt-1's B1.
+
+**Fix.** Export the guarded shape from here while the table is the owner, e.g.
+
+```python
+def guarded_update(db, collection, key, update, *, require=None):
+    &quot;&quot;&quot;One conditional upsert with the same guards bulk_upsert applies.&quot;&quot;&quot;
+    spec_for(collection); check_id(collection, key); validate_update(update, collection)
+    filter_ = dict({&quot;_id&quot;: key}, **(require or {}))
+    ...
+```
+
+and state in the `custom_state` note whether R-52's `seq` advance is `$max`
+(idempotent, no filter needed) or `$set` behind the guard — if the latter, drop
+`seq` from `accumulable` and say why.
+
+### m3 — `wrap_raw` / `prepare_document` raise a bare `TypeError`, outside the `MongoStoreError` hierarchy every other rejection uses
+
+`aggregator/mongo_store.py:543` (`json.dumps(value, …)` with no `default=`).
+
+```
+ms.wrap_raw({&quot;a.b&quot;: datetime.now(timezone.utc)})            -&gt; TypeError
+ms.prepare_document(&quot;records&quot;, {..., &quot;x&quot;: {&quot;a.b&quot;: &lt;dt&gt;}})   -&gt; TypeError
+```
+
+`document_size` (`:781-782`) passes `default=_json_default` and therefore never
+has this problem; `wrap_raw` does not. Every other refusal in the module is a
+`SchemaError`/`OperatorError`, so a drainer written as
+`except MongoStoreError: …` misses this one and dies on the tick.
+
+**Fix.** Either pass `default=_json_default` (and teach `unwrap_raw` to reverse
+the `&quot;!date:&quot;` tag) or wrap the call:
+
+```python
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(&quot;,&quot;, &quot;:&quot;))
+    except TypeError as exc:
+        raise SchemaError(f&quot;{RAW_FIELD} subtree is not JSON-encodable: {exc}&quot;) from None
+```
+
+Low reachability today (every declared `raw_path` is fed from `json.loads`
+output), which is why this is minor and not major.
+
+### m4 — two update shapes where the in-memory model silently accepts what mongod refuses
+
+The model *is* the GD-25 oracle (`mongo_store.py:23-30`), so &quot;more permissive
+than mongod&quot; is the failure mode the `$addToSet` fix already acknowledged.
+
+1. `_set_path` (`:1038-1047`) creates a sub-document over a scalar:
+   `apply_update({&quot;spawn&quot;: 5}, {&quot;$max&quot;: {&quot;spawn.b&quot;: 1}})` → `{&quot;spawn&quot;: {&quot;b&quot;: 1}}`.
+   mongod answers *&quot;Cannot create field 'b' in element {spawn: 5}&quot;*.
+2. `validate_update` permits `$setOnInsert: {&quot;_id&quot;: &lt;other&gt;}` (`:970-971`
+   explicitly allows `_id` under that one operator), and `apply_update` then
+   overwrites it with the filter's `_id` at `:1093-1094`. mongod raises
+   *&quot;the _id field cannot be changed&quot;* on the upsert.
+
+Both produce a fingerprint the server cannot reproduce, i.e. a green acceptance
+test for an ingest that fails in production.
+
+**Fix.** In `_set_path`, raise `OperatorError` when an intermediate exists and
+is not a dict. In `validate_update`, require that `$setOnInsert[&quot;_id&quot;]` — if
+present — is only ever checked against the key by `bulk_upsert`/`apply_operations`
+(both already have it) and reject a mismatch there.
+
+### m5 — an unreachable server escapes `bulk_upsert` as a raw pymongo exception, never as `MongoUnavailable`
+
+`aggregator/mongo_store.py:1359-1361`: only `BulkWriteError` is caught.
+`AutoReconnect`, `ServerSelectionTimeoutError`, `NetworkTimeout` and
+`OperationFailure` propagate untouched, contradicting `MongoUnavailable`'s own
+docstring (`:126-127`: *&quot;pymongo is absent **or no mongod answered** — degrade,
+never crash&quot;*), which promises the second half this function does not deliver.
+`mirror.py` may legally catch pymongo exceptions (GD-21 names it), so this is a
+contract smell rather than a break — but the class is declared here and should
+mean the same thing at both call sites.
+
+**Fix.** `except PyMongoError as exc: raise MongoUnavailable(str(exc)) from None`
+after the `BulkWriteError` clause, and say in the docstring which exceptions a
+caller may still see.
+
+---
+
+## NIT
+
+### n1 — `writers` and `cursors` are the only rows with no `provenance` pin
+
+`mongo_store.py:447-461`. Defensible (they are operational, not mirrored
+content) but undocumented, and `CollectionSpec.__init__`'s &quot;appended here rather
+than repeated in fifteen `required=` tuples so a row added later cannot forget
+it&quot; reads as though every row has one. Add one clause to each `note=` saying
+these two are aggregator-internal and deliberately exempt from GD-28.
+
+### n2 — the source-text grep in the new guard test is a weak assertion
+
+`tests/test_mongo_store.py:400-403` re-reads `mongo_store.py` and checks
+`&quot;check_id(&quot; in body and &quot;spec_for(&quot; in body`. The five behavioural assertions
+above it already prove the guards fire; the grep passes for a `check_id(` inside
+a comment and fails for a rename. Harmless, but it is the one assertion in the
+file that tests text rather than behaviour — and the blocker above lives four
+lines from it.
+
+### n3 — `MAX_KEY_BYTES` is never exercised
+
+`refs.py:160`, `:769-771`. `test_component_bounds`
+(`tests/test_refs.py:192-199`) covers `MAX_COMPONENT_CHARS` at and over the cap
+but nothing covers the whole-key byte cap, which is the one that actually
+protects the `_id` index entry (a `slot` key joins four 512-char components).
+One assertion: a 4-component `slot` ref at the component cap raises `RefError`
+naming the byte cap.
+
+### n4 — `merge_ops` takes no `collection`, so the `$set`-on-accumulable fence never applies there
+
+`mongo_store.py:908-933`. Safe today because `apply_update` and `bulk_upsert`
+both call `validate_update(update, collection)` afterwards, but `merge_ops` is
+the function mappers call directly and its docstring lists the conflict rule
+without mentioning that the accumulable fence is somebody else's. One sentence
+in the docstring, or an optional `collection=` passthrough.
+
+### n5 — the live arm's `delete_many`/`drop_database` are correctly scoped but not asserted to be
+
+`tests/test_mongo_store.py:922` (`db[collection].delete_many({})`) and `:877`
+(`client.drop_database(name)`). Both operate on `touch_test_&lt;pid&gt;` and `:875`
+already asserts the drop target's prefix; the per-collection wipe has only a
+comment. GD-26's static guard covers `mongo_store.py` only, so a future edit
+that points that loop at a real mirror database has nothing standing in its way.
+Assert `db.name.startswith(&quot;touch_test_&quot;)` immediately before the wipe loop.
+
+---
+
+## Checks that came back clean
+
+- **GD-21** — `refs.py` imports `{__future__, re}` (AST-asserted at
+  `test_refs.py:388-408`); `mongo_store.py` module level is
+  `{__future__, datetime, hashlib, json, aggregator}` with every `pymongo`
+  import inside a function body; `test_stdlib_only.py` still green. The only
+  breach is B1, which is a *call*-path breach, not an import one.
+- **GD-22 / GD-30** — nothing here is on the poll loop: no module-level client,
+  no runtime state, `CLIENT_OPTIONS` pinned to GD-21's 500/500/2000 verbatim and
+  asserted; `open_client` is documented sync-only for bootstrap/rebuild/tests.
+- **GD-24** — all 15 rows present and faithful; every `_id` grammar, padding
+  width and index set matches the table, and I re-derived each row against the
+  plan text. `refs.collection_of(kind)`/`COLLECTIONS[…].id_kinds` are asserted
+  bidirectionally (`test_mongo_store.py:109-119`), which is what would have
+  caught attempt-1's B1.
+- **GD-25** — `$inc`/`$push`/`$pull`/`$pop`/`$unset`/`$rename`/`$bit`/`$currentDate`
+  each refused with a named reason; the `$set` fence is per-collection and a
+  typo'd collection name raises rather than disabling it; deltas are nowhere in
+  the module. The order-independence oracle is real and its negative arm
+  (inconsistent `$setOnInsert`) genuinely fails — see M2 for what it does *not*
+  reach.
+- **GD-26** — `index_def` refuses `expireAfterSeconds` structurally,
+  `ensure_schema` reads the server's indexes back and refuses a hand-added TTL
+  (proven live in the gate's run), and the AST + string-literal guard shows no
+  delete verb is callable or spellable in the module.
+- **GD-27** — no connection string, host, port or credential appears in
+  `aggregator/`; the live arm takes its URI from `TOUCH_MONGO_URI`, constructs
+  `touch_test_&lt;pid&gt;` and drops only that name; no skip/error message echoes the
+  URI.
+- **GD-28** — `provenance` is mandatory wherever declared, projected into the
+  server's `required`, enum-pinned per row, `legacy_events` refuses `harness`
+  and admits `unknown` (no guessing), `events` keeps the full five.
+- **GD-29** — duplicate-key is counted and returned, never swallowed; the module
+  holds no client and no lease state.
+- **GD-15 / ownership** — only the four owned files carry mtimes in this
+  attempt's window (`refs.py`/`test_refs.py` 22:31, `test_mongo_store.py` 22:32,
+  `mongo_store.py` 22:33). Sibling `aggregator/` and `tests/` files are older;
+  `.claude/` is untouched by this sub-plan; `.gitignore` (15:37), `CLAUDE.md`
+  (22:03) and `.temp-develop/` (14:45–16:53) all predate the window. `git log`
+  is unchanged at `579446e` — **no commit was made**, correctly.
+- **Test honesty** — with pymongo installed and no `TOUCH_MONGO_URI`, both
+  suites exit 0 and the live arm skips with a reason string; with a dead URI the
+  skip happens inside the 500 ms GD-21 timeouts. `test_refs.py` exits 0 on the
+  pymongo-free interpreter too.
+
+## Bottom line
+
+Fix B1 (two lines), then close M1 (the arm that makes B1's class visible where
+the suite actually runs) and M2 (point GD-25's count half at `run_nodes`/`runs`
+and put the retry fixture the docstring already credits into the corpus). The
+five minors are worth taking in the same pass — m1 and m2 are both cheap now and
+expensive once sp-07/sp-11 have built on top of them. The substance of R-43/R-44
+is otherwise in place and independently verified.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

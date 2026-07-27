@@ -1,0 +1,48 @@
+<title>implement run — cycle overview</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>Gated loops — every implement→test→critique cycle</h1>
+<p class="sum">One page per cycle; chips link to them. Execution order, top to bottom.</p>
+<table><tr><th>sub-plan</th><th>cycles</th><th>loop status</th></tr>
+<tr><td>sp-repo-bootstrap</td><td><a class="chip" style="color:var(--bad)" href="sp-repo-bootstrap-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--good)" href="sp-repo-bootstrap-cycle-2.html">✓ a2</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr>
+<tr><td>sp-fixtures-freeze</td><td><a class="chip" style="color:var(--good)" href="sp-fixtures-freeze-cycle-1.html">✓ a1</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr>
+<tr><td>sp-watcher-templates-firstwave</td><td><a class="chip" style="color:var(--bad)" href="sp-watcher-templates-firstwave-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-watcher-templates-firstwave-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-watcher-templates-firstwave-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-watcher-templates-firstwave-cycle-4.html">✗ a4</a> <a class="chip" style="color:var(--bad)" href="sp-watcher-templates-firstwave-cycle-5.html">✗ a5</a></td><td style="color:var(--bad);font-weight:700">✗ FAILED (attempts exhausted)</td></tr>
+<tr><td>sp-aggregator-core</td><td><a class="chip" style="color:var(--bad)" href="sp-aggregator-core-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-aggregator-core-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--good)" href="sp-aggregator-core-cycle-4.html">✓ a4</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr>
+<tr><td>sp-refs-mongostore</td><td><a class="chip" style="color:var(--bad)" href="sp-refs-mongostore-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-refs-mongostore-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-refs-mongostore-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-refs-mongostore-cycle-4.html">✗ a4</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-ingest-pipelines</td><td><a class="chip" style="color:var(--bad)" href="sp-ingest-pipelines-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-ingest-pipelines-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-ingest-pipelines-cycle-3.html">✗ a3</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-legacy-arm</td><td><a class="chip" style="color:var(--good)" href="sp-legacy-arm-cycle-1.html">✓ a1</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr>
+<tr><td>sp-agents-reducer</td><td><a class="chip" style="color:var(--bad)" href="sp-agents-reducer-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-agents-reducer-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-agents-reducer-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-agents-reducer-cycle-4.html">✗ a4</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-custom-state</td><td><a class="chip" style="color:var(--bad)" href="sp-custom-state-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-custom-state-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-custom-state-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-custom-state-cycle-4.html">✗ a4</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-server-api</td><td><a class="chip" style="color:var(--bad)" href="sp-server-api-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-server-api-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-server-api-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-server-api-cycle-4.html">✗ a4</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-frontend</td><td><a class="chip" style="color:var(--bad)" href="sp-frontend-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-frontend-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-frontend-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-frontend-cycle-4.html">✗ a4</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-e2e-acceptance</td><td><a class="chip" style="color:var(--good)" href="sp-e2e-acceptance-cycle-1.html">✓ a1</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr>
+<tr><td>sp-docs-register</td><td><a class="chip" style="color:var(--good)" href="sp-docs-register-cycle-1.html">✓ a1</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr>
+<tr><td>sp-mirror-deploy</td><td><a class="chip" style="color:var(--bad)" href="sp-mirror-deploy-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-mirror-deploy-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--bad)" href="sp-mirror-deploy-cycle-3.html">✗ a3</a> <a class="chip" style="color:var(--bad)" href="sp-mirror-deploy-cycle-4.html">✗ a4</a></td><td style="color:var(--muted);font-weight:700">… running</td></tr>
+<tr><td>sp-sessions-arm</td><td><a class="chip" style="color:var(--bad)" href="sp-sessions-arm-cycle-1.html">✗ a1</a> <a class="chip" style="color:var(--bad)" href="sp-sessions-arm-cycle-2.html">✗ a2</a> <a class="chip" style="color:var(--good)" href="sp-sessions-arm-cycle-3.html">✓ a3</a></td><td style="color:var(--good);font-weight:700">✓ GREEN</td></tr></table>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

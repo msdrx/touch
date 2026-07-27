@@ -1,0 +1,514 @@
+<title>sp-aggregator-core — cycle 1</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-aggregator-core — implement→test→critique, attempt 1/4</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">sp-aggregator-core implemented: the aggregator scaffold plus the three file-side leaf modules and their tests. Nothing outside the sub-plan's ownership was touched and no commit was made (SD-6 — only sp-01 commits).
+
+R-22 (scaffold, aggregator half): `aggregator/__init__.py` holds `__version__`, `SCHEMA_VERSION = 2`, the D8 `PY_MIN=(3,11)` floor and `check_python()`; it imports nothing from the package so importing `aggregator` can never drag in a Mongo-capable module. `touch-visual/` was deliberately NOT created (that half is sp-13's). `tests/run_all.sh` (executable) runs `tests/test_*.py` then the four `.claude/shared/monitoring/tests/test_*.py`, each with its own dir as cwd and `PYTHONDONTWRITEBYTECODE=1`; fail-fast by default, `--keep-going`, `--list`, `-h`, `nullglob` so an empty suite is green, rc 2 on bad usage/missing interpreter.
+
+SD-2 stdlib guard: `tests/test_stdlib_only.py`, written now and already naming GD-21's single exception — only `mongo_store.py`/`mirror.py` may import `pymongo`/`bson`/`dns`, and only lazily (AST: module-level import of those names fails the test). Third arm subprocess-imports every `aggregator/*` module and asserts nothing third-party lands in `sys.modules`. Passes before those two files exist and tightens when sp-05/sp-06 add them; pymongo is currently absent here, which the test reports.
+
+R-23 (`tailer.py`): pure `tail_once(path, Checkpoint)` plus a small `Tailer` wrapper. Checkpoint is a frozen `(st_dev, st_ino, size, offset, line_no, gen, mtime_ns)` value; `fresh`/`rotated`/**`shrunk` (`size &lt; offset` explicit — the RUNSTATE-15 branch)** each force a re-ingest from 0 and bump `gen` (SD-10 signal; the GD-26 sweep stays mirror.py's). Torn tails cut at the last `\n` with the remainder deferred; stat-first short circuit returns without opening the file; every line carries 1-based `line_no` + absolute `byte_offset` (incl. blank lines, so GD-24/R-47 positional ids never shift); `read_cap` bounds one read (`more=True`); `.compact.tmp.*` defers a tick with a 60 s staleness escape; a vanished file never resets a checkpoint. Equal-size in-place rewrite is documented as not-re-ingested by default with an opt-in `resync_on_mtime_only`.
+
+R-24 (`store.py`): `.touch/` touch-events-v2 append-only store, D5 layout (`sessions/&lt;key&gt;/events.jsonl`, `runs/&lt;runId&gt;/events.jsonl`, `custom-state.jsonl`, `control.jsonl`), root from arg &gt; `$TOUCH_STATE_DIR` &gt; `&lt;repo&gt;/.touch`, dirs 0700, path components percent-escaped and exactly reversible via `streams()`. Fixed key order `v,seq,ts,source,provenance,kind,ref,data` (no `stream` field — that is mongo_store's addition). Per-stream `seq` resumed from the file at boot as `max(line count, highest stored seq)+1` and **re-derived inside the flock whenever the file grew behind our back**, so even out-of-contract concurrent writers get unique seqs (4 processes x 100 appends → 400 records, 0 torn, seqs 1..400). One `flock`'d `write()` per batch; a torn tail is terminated with a newline (never deleted) and counted; oversize (&gt;1 MiB) records are stubbed `{oversize,bytes,keys}` rather than dropped or raised. `validate_ref` implements GD-11's union + GD-11(d)'s `{root,name,attempt}`/`{task,plan,stage?,attempt?}`, rejects malformed known shapes (non-17-hex agentId, non-UUID uuid, string `ordinal`/`pid`, **int `procStart`**), exempts `legacy:&lt;task&gt;:&lt;id8&gt;`, and retains unknown shapes verbatim. Token records get all four keys; `provenance` is a required keyword from the closed five-value enum with `custom-state`/`control` pinned to `{asserted,touch}`; `kind`/`source` are slug-validated but open at the tail so R-52 rides this machinery with store.py unchanged; `custom-state`/`control` fsync. Cursors are `&lt;stream&gt;#&lt;seq:012d&gt;` (`cursor_key`/`parse_cursor_key`, bare seq rejected), plus `read_since`, `read_from_cursor`, and incremental `follow()` over the tailer. No reducer here (GD-23) — a test guards the exported surface by name.
+
+R-29 (`ws.py`): pure RFC 6455 codec, no socket/asyncio import (asserted via AST). `accept_key` (RFC §1.3 vector), `encode_frame`/text/binary/ping/pong/close, big-int `mask_bytes`, `decode_frame` returning `(None,0)` on a partial frame, and `FrameDecoder` with continuation reassembly, control frames interleaved mid-message, UTF-8 validation, and size caps. Violations map to RFC §7.4.1 close codes: 1002 (RSV, unknown opcode, fragmented/oversize control frame, wrong masking direction, non-minimal length, stray continuation, new data frame mid-message, 1-byte/reserved close code), 1007 (bad UTF-8 in text or close reason), 1009 (over cap, refused from the header before buffering). The prior art's skip-and-discard path is kept as `drain_frames` and asserted **byte-for-byte against the real `monitor_server.parse_client_frames`**, which satisfies R-29's &quot;masked client frames dropped unread&quot; while T3's unmasking codec exists alongside.
+
+Tests (all stdlib, standalone, non-zero on failure): `test_tailer.py` (15 cases incl. a real 20 MB fixture where a 1 KB append reads &lt;64 KB — GD-30's byte-counter, never a timing assertion — and the frozen corpus tailed byte-for-byte against a plain read), `test_store.py` (21 cases incl. the two-streams-share-seq, cursor round-trip, torn-tail recovery, oversize stub, 4-process concurrency arms), `test_ws.py` (13 cases, RFC §5.7 vectors byte-exact), `test_stdlib_only.py`. Verified: `tests/run_all.sh` → 10 passed, 0 failed (~26 s); the four monitoring tests and sp-01/sp-02's `test_bootstrap.py`/`test_fixtures.py` were already green and remain green.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. All 4 owned suites green (test_tailer 63 ok, test_store 109 ok, test_ws 114 ok, test_stdlib_only 12 ok; rc=0 each). Full suite via tests/run_all.sh --keep-going: 10 passed, 0 failed (incl. the four monitoring baselines, all still green) on a bare env with pymongo NOT installed and no daemons. Items R-22:aggregator, R-23, R-24, R-29 and SD-2/SD-10/SD-11 verified present and behaviourally tested (D6 four-tuple checkpoint with explicit size&lt;offset shrink branch, torn-tail cut at last newline, real frozen-fixture byte-for-byte + offset-tiling assertions, flock'd per-batch appends with seq re-derived inside the lock, both ref-union arms, (stream,seq) cursor round-trip, torn-tail write recovery, RFC 6455 §5.7 vectors both directions, and drain_frames parity executed against the real monitor_server.parse_client_frames). No edits outside ownership (all other modified paths predate this attempt by mtime), no commit, no stray .touch/. Three advisory non-blocking notes recorded (stdlib guard's top-lazy eager-import blind spot for future mongo_store.py, two documented informational check(True) lines, drain() stalls on a single line larger than read_cap).</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 1 blocker, 1 major, 5 minor, 5 nits. BLOCKER (store.py:532 + :657-666): next_seq()/cursor() caches _last_size but discards _scan_seq's ends_with_newline flag, so the following append_many() skips the in-lock rescan, keeps ends_with_newline=True, writes no repair newline and concatenates the new record onto a killed writer's torn line — reproduced: append() returns seq=3, torn_repairs stays 0, and read_all() never sees the record. Silent data loss in the system-of-record/WAL, breaking R-24's named torn-tail-write-recovery invariant (existing test misses it by never calling cursor() first). Fix: drop the _last_size seeding in next_seq (or cache the newline flag). MAJOR (tailer.py:318-344/347-361): a line longer than read_cap clears `more`, so read_complete_lines silently returns 0 lines for a 6-line file (its docstring promises the whole file) and the poll loop re-reads read_cap bytes every tick forever with reason=&quot;append&quot; and no counter — the opposite of GD-30's O(delta) claim. Minors: SD-2 stdlib guard's `top - lazy` subtraction cannot detect an eager pymongo import when the file also imports it lazily (verified against the guard itself); next_seq/cursor cache never invalidated so a reader's cursor freezes; Checkpoint.from_dict crashes on a null field despite promising tolerance; &quot;run:.&quot;/&quot;session:.&quot; accepted and write a stream streams() can never list; encode_close emits close codes (1004, 1012-2999) that the module's own parse_close rejects. Verified independently: all four suites green (63/109/114/12 ok), no commit, no .touch/, no edits outside ownership; GD-21/22/24/25/26/29, SD-10, SD-11 and the R-24 &quot;Mongo does not replace store.py&quot; disposition all honored.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 2/4</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: sp-aggregator-core implemented: the aggregator scaffold plus the three file-side leaf modules and their tests. Nothing outside the sub-plan's ownership was touched and no commit was made (SD-6 — only sp-01 commits).
+
+R-22 (scaffold, aggregator half): `aggregator/__init__.py` holds `__version__`, `SCHEMA_VERSION = 2`, the D8 `PY_MIN=(3,11)` floor and `check_python()`; it imports nothing from the package so importing `aggregator` can never drag in a Mongo-capable module. `touch-visual/` was deliberately NOT created (that half is sp-13's). `tests/run_all.sh` (executable) runs `tests/test_*.py` then the four `.claude/shared/monitoring/tests/test_*.py`, each with its own dir as cwd and `PYTHONDONTWRITEBYTECODE=1`; fail-fast by default, `--keep-going`, `--list`, `-h`, `nullglob` so an empty suite is green, rc 2 on bad usage/missing interpreter.
+
+SD-2 stdlib guard: `tests/test_stdlib_only.py`, written now and already naming GD-21's single exception — only `mongo_store.py`/`mirror.py` may import `pymongo`/`bson`/`dns`, and only lazily (AST: module-level import of those names fails the test). Third arm subprocess-imports every `aggregator/*` module and asserts nothing third-party lands in `sys.modules`. Passes before those two files exist and tightens when sp-05/sp-06 add them; pymongo is currently absent here, which the test reports.
+
+R-23 (`tailer.py`): pure `tail_once(path, Checkpoint)` plus a small `Tailer` wrapper. Checkpoint is a frozen `(st_dev, st_ino, size, offset, line_no, gen, mtime_ns)` value; `fresh`/`rotated`/**`shrunk` (`size &lt; offset` explicit — the RUNSTATE-15 branch)** each force a re-ingest from 0 and bump `gen` (SD-10 signal; the GD-26 sweep stays mirror.py's). Torn tails cut at the last `\n` with the remainder deferred; stat-first short circuit returns without opening the file; every line carries 1-based `line_no` + absolute `byte_offset` (incl. blank lines, so GD-24/R-47 positional ids never shift); `read_cap` bounds one read (`more=True`); `.compact.tmp.*` defers a tick with a 60 s staleness escape; a vanished file never resets a checkpoint. Equal-size in-place rewrite is documented as not-re-ingested by default with an opt-in `resync_on_mtime_only`.
+
+R-24 (`store.py`): `.touch/` touch-events-v2 append-only store, D5 layout (`sessions/&lt;key&gt;/events.jsonl`, `runs/&lt;runId&gt;/events.jsonl`, `custom-state.jsonl`, `control.jsonl`), root from arg &gt; `$TOUCH_STATE_DIR` &gt; `&lt;repo&gt;/.touch`, dirs 0700, path components percent-escaped and exactly reversible via `streams()`. Fixed key order `v,seq,ts,source,provenance,kind,ref,data` (no `stream` field — that is mongo_store's addition). Per-stream `seq` resumed from the file at boot as `max(line count, highest stored seq)+1` and **re-derived inside the flock whenever the file grew behind our back**, so even out-of-contract concurrent writers get unique seqs (4 processes x 100 appends → 400 records, 0 torn, seqs 1..400). One `flock`'d `write()` per batch; a torn tail is terminated with a newline (never deleted) and counted; oversize (&gt;1 MiB) records are stubbed `{oversize,bytes,keys}` rather than dropped or raised. `validate_ref` implements GD-11's union + GD-11(d)'s `{root,name,attempt}`/`{task,plan,stage?,attempt?}`, rejects malformed known shapes (non-17-hex agentId, non-UUID uuid, string `ordinal`/`pid`, **int `procStart`**), exempts `legacy:&lt;task&gt;:&lt;id8&gt;`, and retains unknown shapes verbatim. Token records get all four keys; `provenance` is a required keyword from the closed five-value enum with `custom-state`/`control` pinned to `{asserted,touch}`; `kind`/`source` are slug-validated but open at the tail so R-52 rides this machinery with store.py unchanged; `custom-state`/`control` fsync. Cursors are `&lt;stream&gt;#&lt;seq:012d&gt;` (`cursor_key`/`parse_cursor_key`, bare seq rejected), plus `read_since`, `read_from_cursor`, and incremental `follow()` over the tailer. No reducer here (GD-23) — a test guards the exported surface by name.
+
+R-29 (`ws.py`): pure RFC 6455 codec, no socket/asyncio import (asserted via AST). `accept_key` (RFC §1.3 vector), `encode_frame`/text/binary/ping/pong/close, big-int `mask_bytes`, `decode_frame` returning `(None,0)` on a partial frame, and `FrameDecoder` with continuation reassembly, control frames interleaved mid-message, UTF-8 validation, and size caps. Violations map to RFC §7.4.1 close codes: 1002 (RSV, unknown opcode, fragmented/oversize control frame, wrong masking direction, non-minimal length, stray continuation, new data frame mid-message, 1-byte/reserved close code), 1007 (bad UTF-8 in text or close reason), 1009 (over cap, refused from the header before buffering). The prior art's skip-and-discard path is kept as `drain_frames` and asserted **byte-for-byte against the real `monitor_server.parse_client_frames`**, which satisfies R-29's &quot;masked client frames dropped unread&quot; while T3's unmasking codec exists alongside.
+
+Tests (all stdlib, standalone, non-zero on failure): `test_tailer.py` (15 cases incl. a real 20 MB fixture where a 1 KB append reads &lt;64 KB — GD-30's byte-counter, never a timing assertion — and the frozen corpus tailed byte-for-byte against a plain read), `test_store.py` (21 cases incl. the two-streams-share-seq, cursor round-trip, torn-tail recovery, oversize stub, 4-process concurrency arms), `test_ws.py` (13 cases, RFC §5.7 vectors byte-exact), `test_stdlib_only.py`. Verified: `tests/run_all.sh` → 10 passed, 0 failed (~26 s); the four monitoring tests and sp-01/sp-02's `test_bootstrap.py`/`test_fixtures.py` were already green and remain green.</li><li>Test gate PASSED: PASS. All 4 owned suites green (test_tailer 63 ok, test_store 109 ok, test_ws 114 ok, test_stdlib_only 12 ok; rc=0 each). Full suite via tests/run_all.sh --keep-going: 10 passed, 0 failed (incl. the four monitoring baselines, all still green) on a bare env with pymongo NOT installed and no daemons. Items R-22:aggregator, R-23, R-24, R-29 and SD-2/SD-10/SD-11 verified present and behaviourally tested (D6 four-tuple checkpoint with explicit size&lt;offset shrink branch, torn-tail cut at last newline, real frozen-fixture byte-for-byte + offset-tiling assertions, flock'd per-batch appends with seq re-derived inside the lock, both ref-union arms, (stream,seq) cursor round-trip, torn-tail write recovery, RFC 6455 §5.7 vectors both directions, and drain_frames parity executed against the real monitor_server.parse_client_frames). No edits outside ownership (all other modified paths predate this attempt by mtime), no commit, no stray .touch/. Three advisory non-blocking notes recorded (stdlib guard's top-lazy eager-import blind spot for future mongo_store.py, two documented informational check(True) lines, drain() stalls on a single line larger than read_cap).</li><li>Critique REJECTED: REJECTED — 1 blocker, 1 major, 5 minor, 5 nits. BLOCKER (store.py:532 + :657-666): next_seq()/cursor() caches _last_size but discards _scan_seq's ends_with_newline flag, so the following append_many() skips the in-lock rescan, keeps ends_with_newline=True, writes no repair newline and concatenates the new record onto a killed writer's torn line — reproduced: append() returns seq=3, torn_repairs stays 0, and read_all() never sees the record. Silent data loss in the system-of-record/WAL, breaking R-24's named torn-tail-write-recovery invariant (existing test misses it by never calling cursor() first). Fix: drop the _last_size seeding in next_seq (or cache the newline flag). MAJOR (tailer.py:318-344/347-361): a line longer than read_cap clears `more`, so read_complete_lines silently returns 0 lines for a 6-line file (its docstring promises the whole file) and the poll loop re-reads read_cap bytes every tick forever with reason=&quot;append&quot; and no counter — the opposite of GD-30's O(delta) claim. Minors: SD-2 stdlib guard's `top - lazy` subtraction cannot detect an eager pymongo import when the file also imports it lazily (verified against the guard itself); next_seq/cursor cache never invalidated so a reader's cursor freezes; Checkpoint.from_dict crashes on a null field despite promising tolerance; &quot;run:.&quot;/&quot;session:.&quot; accepted and write a stream streams() can never list; encode_close emits close codes (1004, 1012-2999) that the module's own parse_close rejects. Verified independently: all four suites green (63/109/114/12 ok), no commit, no .touch/, no edits outside ownership; GD-21/22/24/25/26/29, SD-10, SD-11 and the R-24 &quot;Mongo does not replace store.py&quot; disposition all honored.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-aggregator-core-test-attempt-1.md</summary><pre># sp-aggregator-core (sp-04) — test gate, attempt 1: **PASS**
+
+Read-only gate. Nothing edited; no services started; pymongo NOT installed in
+this environment (so the GD-21/R-56 no-mongod arm is the arm that actually ran).
+
+## 1. Targeted suites (owned files) — all green
+
+Run from the repo root, `PYTHONDONTWRITEBYTECODE=1`, each file standalone:
+
+| test file | rc | `ok:` assertions |
+|---|---|---|
+| `tests/test_tailer.py` | 0 | 63 |
+| `tests/test_store.py` | 0 | 109 |
+| `tests/test_ws.py` | 0 | 114 |
+| `tests/test_stdlib_only.py` | 0 | 12 |
+
+## 2. Full-suite regression gate — green
+
+`bash tests/run_all.sh --keep-going` → `10 passed, 0 failed, 10 file(s) total, 26s`
+(rc 0). Files, in the runner's order: `tests/test_bootstrap.py`,
+`tests/test_fixtures.py`, `tests/test_stdlib_only.py`, `tests/test_store.py`,
+`tests/test_tailer.py`, `tests/test_ws.py`, then the four monitoring tests
+(`test_frontend.py`, `test_server.py`, `test_shell.py`, `test_watcher.py`) each
+run with its own dir as cwd.
+
+Independently re-run by the loop the prompt specifies:
+- monitoring: `test_frontend rc=0`, `test_server rc=0`, `test_shell rc=0`,
+  `test_watcher rc=0` (baseline stays green — no regression introduced);
+- repo: `test_bootstrap rc=0` (65 ok), `test_fixtures rc=0` (181 ok) — the two
+  earlier sub-plans' suites are unaffected by this change.
+
+No third-party package is installed and no daemon was running during the run, so
+the &quot;bare checkout&quot; condition is the tested condition, not an assumption.
+
+## 3. Verification against the plans
+
+Owned items (`sp-04` in `touch-mongo-live-subplans.md`): R-22:aggregator, R-23
+(base + amended clause), R-24 (stands unchanged), R-29; SD-2, SD-10, SD-11,
+GD-20 copy-verbatim list.
+
+Present in the tree, all four owned modules plus five owned test artifacts:
+`aggregator/__init__.py` (54 L), `aggregator/tailer.py` (411 L),
+`aggregator/store.py` (769 L), `aggregator/ws.py` (474 L),
+`tests/run_all.sh` (executable, +x), `tests/test_tailer.py`,
+`tests/test_store.py`, `tests/test_ws.py`, `tests/test_stdlib_only.py`.
+
+Item-by-item, each claim checked against source + a real assertion (not a
+tautology):
+
+- **R-22 / SD-2** — `aggregator/__init__.py` imports nothing from its own
+  package (leaf modules stay independently importable) and states GD-21.
+  `tests/test_stdlib_only.py` is the static guard, born naming exactly the two
+  permitted pymongo files (`mongo_store.py`, `mirror.py`) *before they exist*,
+  and it additionally proves the runtime half in a **subprocess** (`sys.modules`
+  contains nothing third-party after importing each module) — that arm keeps
+  working for files not yet written, so the suite is never red between
+  sub-plans. `run_all.sh` uses `shopt -s nullglob` so an empty suite is green
+  by definition, and `--list` reflects real collection.
+- **R-23 / SD-10 / D6** — `Checkpoint.identity()` is literally
+  `(st_dev, st_ino, size, offset)` in D6's order; `tail_once` has both reset
+  triggers as separate, named branches: `(st_dev,st_ino)` change ⇒
+  `reason=&quot;rotated&quot;`, and `st_size &lt; ck.offset` ⇒ `reason=&quot;shrunk&quot;` (the branch
+  RUNSTATE-15 found missing in `decision_watcher.py`). Torn tail is verbatim
+  prior art: `split_lines` cuts at `data.rfind(b&quot;\n&quot;)` and never reports the
+  remainder as consumed, so the offset cannot advance past an incomplete line.
+  Reads are incremental — stat-first short circuit returns `unchanged`
+  *without opening the file*. Signals re-ingest only (`TailResult.reset` +
+  monotonic `Checkpoint.gen`); no DB, no JSON parsing here — the GD-26 sweep is
+  correctly left to `mirror.py` (sp-06). Tests cover truncation, rotation,
+  torn tail, multibyte split across ticks, missing-file-keeps-checkpoint,
+  read-cap bounding, compaction backoff, checkpoint round-trip, and — the
+  strongest arm — three real frozen fixtures (`journal.jsonl` 14 lines,
+  `touch-mongo-live-events.jsonl` 320 lines, `oversize-line.jsonl`) asserted
+  byte-for-byte against a plain read *and* offsets asserted to tile the file
+  exactly, plus a copy-then-grow live-append case. The byte counter, not a
+  clock, is what the incrementality test asserts (GD-30).
+- **R-24** — store.py is unmistakably the system of record, not a Mongo shim:
+  no pymongo anywhere (`test_no_reducer_lives_here` asserts the absence by
+  name), no scalar `stream`/`_id`-grammar leakage. `seq` is per event-log file,
+  re-derived **inside the `flock`** whenever the file grew behind our back, and
+  `_scan_seq` returns `max(line count, highest stored seq) + 1` so a torn or
+  garbage line consumes a number and cannot cause a duplicate. Appends are one
+  `flock`'d `write()` per batch with `fsync` for `DURABLE_STREAMS`. Ref union
+  is open at the tail with both arms real: malformed known shapes raise
+  `RefError` (non-17-hex agentId, non-UUID uuid, `procStart` pinned to a
+  *string*, bool excluded from int pins), unknown shapes classify as
+  `&quot;unknown&quot;` and are retained; `legacy:&lt;task&gt;:&lt;id8&gt;` exempted per GD-14. One ts
+  format `…Z` enforced on write, `normalize_ts` tolerant on read. Token records
+  always four keys, non-int rejected rather than silently zeroed; no deltas on
+  disk (GD-25). `provenance` mandatory, closed five-value enum, with
+  `custom-state`/`control` refusing `harness`/`derived`. R-24's four named test
+  cases are all present and non-trivial: both ref arms; two streams legally
+  holding the same seq; `(stream, seq)` cursor round-trip (and &quot;a bare seq is
+  never a cursor&quot; as a rejection); torn-tail write recovery — that last one
+  asserts the partial line is *terminated and kept*, counted in
+  `torn_repairs`/`bad_lines`, seqs stay unique, and both good records survive.
+  Extra real coverage: 4 concurrent writer processes × 100 appends ⇒ 0 torn
+  lines, 400 records, `reseeks` observed; oversize record stubbed, never
+  dropped; `follow()` incremental with reset semantics.
+- **R-29** — pure functions, no I/O: `test_module_does_no_io` asserts the import
+  set is exactly `{__future__, base64, dataclasses, hashlib, os}` and that
+  `open/print/exec/eval` never appear. RFC 6455 §5.7 byte vectors are hard-coded
+  and asserted in **both** directions (encode and decode), including the
+  126/127 minimal-length-encoding rejections and the high-bit 64-bit length.
+  Fragmentation reassembly, control-frame interleaving mid-message, byte-by-byte
+  feeding, close-code legality (§7.4.1), UTF-8 validation ⇒ 1007, size caps ⇒
+  1009, masking-direction violations ⇒ 1002. The &quot;masked client frames dropped
+  unread&quot; clause is honoured by `drain_frames`, and the parity claim is
+  *executed*, not asserted: the test imports `monitor_server` and compares
+  `drain_frames` against the real `parse_client_frames` on the same bytes
+  (observed `ok: drain_frames matches monitor_server.parse_client_frames on
+  8 bytes`), skipping cleanly if that import is unavailable.
+- **SD-11 / GD-24** — every id built through `cursor_key` as
+  `&lt;stream&gt;#&lt;seq:012d&gt;` (zero-padded so lexicographic order equals numeric);
+  `validate_stream` rejects `#`, `|`, path separators, `..`, control chars, so
+  an unescaped component fails fast rather than writing to a wrong path. No
+  `$inc`-style accumulation or reducer surface exists in this layer.
+
+**Ownership**: `git status --porcelain` shows the only new paths are
+`aggregator/` and `tests/` (untracked as wholes) — no file outside the sub-plan's
+ownership list was touched by this attempt. The modified entries under
+`.claude/shared/monitoring/`, `.claude/skills/*/templates/` and `.gitignore` all
+carry mtimes of 19:37–23:05, i.e. sp-01/sp-02/sp-03's earlier work, whereas every
+sp-04 file has an mtime of 23:28–23:42. No commit was made (SD-6 respected).
+No stray `.touch/` directory was created by the suite; `__pycache__/` is already
+gitignored (`.gitignore:38`).
+
+## 4. Advisory notes (NOT gate failures, no fix required this attempt)
+
+1. `tests/test_stdlib_only.py:imports_of` computes module-level imports as
+   `top - lazy`. A future `mongo_store.py` that imports pymongo **both** at
+   module level and inside a function would therefore pass the
+   &quot;pymongo is imported lazily&quot; check. The subprocess arm would still catch it
+   once pymongo is installed, but on a bare machine it would not. Suggested
+   tightening when sp-05/sp-06 land: compute the eager set directly from
+   module-level `Import`/`ImportFrom` nodes instead of subtracting the lazy set.
+2. Two `check(True, ...)` calls exist (`test_the_exception_is_named_and_narrow`,
+   `test_pymongo_absence_is_the_tested_condition`). Both are explicitly
+   documented as informational prints of environment facts, and each sits beside
+   a real assertion, so they do not inflate the green claim — but they are the
+   only tautological lines in the sub-plan's suite.
+3. `tailer.tail_once` sets `more=False` when a single line exceeds `read_cap`
+   (`consumed == 0`), so `Tailer.drain()` stops rather than spinning. That is the
+   documented, bounded behaviour (`deferred == bytes_read` makes it visible), but
+   a caller polling only via `drain()` will make no progress on such a file until
+   the line is terminated. Worth a `/health` counter when `server.py` (sp-12)
+   lands.
+
+## Verdict
+
+PASS — 4/4 owned test files green (298 assertions), full suite 10/10 files
+green including the four monitoring baselines, all owned items (R-22:aggregator,
+R-23, R-24, R-29 + SD-2/SD-10/SD-11) implemented with behavioural, fixture-backed
+tests, and no edits outside the sub-plan's ownership.
+</pre></details>
+<details><summary>Critique findings — sp-aggregator-core-critique-attempt-1.md</summary><pre># sp-aggregator-core — adversarial critique, attempt 1
+
+**Verdict: REJECTED** — 1 blocker, 1 major, 5 minor, 5 nits.
+
+Reviewed (full content; all four files are new in an untracked tree):
+`aggregator/__init__.py`, `aggregator/tailer.py`, `aggregator/store.py`,
+`aggregator/ws.py`, `tests/run_all.sh`, `tests/test_tailer.py`,
+`tests/test_store.py`, `tests/test_ws.py`, `tests/test_stdlib_only.py`.
+
+Against: `touch-mongo-live-subplans.md` §sp-04, amendment items R-22:aggregator /
+R-23 / R-24 / R-29 and their §2 dispositions, base plan R-22…R-29 + GD-11 /
+GD-15 / GD-20, and amendment GD-21…GD-30 + SD-2 / SD-10 / SD-11.
+
+## What holds up (verified independently, not taken from the test gate)
+
+* All four owned suites re-run green here (63 / 109 / 114 / 12 `ok`, rc=0 each),
+  no `.touch/` created, no commit added (HEAD is still sp-01's C2 `579446e`),
+  nothing written outside the ownership list (the modified `.claude/**` paths
+  are 21:51–23:01, all four owned modules 23:28–23:42).
+* GD-21 / GD-22 / GD-24 / GD-25 / GD-26 / GD-29: zero pymongo, zero DB I/O,
+  zero delete/`$unset`/TTL/`$inc` surface anywhere in the three modules; no
+  `_id` is built here at all; the `&lt;stream&gt;#&lt;seq:012d&gt;` grammar is the GD-24
+  one, zero-padded, and the store carries no scalar `stream`/`seq` field on
+  disk (R-24 row: &quot;Mongo does not replace store.py&quot; — respected literally,
+  asserted by `test_record_shape`).
+* SD-10 is implemented exactly as written: `(st_dev, st_ino, size, offset)`
+  identity, `size &lt; offset` as its own explicit branch, `gen` bumped on every
+  reset, sweep left to `mirror.py`.
+* GD-28 pin is right per plan (`custom_state*` ⇒ `{asserted,touch}`;
+  `control_ack` is a custom-state `kind`, so pinning the `control` stream the
+  same way is faithful, not over-restriction), and `kind`/`source` really do
+  stay open at the tail, so R-52 can ride this file unchanged.
+* R-29's prior-art parity is *checked*, not asserted: `drain_frames` is
+  byte-identical to `monitor_server.parse_client_frames` and the test executes
+  the real imported function. `ws.py` imports are exactly five stdlib names.
+* Tests are behavioural, not tautological (real fixtures byte-for-byte, offset
+  tiling, 4-process concurrent append with a `seqs == range(1,401)` assertion,
+  RFC §5.7 vectors in both directions).
+
+---
+
+## BLOCKER
+
+### B1 — `append()` after `next_seq()`/`cursor()` on a torn-tail stream silently destroys the record it returns
+`aggregator/store.py:532` (the discarded flag) and
+`aggregator/store.py:657-666` (`ends_with_newline = True` default).
+
+`next_seq()` scans the file and throws away `_scan_seq`'s
+`ends_with_newline` (`seq, _, size = self._scan_seq(fh)`) while caching both
+`_next_seq[stream]` **and** `_last_size[stream]`. The next `append_many()` then
+sees `seq is not None` and `_last_size == size`, skips the in-lock rescan, and
+keeps its optimistic default `ends_with_newline = True` — so no repair newline
+is written and the new record is concatenated onto the killed writer's partial
+line.
+
+Reproduced (any process that asks for a cursor before it writes — exactly what
+a server does at connect, `cursor()` → `next_seq()`):
+
+```python
+s = Store(root=root); s.append(&quot;run:wf_1&quot;, ..., data={&quot;i&quot;: 1})
+open(path, &quot;ab&quot;).write(b'{&quot;v&quot;:2,&quot;seq&quot;:2,&quot;ts&quot;:&quot;2026-')   # killed writer
+fresh = Store(root=root)
+fresh.cursor(&quot;run:wf_1&quot;)                                 # &lt;-- poisons the cache
+rec = fresh.append(&quot;run:wf_1&quot;, ..., data={&quot;i&quot;: 3})       # returns seq=3
+```
+
+Result on disk:
+
+```
+{&quot;v&quot;:2,&quot;seq&quot;:1,...,&quot;data&quot;:{&quot;i&quot;:1}}
+{&quot;v&quot;:2,&quot;seq&quot;:2,&quot;ts&quot;:&quot;2026-{&quot;v&quot;:2,&quot;seq&quot;:3,...,&quot;data&quot;:{&quot;i&quot;:3}}
+```
+
+`fresh.stats[&quot;torn_repairs&quot;] == 0`, `read_all()` returns **only** record 1, and
+the record `append()` returned to the caller as durably stored is unrecoverable.
+This is silent data loss in the file the module's own docstring calls &quot;the
+**system of record** and the crash-durable WAL&quot;, and it breaks R-24's named
+invariant (&quot;torn-tail write recovery&quot;) and GD-20's flock'd-append rule. Worse on
+`DURABLE_STREAMS`: `custom-state` is &quot;the ONE dataset not rebuildable from
+`~/.claude`&quot; (R-52), and this is the one stream whose fsync implies the record
+survived.
+
+`test_torn_tail_write_recovery` misses it because it appends from a fresh
+`Store` without touching `next_seq()`/`cursor()` first.
+
+**Fix (one line, plus a test):** do not seed `_last_size` in `next_seq()` —
+drop `self._last_size[stream] = size` so the first append re-derives inside the
+lock and sees the torn tail. If the rescan-avoidance is worth keeping, cache the
+flag instead: `self._needs_nl[stream] = not ends_with_newline` in `next_seq()`
+and start `append_many` with
+`ends_with_newline = not self._needs_nl.get(stream, False)`. Add the regression
+case `cursor()` → `append()` → assert `torn_repairs == 1` and
+`len(read_all()) == 2`.
+
+---
+
+## MAJOR
+
+### M1 — a line longer than `read_cap` makes the stream vanish silently and burns `read_cap` bytes every tick forever
+`aggregator/tailer.py:318-344` (`more = new_offset &lt; size and consumed &gt; 0`),
+`aggregator/tailer.py:347-361` (`read_complete_lines`),
+same loop shape in `aggregator/store.py:727-735`.
+
+`tail_once` correctly refuses to advance past an unterminated line, but when
+`consumed == 0` it also clears `more`, so every looping caller concludes &quot;caught
+up&quot;. Observed with `read_cap=1000` on a file whose first line is 3000 bytes
+followed by five short lines:
+
+```
+read_complete_lines(...)  -&gt;  0 lines   (the file has 6)
+tick0: reason=append lines=0 bytes=1000 deferred=1000 more=False offset=0
+tick1: reason=append lines=0 bytes=1000 deferred=1000 more=False offset=0
+tick2: ... unchanged, forever
+```
+
+Two distinct harms:
+
+1. `read_complete_lines` returns a **wrong answer, silently** — its docstring
+   promises &quot;Every complete line of `path` right now … a file larger than
+   `read_cap` still comes back whole&quot;, and it instead returns zero lines and no
+   error. Later sub-plans use it for boot-time scans and fixtures.
+2. the stall is *not* the &quot;bounded and visible&quot; state the code comment claims:
+   `reason` stays `append`, no counter is bumped, and every tick re-reads
+   `read_cap` bytes (8 MiB by default) of the same prefix — with a 250 ms poll
+   that is ~32 MB/s of pure waste on one stalled stream, i.e. the direct
+   opposite of GD-30's &quot;per-tick work is O(bytes appended)&quot; and of this module's
+   own headline claim.
+
+Trigger needs a single line &gt; `read_cap`; the frozen corpus tops out at 872 KB,
+but R-44 legislates for &gt;8 MB payloads, so the case is contemplated by the plan,
+not hypothetical.
+
+**Fix:** distinguish &quot;nothing to do&quot; from &quot;cannot make progress&quot;. When
+`consumed == 0 and len(data) == capped and st.st_size - start &gt; capped`, return
+a distinct `reason` (e.g. `REASON_OVERSIZE_LINE`) with a flag/counter the poll
+loop and `/health` can surface, and either (a) escalate that one read to
+`st.st_size - start` for this file, or (b) keep the cap but let
+`read_complete_lines` / `Store._read_lines` raise or log instead of returning a
+short list. Add a test with a line &gt; `read_cap` asserting both the surfaced
+reason and that the loop-once helpers do not report success.
+
+---
+
+## MINOR
+
+### m1 — the SD-2 stdlib guard cannot see an eager pymongo import in the file shape it will actually meet
+`tests/test_stdlib_only.py:66-85` (`return top - lazy, lazy`),
+`tests/test_stdlib_only.py:99-103`.
+
+`imports_of` subtracts every function-level import name from the module-level
+set, so a file that imports pymongo **both** at module level and lazily reports
+`top == set()`. Verified against the guard's own function:
+
+```python
+src = &quot;import pymongo\ndef client():\n    import pymongo\n&quot;
+imports_of(ast.parse(src))  -&gt;  top: set()   lazy: {'pymongo'}
+eager detected? []
+```
+
+That is precisely the shape `mongo_store.py` will have if anyone writes the
+usual `try: import pymongo / except ImportError: pymongo = None` at the top plus
+a lazy import in the client factory — and in a bare env (GD-21's target) the
+subprocess arm passes too, because the guarded import raises nothing and loads
+nothing. SD-2 makes this guard the normative enforcement of GD-21, so it should
+not be defeated by the most likely real code.
+
+**Fix:** compute module-level imports structurally instead of by subtraction —
+walk only nodes that are not inside a `FunctionDef`/`AsyncFunctionDef`/
+`Lambda`/`ClassDef` body (e.g. recurse over `tree.body`, descending into
+`If`/`Try`/`With` but stopping at function boundaries) and report those as
+`top`. Add a self-test on that helper with the two-import fixture above.
+
+### m2 — `next_seq()`/`cursor()` cache is never invalidated, so a non-writing `Store` hands out a frozen cursor
+`aggregator/store.py:523-541`, `aggregator/store.py:767-769`.
+
+`next_seq` returns `self._next_seq[stream]` unconditionally once cached, with no
+stat re-check. A reader instance (the server serving &quot;resume from here&quot;) is
+therefore stuck at its first observation:
+
+```
+reader cursor after 1 append: run:wf_1#000000000001
+writer cursor after 5 appends: run:wf_1#000000000005
+reader cursor after 5 appends: run:wf_1#000000000001   &lt;-- stale
+```
+
+Direction of error is duplicate replay rather than loss, so it is not a blocker,
+but `cursor()` is public and its docstring says it &quot;names the last record
+currently in `stream`&quot;, which is false for any consumer that does not write.
+
+**Fix:** in `next_seq`, compare `os.stat(path).st_size` with
+`self._last_size.get(stream)` and rescan on mismatch (the same signal
+`append_many` already uses); or give `cursor()` a `refresh=True` path.
+
+### m3 — `Checkpoint.from_dict` crashes on a null field despite promising it cannot
+`aggregator/tailer.py:136-144`.
+
+The docstring: &quot;a checkpoint file written by an older Touch must never crash a
+restart, it may only lose precision&quot;. `int(v)` over the known keys raises
+`TypeError: int() argument must be … not 'NoneType'` for `{&quot;offset&quot;: null}` — a
+perfectly reachable JSON shape from a half-written or older state file, and the
+restart path is the one place tolerance was the point.
+
+**Fix:** per-key `try: int(v) except (TypeError, ValueError): continue` (drop
+the field, keep the default), and extend `test_checkpoint_roundtrip` with
+`{&quot;offset&quot;: None}` / `{&quot;offset&quot;: &quot;x&quot;}`.
+
+### m4 — a dot-only stream component is accepted and writes a stream `streams()` can never find
+`aggregator/store.py:127` (`_STREAM_RE`), `:334-336`, `:438-467`.
+
+`..` is rejected but a single `.` is not, and `.` survives
+`_escape_component` (it is in `_SAFE_PATH_CHARS`' allow set):
+
+```
+run:.      -&gt; runs/events.jsonl
+session:.  -&gt; sessions/events.jsonl
+run:a..b   -&gt; rejected (good)
+streams() after appending to &quot;run:.&quot; -&gt; []
+```
+
+So `run:.` and `session:.` write *above* their per-id directory, two different
+ids collide with a directory root, and the resulting stream is invisible to
+`streams()` — i.e. invisible to any GD-26 rebuild/replay that enumerates
+streams. Silent, not loud, which is the opposite of this validator's stated job.
+
+**Fix:** reject a stream whose post-`partition(&quot;:&quot;)` remainder escapes to `.`,
+`..` or empty — e.g. require the remainder to match
+`^[A-Za-z0-9][A-Za-z0-9._:+@=,%-]*$` **and** assert
+`_escape_component(rest) not in (&quot;.&quot;, &quot;..&quot;, &quot;&quot;)`; add the ids above to
+`test_stream_ids_and_paths`' rejection list.
+
+### m5 — `encode_close` will send close codes the module's own `parse_close` rejects
+`aggregator/ws.py:190-197` vs `aggregator/ws.py:306-323`.
+
+`encode_close` only bars 1005/1006 and anything outside 1000-4999, so
+1004 (reserved by §7.4.1) and the whole undefined 1012-2999 band are sendable,
+while `parse_close` treats each of them as a 1002-worthy protocol violation:
+
+```
+encode_close(1004) -&gt; OK; our own decoder REJECTS it (reserved/invalid close code 1004)
+encode_close(2999) -&gt; OK; our own decoder REJECTS it (reserved/invalid close code 2999)
+```
+
+Two Touch endpoints speaking to each other would fail the connection on a close
+frame Touch itself generated, and the docstring's &quot;may not be sent on the wire
+(RFC 6455 §7.4.1)&quot; is narrower than §7.4.1 actually is.
+
+**Fix:** validate `encode_close` against the same predicate `parse_close` uses
+(`code in _LEGAL_CLOSE_CODES or 3000 &lt;= code &lt;= 4999`); the existing
+`test_encode_rejects_illegal_requests` table just gains 1004 and 1015.
+
+---
+
+## NITS
+
+* **n1** `aggregator/ws.py:437` — `drain_frames` is documented for a
+  `bytearray` and raises `TypeError: 'bytes' object does not support item
+  deletion` on `bytes`. One `if not isinstance(buf, bytearray): raise
+  TypeError(&quot;drain_frames mutates in place; pass a bytearray&quot;)` makes the
+  contract loud instead of incidental.
+* **n2** `aggregator/ws.py:383-390` — after a CLOSE frame, `FrameDecoder` keeps
+  decoding and returning subsequent data frames (`[8, 1]`, `closed=True`).
+  §5.5.1 says nothing further is processed after a close; ignoring (or
+  erroring on) post-close frames would keep `closed` meaningful for the caller.
+* **n3** `aggregator/store.py:593` — `assert tuple(record) == RECORD_KEYS`
+  guards &quot;serialization order is part of the contract&quot; but disappears under
+  `python -O`. Make it an `if … raise SchemaError`, or move the assertion into
+  `test_record_shape` only (it is already there).
+* **n4** `tests/test_stdlib_only.py:114`, `:152` and
+  `tests/test_ws.py:314` — informational `check(True, …)` lines count as passes
+  and, in the `test_ws` case, turn a skipped prior-art parity arm into a green
+  tick. Prefer a plain `print()` for facts, and reserve `check` for assertions.
+* **n5** `tests/test_ws.py:310` — permanently inserts
+  `.claude/shared/monitoring` into `sys.path` for the rest of the process; harmless
+  today, a shadowing trap once Touch grows a module named like a monitoring one.
+  Insert, import, then remove the entry.
+
+## Non-findings (checked, deliberately not raised)
+
+* `control` stream pinned to `{asserted,touch}` — correct per GD-28 class 4
+  (control intents *and acks* are Touch application state), not over-restriction.
+* Closed `STREAM_KINDS`/`SINGLETON_STREAMS` vocabulary vs the D5 amendment's
+  per-session control file — later sub-plans can register entries on the class
+  dicts without editing `store.py`, so GD-15 is not violated.
+* `_scan_seq`'s O(file) rescan on every append under multi-writer contention —
+  out of contract (single writer per stream) and correctness is preserved.
+* `compaction_in_progress` globbing the whole directory per changed tick — the
+  coarse-grained deferral is documented and gated behind the stat-first short
+  circuit.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

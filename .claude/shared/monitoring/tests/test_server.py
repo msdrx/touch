@@ -138,9 +138,19 @@ def test_task_status_precedence_and_tokens():
         for ln in lines:
             f.write((json.dumps(ln) + "\n").encode())
     out = ms.task_status(path)
-    # a failed plan wins while orchestrator card is open
+    # a failed plan wins while orchestrator card is open and nothing runs
     assert out["status"] == "failed", out
     assert out["tokens"] == {"in": 11, "out": 6, "cached": 3, "cache_write": 4}, out["tokens"]
+    # ...but LIVE ACTIVITY WINS: a plan still running keeps the flow running
+    # even after another plan exhausted its attempts and closed failed
+    path2 = os.path.join(_STATE_DIR, "status-live.jsonl")
+    lines2 = lines + [
+        {"ts": "4", "plan": "sp-c", "stage": "plan", "state": "running", "detail": "loop on"},
+    ]
+    with open(path2, "wb") as f:
+        for ln in lines2:
+            f.write((json.dumps(ln) + "\n").encode())
+    assert ms.task_status(path2)["status"] == "running", ms.task_status(path2)
 
 
 def test_task_status_orchestrator_done_wins():
@@ -154,6 +164,49 @@ def test_task_status_orchestrator_done_wins():
             f.write((json.dumps(ln) + "\n").encode())
     out = ms.task_status(path)
     assert out["status"] == "done", out  # orchestrator card is authoritative
+
+
+def test_task_status_continuation_reopens_stale_close():
+    """FRONTEND-6 (server half): one folder hosts several phases, so activity
+    appended past an earlier phase's `orchestrator complete done` must flip the
+    tile back to running — a sub-plan `plan running/queued` event (seed lines
+    included) or a running-state orchestrator spawn chip both count; terminal
+    sub-plan closes and token ticks do not."""
+    path = os.path.join(_STATE_DIR, "status3.jsonl")
+    lines = [
+        {"ts": "1", "plan": "sp-a", "stage": "plan", "state": "done", "detail": "ok"},
+        {"ts": "2", "plan": "orchestrator", "stage": "complete", "state": "done", "detail": "fin"},
+        {"ts": "3", "plan": "sp-b", "stage": "plan", "state": "running", "detail": "phase 2"},
+    ]
+    with open(path, "wb") as f:
+        for ln in lines:
+            f.write((json.dumps(ln) + "\n").encode())
+    out = ms.task_status(path)
+    assert out["status"] == "running", out
+    # a watcher spawn chip on the orchestrator card reopens it too
+    path2 = os.path.join(_STATE_DIR, "status4.jsonl")
+    lines2 = [
+        {"ts": "1", "plan": "orchestrator", "stage": "complete", "state": "done", "detail": "fin"},
+        {"ts": "2", "plan": "orchestrator", "stage": "sp-b", "state": "running",
+         "detail": "spawn sp-b impl attempt 1"},
+    ]
+    with open(path2, "wb") as f:
+        for ln in lines2:
+            f.write((json.dumps(ln) + "\n").encode())
+    assert ms.task_status(path2)["status"] == "running", ms.task_status(path2)
+    # trailing terminal closes / token ticks after the run close do NOT reopen
+    path3 = os.path.join(_STATE_DIR, "status5.jsonl")
+    lines3 = [
+        {"ts": "1", "plan": "sp-a", "stage": "plan", "state": "running", "detail": "go"},
+        {"ts": "2", "plan": "orchestrator", "stage": "complete", "state": "done", "detail": "fin"},
+        {"ts": "3", "plan": "sp-a", "stage": "plan", "state": "done", "detail": "late settle"},
+        {"ts": "4", "plan": "orchestrator", "stage": "tokens", "state": "running",
+         "detail": "late tick", "tokens": {"in": 1, "out": 1}},
+    ]
+    with open(path3, "wb") as f:
+        for ln in lines3:
+            f.write((json.dumps(ln) + "\n").encode())
+    assert ms.task_status(path3)["status"] == "done", ms.task_status(path3)
 
 
 def test_ws_frame_lengths():
@@ -258,6 +311,153 @@ def test_safe_artifact_path_containment():
         pass  # symlinks unavailable: containment still covered above
     else:
         assert ms.safe_artifact_path(d, "findings/leak.md") is None
+
+
+def test_health_parse_failure_counter():
+    """/health surfaces per-stream parse failures (R-10).
+
+    A poisoned or torn line is skipped by the replay; without a counter the only
+    symptom is a dashboard that silently disagrees with the file.
+    """
+    path = os.path.join(_STATE_DIR, "poisoned.jsonl")
+    good = json.dumps({"ts": "1", "plan": "sp-a", "stage": "plan", "state": "done"})
+    with open(path, "wb") as f:
+        f.write((good + "\n").encode())
+        f.write(b"{not json at all\n")
+        f.write(b'"a bare string is not an event"\n')
+        f.write((good + "\n").encode())
+    base = ms.health_payload()["parse_failures_total"]
+    out = ms.task_status(path)
+    health = ms.health_payload()
+    assert health["status"] == "ok", health
+    assert health["parse_failures"].get(path) == 2, health
+    assert health["parse_failures_total"] == base + 2, (base, health)
+    # The good lines still render — a poisoned line degrades, never blocks.
+    assert out["status"] == "done", out
+
+    # A clean stream clears its entry instead of leaving a stale count behind.
+    clean = os.path.join(_STATE_DIR, "clean.jsonl")
+    with open(clean, "wb") as f:
+        f.write((good + "\n").encode())
+    ms.task_status(clean)
+    assert clean not in ms.health_payload()["parse_failures"], ms.PARSE_FAILURES
+
+    # m-2: so does a stream that DISAPPEARS (deleted or rotated after a poisoned
+    # scan). The early return on stat failure used to skip the pop, so a gone
+    # stream kept inflating parse_failures_total for the life of the server —
+    # a permanently red probe with nothing left to fix.
+    assert ms.PARSE_FAILURES.get(path) == 2, ms.PARSE_FAILURES
+    os.remove(path)
+    gone = ms.task_status(path)
+    assert gone["status"] == "empty", gone
+    assert path not in ms.health_payload()["parse_failures"], ms.PARSE_FAILURES
+    assert ms.health_payload()["parse_failures_total"] == base, ms.PARSE_FAILURES
+    ms.PARSE_FAILURES.pop(path, None)
+
+
+def test_plan_states_last_event_wins():
+    """SD-4/R-58: conflicting terminals resolve last-event-wins in FILE ORDER.
+
+    A later corrective `plan done` beats an earlier fabricated `plan failed` for
+    the same (plan, stage='plan') — and the earlier ts on the corrective line
+    must not resurrect the failure, because order is file order, never ts sort.
+    """
+    path = os.path.join(_STATE_DIR, "conflict.jsonl")
+    lines = [
+        {"ts": "2026-07-25T18:44:09.000Z", "plan": "research", "stage": "plan",
+         "state": "failed", "detail": "loop exited -> synthesis"},
+        {"ts": "2026-07-25T18:00:00.000Z", "plan": "research", "stage": "plan",
+         "state": "done", "detail": "all 5 researchers returned findings"},
+    ]
+    with open(path, "wb") as f:
+        for ln in lines:
+            f.write((json.dumps(ln) + "\n").encode())
+    plan_states, last, tokens, failures = ms.replay_plan_states(path)
+    assert plan_states["research"] == "done", plan_states
+    assert failures == 0, failures
+    assert ms.task_status(path)["status"] == "done", ms.task_status(path)
+    # Same-state duplicates (RUNSTATE-7's dedup case) are a no-op, not a flip.
+    dup = os.path.join(_STATE_DIR, "dup.jsonl")
+    with open(dup, "wb") as f:
+        for state in ("failed", "failed"):
+            f.write((json.dumps({"ts": "1", "plan": "sp-a", "stage": "plan",
+                                 "state": state}) + "\n").encode())
+    assert ms.replay_plan_states(dup)[0]["sp-a"] == "failed"
+
+
+# --- R-58 against the FROZEN REAL streams (skipped if the fixtures are absent:
+#     the monitoring module must stay usable outside this repo).
+_FIXTURES = os.path.abspath(os.path.join(HERE, "..", "..", "..", "..",
+                                         "tests", "fixtures", "legacy"))
+
+
+def _fixture(name):
+    path = os.path.join(_FIXTURES, name)
+    return path if os.path.isfile(path) else None
+
+
+def test_r58_real_streams_render_corrected():
+    """The two corrected streams render `research` DONE, not the fabricated FAILED.
+
+    These are verbatim bytes of this session's own runs: each holds the
+    fabricated `plan failed "loop exited -> synthesis"` line AND the driver's
+    later corrective `plan done`. Nothing rewrites them — the read rule does the
+    work (SD-4).
+    """
+    for name in ("touch-full-recon-events.jsonl", "touch-mongo-live-events.jsonl"):
+        path = _fixture(name)
+        if not path:
+            print(f"  skip {name}: fixture absent")
+            continue
+        plan_states, last, tokens, failures = ms.replay_plan_states(path)
+        assert plan_states.get("research") == "done", (name, plan_states)
+        assert plan_states.get("synthesis") == "done", (name, plan_states)
+        assert failures == 0, (name, failures)
+
+
+def test_r58_uncorrected_failures_match_the_relabel_predicate():
+    """Un-corrected fabricated failures stay `failed` here — and are exactly the
+    lines the legacy re-labeler re-reads as "closed — no verdict".
+
+    The forward fix stops NEW fabrications; the historic ones are re-labelled at
+    read time by the legacy arm (GD-14/R-51, a different module). This test pins
+    the handshake: every surviving `plan failed` in the affected streams carries
+    the `loop exited ->` detail that the re-label predicate keys on.
+    """
+    for name in ("touch-aggregator-events.jsonl", "touch-mongo-live-events.jsonl"):
+        path = _fixture(name)
+        if not path:
+            print(f"  skip {name}: fixture absent")
+            continue
+        fabricated = []
+        with open(path, "rb") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                ev = json.loads(raw)
+                if ev.get("stage") == "plan" and ev.get("state") == "failed":
+                    fabricated.append(ev)
+        assert fabricated, f"{name}: expected the historic fabricated failures"
+        for ev in fabricated:
+            assert (ev.get("detail") or "").startswith("loop exited ->"), (name, ev)
+
+
+def test_r58_genuine_failure_is_not_a_fabrication():
+    """The user-killed run's `plan failed` lines must NOT match the re-label
+    predicate — a real failure has to survive the fix (negative control)."""
+    path = _fixture("touch-repo-recon-events.jsonl")
+    if not path:
+        print("  skip touch-repo-recon-events.jsonl: fixture absent")
+        return
+    plan_states, _, _, failures = ms.replay_plan_states(path)
+    assert plan_states.get("research") == "failed", plan_states
+    with open(path, "rb") as f:
+        details = [json.loads(r)["detail"] for r in f
+                   if r.strip() and json.loads(r).get("stage") == "plan"
+                   and json.loads(r).get("state") == "failed"]
+    assert details, "expected the genuine failures"
+    assert not any(d.startswith("loop exited ->") for d in details), details
 
 
 def test_no_root_events_shortcircuit():

@@ -52,8 +52,20 @@ at spawn instant, joined to the `agentId` by the aggregator.
   ledger `<task-dir>/state/spawn-ledger.jsonl`:
 
   ```json
-  {"name":"…","parent":"…","role":"…","attempt":1,"taskId":"…","ts":"…"}
+  {"name":"…","parent":"…","root":"…","role":"…","attempt":1,"taskId":"…","sessionKey":"<pid>-<procStart>","ts":"…"}
   ```
+
+  `root` is `ROOT_NAME`. `sessionKey` is this session's own identity:
+  the pid of the session process and field 22 of `/proc/<pid>/stat` (its
+  start clock ticks, as a **string**), joined with `-`. The orchestrating
+  session knows both, so this needs no new capability. Both fields are
+  mandatory: the ledger line is the only durable record of a spawn, and
+  without them two sessions that pick the same `ROOT_NAME` from
+  near-identical task names address the *same* slot — one session's custom
+  state then binds onto the other session's agents. Ledger lines written
+  before this amendment carry neither; Touch derives `sessionKey` from the
+  containing path and records `sessionKeySource:"path"` rather than
+  presenting a derived value as something the writer stated.
 
 - **Fresh agent every attempt** — never resume / continue / SendMessage a
   prior agent. Handoff between attempts is file paths, never inlined text.

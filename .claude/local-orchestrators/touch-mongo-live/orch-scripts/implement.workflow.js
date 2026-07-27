@@ -111,6 +111,29 @@ task folders, running daemons) — leave it alone; touch only files owned by
 THIS sub-plan.
 `
 
+// Network-failure guard (mobile uplink): agent() returns null when a subagent
+// dies on a terminal API error, i.e. an outage that outlasted the harness's own
+// retries. Retry the SAME work up to NET_RETRIES times — the retry tag makes the
+// prompt distinct, so a resumed run re-executes it live instead of replaying a
+// cached null (the [monitor] attempt marker is unchanged: same attempt, extra
+// agent). If every try dies, THROW: stopping cleanly beats burning gated-loop
+// attempts on infrastructure. Resume later per plan/RESUME.md — the journal
+// cache replays all completed agents, so no finished work is lost.
+const NET_RETRIES = 3
+const agentR = async (prompt, opts) => {
+  let r = await agent(prompt, opts)
+  for (let n = 1; r === null && n <= NET_RETRIES; n++) {
+    log(`${opts.label}: agent returned null (network drop?) — retry ${n}/${NET_RETRIES}`)
+    r = await agent(
+      prompt + `\n(infrastructure retry ${n}: the previous try of this exact task died without returning — network outage, not a task failure. Do the task from scratch.)`,
+      { ...opts, label: `${opts.label}~r${n}` })
+  }
+  if (r === null) throw new Error(
+    `${opts.label}: agent died ${NET_RETRIES + 1}x in a row — likely network down. ` +
+    `Resume when connectivity returns: Workflow({scriptPath, resumeFromRunId}) per RESUME.md / orch-config.json.`)
+  return r
+}
+
 // When a gate/critique agent dies mid-run it writes no findings file; the loop
 // writes a placeholder so the next implementer still gets a (minimal) handoff.
 const writePlaceholderFindings = async (file, note) => {
@@ -214,14 +237,14 @@ const runLoop = async (sp) => {
     attempt++
     log(`${sp.id} attempt ${attempt}/${MAX_ATTEMPTS}${openFindings.length ? ` (open findings: ${openFindings.length})` : ''}`)
 
-    impl = await agent(implPrompt(sp, attempt, openFindings), {
+    impl = await agentR(implPrompt(sp, attempt, openFindings), {
       model: 'opus', effort: attempt >= 3 ? 'xhigh' : 'high',
       label: `${sp.id}:impl:${attempt}`, phase: 'Implement', schema: IMPL_SCHEMA,
     })
     if (!impl || !impl.done) { continue }
 
     const gateFile = gateFindingsFile(sp, attempt)
-    gate = await agent(gatePrompt(sp, attempt, impl, gateFile), {
+    gate = await agentR(gatePrompt(sp, attempt, impl, gateFile), {
       model: 'opus', effort: 'medium',
       label: `${sp.id}:gate:${attempt}`, phase: 'Test', schema: GATE_SCHEMA,
     })
@@ -231,7 +254,7 @@ const runLoop = async (sp) => {
     }
 
     const critFile = critFindingsFile(sp, attempt)
-    crit = await agent(critPrompt(sp, attempt, impl, gate, critFile), {
+    crit = await agentR(critPrompt(sp, attempt, impl, gate, critFile), {
       model: 'opus', effort: 'high',
       label: `${sp.id}:critique:${attempt}`, phase: 'Critique', schema: CRIT_SCHEMA,
     })
@@ -326,7 +349,7 @@ execution order), subplans_file, summary.
 `
 
 phase('Divide')
-const divide = await agent(dividePrompt(), {
+const divide = await agentR(dividePrompt(), {
   model: 'fable', effort: 'high',
   label: 'divide', phase: 'Divide', schema: DIVIDE_SCHEMA,
 })
@@ -401,7 +424,7 @@ if (!failed.length) {
   phase('FinalGate')
   for (let fga = 1; fga <= 2; fga++) {
     const file = finalGateFindings(fga)
-    finalGate = await agent(finalGatePrompt(fga, file), {
+    finalGate = await agentR(finalGatePrompt(fga, file), {
       model: 'fable', effort: 'medium',
       label: `finalgate:${fga}`, phase: 'FinalGate', schema: GATE_SCHEMA,
     })
@@ -411,7 +434,7 @@ if (!failed.length) {
     }
     if (finalGate.passed) break
     if (fga < 2) {
-      const fixer = await agent(finalFixPrompt(fga, finalGate.findings_file), {
+      const fixer = await agentR(finalFixPrompt(fga, finalGate.findings_file), {
         model: 'opus', effort: 'xhigh',
         label: `finalgate:fix:${fga}`, phase: 'FinalGate', schema: IMPL_SCHEMA,
       })

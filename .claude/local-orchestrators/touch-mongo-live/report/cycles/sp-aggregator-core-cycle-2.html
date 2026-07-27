@@ -1,0 +1,534 @@
+<title>sp-aggregator-core — cycle 2</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-aggregator-core — implement→test→critique, attempt 2/4</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 2 fixed every item in sp-aggregator-core-critique-attempt-1 (blocker, major, 5 minor, 5 nits). No file outside the sub-plan's ownership touched; no commit (HEAD still 579446e); no .touch/ created.
+
+BLOCKER B1 (store.py, silent WAL data loss) — `next_seq()` cached `_last_size` while discarding `_scan_seq`'s `ends_with_newline`, so `cursor()`→`append()` skipped the in-lock rescan and glued the new record onto a killed writer's partial line. Fixed by caching the whole observation: new `Store._needs_nl` dict set in `next_seq()` (`not ends_with_newline`) and consumed by `append_many` (`ends_with_newline = not self._needs_nl.get(stream, False)`), cleared after every write. New `test_torn_tail_repair_after_a_cursor_read` reproduces the exact sequence and asserts `torn_repairs == 1`, both records readable, torn line terminated-and-kept — and repeats it for both DURABLE_STREAMS (`custom-state`, `control`).
+
+MAJOR M1 (tailer.py, a line &gt; read_cap made the stream vanish and burned read_cap bytes per tick) — new `REASON_OVERSIZE_LINE` + `TailResult.oversize_line` name the &quot;cannot make progress&quot; case (condition: `consumed == 0 and capped &lt; want`, distinct from an ordinary deferred torn tail); new `escalate_oversize_line=` promotes that one read to the whole remaining tail. `read_complete_lines` defaults to escalation (its &quot;every line&quot; docstring now holds), as do `Store._read_lines` and `Store.follow` (both report records, not reasons). `Tailer` gained an `oversize_lines` counter, a `stalled` property, and stall memory keyed on `(size, mtime_ns)` so an unchanged stalled file is not re-read every tick. New `test_line_longer_than_the_read_cap` covers reason/flag/offset, the 6-line whole read, the counter, the no-re-read, and cap-raise recovery.
+
+MINOR: m1 — `tests/test_stdlib_only.py` now computes eager imports structurally (`_eager_nodes` walk stopping at function/lambda bodies, descending into if/try/with/class) instead of `top - lazy`, so an eager+lazy pymongo pair is caught; self-test added on the two-import, try/except-guarded, class-body and lazy-only fixtures. m2 — `next_seq()` re-stats and rescans on size mismatch, so a non-writing reader's `cursor()` follows the file (new test). m3 — `Checkpoint.from_dict` is tolerant per key (`{&quot;offset&quot;: null}`/`&quot;x&quot;`/`[1]` drop that field, rest survives). m4 — `validate_stream` rejects any empty/`.`/`..` `:`-component and `stream_path` re-checks the escaped on-disk name, so `run:.` / `session:.` can no longer write above their per-id dir invisibly to `streams()`. m5 — new shared `is_legal_close_code()` used by both `encode_close` and `parse_close`, so 1004/1012-2999/1015 are no longer sendable; test asserts the two functions agree over 995-5000.
+
+NITS: n1 `drain_frames` raises TypeError on non-bytearray; n2 `FrameDecoder` processes nothing after a CLOSE (§5.5.1), counting dropped bytes in `post_close_bytes`; n3 record-key-order `assert` became a `SchemaError` raise; n4 informational `check(True, …)` lines replaced by `print()` (2 in test_stdlib_only, 1 in test_ws); n5 the monitoring dir is removed from `sys.path` after the parity import.
+
+Verification: `tests/test_tailer.py` rc=0 (78 ok), `test_store.py` rc=0 (127), `test_ws.py` rc=0 (128), `test_stdlib_only.py` rc=0 (16); `bash tests/run_all.sh --keep-going` → 10 passed, 0 failed; all changed files py_compile clean.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. All 4 owned suites green (test_tailer 90 checks, test_store 125, test_ws 98, test_stdlib_only 24; rc=0 each) and tests/run_all.sh reports 10 passed / 0 failed. Full-suite regression gate green: 4 monitoring tests + test_bootstrap + test_fixtures + the 4 owned files, SUITE_RC=0, with pymongo NOT installed and no mongod (the GD-21/R-56 bare-checkout arm). Every attempt-1 critique finding is closed with a named regression test: B1 (torn-tail repair after cursor() — _needs_nl flag cache + test_torn_tail_repair_after_a_cursor_read), M1 (REASON_OVERSIZE_LINE + oversize_lines counter + _stalled_at backoff + escalate default for read_complete_lines), m1 (structural eager-import walk), m2 (next_seq re-stats), m3 (per-key int() tolerance), m4 (run:. / session:. / run: now StreamError — reproduced live), m5 (encode_close and parse_close share one predicate — reproduced live), n1-n5. Ownership clean: only aggregator/ and tests/ added; all modified .claude/** paths are sp-01/sp-03's with strictly older mtimes; no commit added (HEAD still 579446e, count 3); no .touch/, no stray monitoring events.jsonl.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 0 blockers, 2 majors, 6 minors, 5 nits. All twelve attempt-1 findings independently re-verified as genuinely closed (B1 torn-tail repair after cursor(), M1 oversize-line reason + _stalled_at backoff, m1 structural eager-import walk, m2 next_seq re-stat, m3 per-key int tolerance, m4 dot-component StreamError, m5 shared close-code predicate, n1-n5), suite green (run_all.sh 10 passed/0 failed, rc=0, pymongo absent), ownership clean (only aggregator/ + tests/ added, HEAD still 579446e, no .touch/). Two NEW majors: (M1) aggregator/store.py:653-668 _encode stubs `data` but never re-measures the encoded line, so MAX_RECORD_BYTES is not a bound — a large `ref` writes a 10,485,935-byte line (reproduced), falsifying follow()'s documented guarantee and permanently stalling a default-cap Tailer on that .touch/ stream (verified reason=oversize_line, lines=0, stalled=True forever) — a live-view outage GD-22/GD-30 exist to prevent. (M2) aggregator/tailer.py:395-414 read_complete_lines omits skip_while_compacting=False, so any .compact.tmp.* in the directory makes a 4-line file read as 0 lines with no signal (reproduced) — the exact silent-short-answer class the attempt-1 M1 fix outlawed for this same helper, and .compact.tmp.* only exists where boot-time transcript scans run. Minors: TailLine.__len__ makes blank lines falsy (re-introduces the line-number shift the module exists to prevent); cursor_key re-implements the GD-24 _id grammar outside refs.ref_key unescaped (SD-11 divergence risk with sp-05); DURABLE_STREAMS fsync the file but never the parent directory; torn_repairs/oversize counters inflate on a batch that raises (reproduced); no escalation on the live Tailer path at the 8 MiB cap R-44 legislates for; normalize_ts raises a bare ValueError.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 3/4</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 2 fixed every item in sp-aggregator-core-critique-attempt-1 (blocker, major, 5 minor, 5 nits). No file outside the sub-plan's ownership touched; no commit (HEAD still 579446e); no .touch/ created.
+
+BLOCKER B1 (store.py, silent WAL data loss) — `next_seq()` cached `_last_size` while discarding `_scan_seq`'s `ends_with_newline`, so `cursor()`→`append()` skipped the in-lock rescan and glued the new record onto a killed writer's partial line. Fixed by caching the whole observation: new `Store._needs_nl` dict set in `next_seq()` (`not ends_with_newline`) and consumed by `append_many` (`ends_with_newline = not self._needs_nl.get(stream, False)`), cleared after every write. New `test_torn_tail_repair_after_a_cursor_read` reproduces the exact sequence and asserts `torn_repairs == 1`, both records readable, torn line terminated-and-kept — and repeats it for both DURABLE_STREAMS (`custom-state`, `control`).
+
+MAJOR M1 (tailer.py, a line &gt; read_cap made the stream vanish and burned read_cap bytes per tick) — new `REASON_OVERSIZE_LINE` + `TailResult.oversize_line` name the &quot;cannot make progress&quot; case (condition: `consumed == 0 and capped &lt; want`, distinct from an ordinary deferred torn tail); new `escalate_oversize_line=` promotes that one read to the whole remaining tail. `read_complete_lines` defaults to escalation (its &quot;every line&quot; docstring now holds), as do `Store._read_lines` and `Store.follow` (both report records, not reasons). `Tailer` gained an `oversize_lines` counter, a `stalled` property, and stall memory keyed on `(size, mtime_ns)` so an unchanged stalled file is not re-read every tick. New `test_line_longer_than_the_read_cap` covers reason/flag/offset, the 6-line whole read, the counter, the no-re-read, and cap-raise recovery.
+
+MINOR: m1 — `tests/test_stdlib_only.py` now computes eager imports structurally (`_eager_nodes` walk stopping at function/lambda bodies, descending into if/try/with/class) instead of `top - lazy`, so an eager+lazy pymongo pair is caught; self-test added on the two-import, try/except-guarded, class-body and lazy-only fixtures. m2 — `next_seq()` re-stats and rescans on size mismatch, so a non-writing reader's `cursor()` follows the file (new test). m3 — `Checkpoint.from_dict` is tolerant per key (`{&quot;offset&quot;: null}`/`&quot;x&quot;`/`[1]` drop that field, rest survives). m4 — `validate_stream` rejects any empty/`.`/`..` `:`-component and `stream_path` re-checks the escaped on-disk name, so `run:.` / `session:.` can no longer write above their per-id dir invisibly to `streams()`. m5 — new shared `is_legal_close_code()` used by both `encode_close` and `parse_close`, so 1004/1012-2999/1015 are no longer sendable; test asserts the two functions agree over 995-5000.
+
+NITS: n1 `drain_frames` raises TypeError on non-bytearray; n2 `FrameDecoder` processes nothing after a CLOSE (§5.5.1), counting dropped bytes in `post_close_bytes`; n3 record-key-order `assert` became a `SchemaError` raise; n4 informational `check(True, …)` lines replaced by `print()` (2 in test_stdlib_only, 1 in test_ws); n5 the monitoring dir is removed from `sys.path` after the parity import.
+
+Verification: `tests/test_tailer.py` rc=0 (78 ok), `test_store.py` rc=0 (127), `test_ws.py` rc=0 (128), `test_stdlib_only.py` rc=0 (16); `bash tests/run_all.sh --keep-going` → 10 passed, 0 failed; all changed files py_compile clean.</li><li>Test gate PASSED: PASS. All 4 owned suites green (test_tailer 90 checks, test_store 125, test_ws 98, test_stdlib_only 24; rc=0 each) and tests/run_all.sh reports 10 passed / 0 failed. Full-suite regression gate green: 4 monitoring tests + test_bootstrap + test_fixtures + the 4 owned files, SUITE_RC=0, with pymongo NOT installed and no mongod (the GD-21/R-56 bare-checkout arm). Every attempt-1 critique finding is closed with a named regression test: B1 (torn-tail repair after cursor() — _needs_nl flag cache + test_torn_tail_repair_after_a_cursor_read), M1 (REASON_OVERSIZE_LINE + oversize_lines counter + _stalled_at backoff + escalate default for read_complete_lines), m1 (structural eager-import walk), m2 (next_seq re-stats), m3 (per-key int() tolerance), m4 (run:. / session:. / run: now StreamError — reproduced live), m5 (encode_close and parse_close share one predicate — reproduced live), n1-n5. Ownership clean: only aggregator/ and tests/ added; all modified .claude/** paths are sp-01/sp-03's with strictly older mtimes; no commit added (HEAD still 579446e, count 3); no .touch/, no stray monitoring events.jsonl.</li><li>Critique REJECTED: REJECTED — 0 blockers, 2 majors, 6 minors, 5 nits. All twelve attempt-1 findings independently re-verified as genuinely closed (B1 torn-tail repair after cursor(), M1 oversize-line reason + _stalled_at backoff, m1 structural eager-import walk, m2 next_seq re-stat, m3 per-key int tolerance, m4 dot-component StreamError, m5 shared close-code predicate, n1-n5), suite green (run_all.sh 10 passed/0 failed, rc=0, pymongo absent), ownership clean (only aggregator/ + tests/ added, HEAD still 579446e, no .touch/). Two NEW majors: (M1) aggregator/store.py:653-668 _encode stubs `data` but never re-measures the encoded line, so MAX_RECORD_BYTES is not a bound — a large `ref` writes a 10,485,935-byte line (reproduced), falsifying follow()'s documented guarantee and permanently stalling a default-cap Tailer on that .touch/ stream (verified reason=oversize_line, lines=0, stalled=True forever) — a live-view outage GD-22/GD-30 exist to prevent. (M2) aggregator/tailer.py:395-414 read_complete_lines omits skip_while_compacting=False, so any .compact.tmp.* in the directory makes a 4-line file read as 0 lines with no signal (reproduced) — the exact silent-short-answer class the attempt-1 M1 fix outlawed for this same helper, and .compact.tmp.* only exists where boot-time transcript scans run. Minors: TailLine.__len__ makes blank lines falsy (re-introduces the line-number shift the module exists to prevent); cursor_key re-implements the GD-24 _id grammar outside refs.ref_key unescaped (SD-11 divergence risk with sp-05); DURABLE_STREAMS fsync the file but never the parent directory; torn_repairs/oversize counters inflate on a batch that raises (reproduced); no escalation on the live Tailer path at the 8 MiB cap R-44 legislates for; normalize_ts raises a bare ValueError.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-aggregator-core-test-attempt-2.md</summary><pre># sp-aggregator-core — test gate, attempt 2
+
+**Verdict: PASS.** All owned suites green, full-suite regression green, no
+ownership drift, no new commits, and every attempt-1 critique finding (B1, M1,
+m1–m5, n1–n5) is now closed in code with a named regression test.
+
+Environment: Python 3.13, **pymongo NOT installed** (`ModuleNotFoundError`), no
+services running, no mongod — i.e. the bare-checkout / no-mongod condition the
+GD-21 / R-56 arm demands. Suite is green under exactly that condition.
+
+## 1. Targeted suites (owned by sp-04) — 100 % green
+
+Run from the repo root, each file standalone, rc=0 each:
+
+| file | result | ok-assertions |
+|---|---|---|
+| `tests/test_tailer.py` | PASS rc=0 | 90 `check(...)` sites, 16 test fns |
+| `tests/test_store.py` | PASS rc=0 | 125 `check(...)` sites, 23 test fns |
+| `tests/test_ws.py` | PASS rc=0 | 98 `check(...)` sites, 14 test fns |
+| `tests/test_stdlib_only.py` | PASS rc=0 | 24 `check(...)` sites, 5 test fns |
+| `tests/run_all.sh` | PASS rc=0 | `10 passed, 0 failed, 10 file(s), 26s` |
+
+Monitoring-module suites re-run from their own dir: `test_server.py`,
+`test_watcher.py`, `test_shell.py`, `test_frontend.py` — all PASS.
+
+## 2. Full-suite regression gate — green
+
+```
+PASS .claude/shared/monitoring/tests/test_frontend.py
+PASS .claude/shared/monitoring/tests/test_server.py
+PASS .claude/shared/monitoring/tests/test_shell.py
+PASS .claude/shared/monitoring/tests/test_watcher.py
+PASS tests/test_bootstrap.py      (sp-01)
+PASS tests/test_fixtures.py       (sp-02)
+PASS tests/test_stdlib_only.py
+PASS tests/test_store.py
+PASS tests/test_tailer.py
+PASS tests/test_ws.py
+SUITE_RC=0
+```
+
+No baseline failure and no new failure. Nothing skipped for the wrong reason:
+`test_pymongo_absence_is_the_tested_condition` reports &quot;pymongo is NOT installed
+here&quot; and the Mongo-dependent arms skip cleanly, which is precisely the GD-21 /
+R-56 no-mongod arm.
+
+## 3. Attempt-1 critique findings — verified closed (independently reproduced)
+
+* **B1 (blocker) — `next_seq()`/`cursor()` poisoned the torn-tail repair.**
+  `store.py` now caches the flag rather than only the size:
+  `self._needs_nl[stream] = not ends_with_newline` (:577) and
+  `append_many` starts from `ends_with_newline = not self._needs_nl.get(stream, False)`
+  (:703) with the in-lock rescan on size mismatch (:704), `torn_repairs`
+  incremented at :719. Regression test present and green:
+  `test_torn_tail_repair_after_a_cursor_read`.
+* **M1 (major) — oversize line silently stalled the tailer.**
+  `tailer.py` names the outcome: `REASON_OVERSIZE_LINE` (:92), `oversize_line`
+  field on the result (:188), `escalate_oversize_line` option (:272) defaulted
+  **on** for `read_complete_lines` (:406) so that helper keeps its
+  &quot;comes back whole&quot; promise, plus a `/health`-shaped `oversize_lines` counter
+  (:437) and a `_stalled_at` `(size, mtime_ns)` guard (:438-452) that stops the
+  ~32 MB/s re-read burn. Regression test: `test_line_longer_than_the_read_cap`.
+* **m1 — stdlib guard blind to eager-beside-lazy import.** Structural walk now;
+  `test_the_guard_detects_an_eager_import_beside_a_lazy_one` covers eager,
+  try/except-guarded, class-body, `if`-guarded and purely-lazy shapes.
+* **m2 — frozen cursor on a non-writing Store.** `next_seq` re-stats:
+  `if cached is not None and self._last_size.get(stream) == size_now` (:563).
+  Test: `test_cursor_of_a_non_writing_reader_tracks_the_file`.
+* **m3 — `Checkpoint.from_dict` crash on a null field.** Per-key
+  `try: int(...) except (TypeError, ValueError): continue`. `test_checkpoint_roundtrip`
+  now asserts `{&quot;offset&quot;: None}`, `{&quot;offset&quot;: &quot;x&quot;}`, `{&quot;offset&quot;: [1]}` each drop
+  one field while the rest survives, and `5.9 -&gt; 5`.
+* **m4 — dot-only stream component.** Reproduced live: `run:.`, `session:.`,
+  `run:`, `run:..`, `run:a..b` all raise `StreamError`; `run:wf_1` accepted and
+  discoverable via `streams()`.
+* **m5 — `encode_close` vs `parse_close` disagreement.** Reproduced live:
+  1004 / 1005 / 1006 / 1012 / 1015 / 2999 / 5000 now rejected; 1000 / 3000 /
+  4999 accepted — same predicate both directions.
+* **n1** `drain_frames(b&quot;...&quot;)` → `TypeError: drain_frames consumes buf in
+  place; pass a bytearray, not bytes`. **n2** post-CLOSE bytes no longer decode
+  as frames (`if self.closed: ...` at :394/:412). **n3** no `assert` statements
+  remain in `store.py`. **n4** the surviving `check(True, ...)` sites are
+  except-branch confirmations of a raise, not informational filler; the two
+  flagged informational ones in `test_stdlib_only.py` are gone. **n5**
+  `test_ws.py` removes the monitoring dir from `sys.path` after import
+  (:366-377).
+
+## 4. Plan conformance and ownership
+
+Owned files all present and non-trivial: `aggregator/__init__.py`,
+`aggregator/tailer.py`, `aggregator/store.py`, `aggregator/ws.py`,
+`tests/run_all.sh`, `tests/test_tailer.py`, `tests/test_store.py`,
+`tests/test_ws.py`, `tests/test_stdlib_only.py` (the SD-2 guard as its own file).
+
+Item spot-checks (behavioural, not tautological):
+
+* **R-22:aggregator** — `run_all.sh` loops both suites, cwd per file,
+  `PYTHONDONTWRITEBYTECODE=1`, `nullglob` so an empty suite is green; no pytest,
+  no runner library. No `touch-visual/` created (correctly sp-13's).
+* **R-23 / GD-20** — torn tail cut at last `\n`, multibyte split across ticks,
+  in-place truncation, rotation, same-size rewrite policy, compaction backoff,
+  checkpoint keyed to the source; `test_byte_budget_is_incremental` and
+  `test_read_cap_bounds_one_read` assert O(delta) rather than restating it; real
+  frozen fixtures compared byte-for-byte with a plain read and offsets asserted
+  to tile the file exactly (journal 14 lines, `touch-mongo-live/events.jsonl`
+  320 lines, oversize-line fixture).
+* **R-24** — `store.py` carries no scalar stream/seq field (Mongo does not
+  replace store.py), no reducer/liveness surface
+  (`test_no_reducer_lives_here` prints an empty export list), one `…Z` ts
+  format, four-key token records, `(stream,seq)` cursors, ref-union validator
+  with retention, oversize record stubbed never dropped, 4-process concurrent
+  append with `seqs == range(1, 401)`, batch order = file order.
+* **R-29** — `test_drain_frames_parity_with_monitor_server` imports the real
+  `monitor_server` function and compares behaviour (not a string diff); RFC
+  §5.7 vectors both directions, `Sec-WebSocket-Accept` RFC vector, fragment
+  reassembly, byte-by-byte streaming, close-code → 1002 mapping, size caps
+  pinned to the RFC's 125 control-frame limit.
+* **SD-10** — checkpoint identity is exactly `(st_dev, st_ino, size, offset)`
+  in that order, `size &lt; offset` its own explicit branch, `gen` monotonic across
+  resets, sweep left to `mirror.py` (absent here, correct).
+* **SD-2 / GD-21** — guard names exactly two permitted pymongo importers
+  (`mongo_store.py`, `mirror.py`, both &quot;not written yet&quot;), and no third by
+  analogy; every `aggregator.*` module imports with nothing third-party loaded.
+* **SD-11** — `&lt;stream&gt;#&lt;seq:012d&gt;` zero-padded grammar; no `$inc`, `$set`,
+  TTL, delete or `_id` construction anywhere in the three modules.
+
+Ownership / tree hygiene:
+
+* `git status` shows only `?? aggregator/`, `?? tests/` as this sub-plan's
+  additions. The modified `.claude/**` paths (`decision_watcher.py`,
+  `monitor_server.py`, `monitoring.md`, `status.sh`, the three monitoring test
+  files, both workflow templates, `m-orchestrator/SKILL.md`, `.gitignore`) are
+  sp-01/sp-03's, with mtimes 20:33–23:05 — all strictly older than this
+  attempt's 00:17–00:27 edits to the four owned modules and four owned test
+  files. No file outside the ownership list was touched this attempt.
+* **No commit added** — `git rev-list --count HEAD` = 3, HEAD still
+  `579446e` (&quot;orchestration history&quot;, sp-01's C2). SD-6 respected.
+* No `.touch/` directory created; no stray
+  `.claude/shared/monitoring/events.jsonl`. `__pycache__/` is gitignored
+  (`.gitignore:38`), so the compiled dirs under `aggregator/` and `tests/` are
+  not tree pollution.
+
+## 5. Failures
+
+None. Zero failing assertions across the 10 suite files; nothing attributable
+to the change, so no fix suggestions are owed.
+</pre></details>
+<details><summary>Critique findings — sp-aggregator-core-critique-attempt-2.md</summary><pre># sp-aggregator-core — adversarial critique, attempt 2
+
+**Verdict: REJECTED** — 0 blockers, 2 majors, 6 minors, 5 nits.
+
+Reviewed (full content; all files are new in an untracked tree):
+`aggregator/tailer.py`, `aggregator/store.py`, `aggregator/ws.py`,
+`tests/test_tailer.py`, `tests/test_store.py`, `tests/test_ws.py`,
+`tests/test_stdlib_only.py` (with `aggregator/__init__.py` and
+`tests/run_all.sh` read as unchanged context — mtimes 23:28 / 23:41, i.e.
+attempt-1 artifacts).
+
+Against: `touch-mongo-live-subplans.md` §sp-04, amendment items
+R-22:aggregator / R-23 / R-24 / R-29 + GD-21…GD-30 + SD-2 / SD-10 / SD-11,
+base plan R-22…R-29 + GD-11 / GD-15 / GD-20 / GD-24.
+
+## Attempt-1 findings: all twelve independently re-verified as closed
+
+Every one was re-run against the *current* source, not taken from the test
+gate's word:
+
+| # | closure evidence (reproduced here) |
+|---|---|
+| **B1** | `cursor()` → `append()` on a torn tail now writes the repair newline: `torn_repairs == 1`, `read_all()` returns both records, the torn line survives terminated. The `_needs_nl` cache is the right fix (it keeps the rescan-avoidance and the repair together as one observation). Also verified the harder shape the test does not cover — `next_seq()` *then* an external torn write — which correctly falls through to `reseeks == 1` + repair. |
+| **M1** | `read_complete_lines(p, read_cap=1000)` on a 3000-byte first line now returns all 4/6 lines; bare `tail_once` reports `reason=oversize_line`; `Tailer` bumps `oversize_lines`, sets `stalled`, and — verified over three ticks — reads **0 extra bytes** while the file is unchanged. The `_stalled_at` backoff genuinely closes the ~32 MB/s GD-30 hole. |
+| **m1** | `_eager_nodes` is a structural walk; the self-test `test_the_guard_detects_an_eager_import_beside_a_lazy_one` reproduces the exact defeating shape and now catches it, plus `try/except`, class-body and `if`-guarded imports. |
+| **m2** | `next_seq` re-stats and rescans on a size change; `test_cursor_of_a_non_writing_reader_tracks_the_file` asserts the reader follows the writer to seq 5. |
+| **m3** | `from_dict` is per-key tolerant; `{&quot;offset&quot;: None/&quot;x&quot;/[1]}` all drop to the default with `st_ino` surviving. |
+| **m4** | `run:.`, `session:.`, `run:a:.`, `run:`, `run:a::b` all raise `StreamError` from `validate_stream` *and* from `stream_path`. |
+| **m5** | `encode_close` and `parse_close` share `is_legal_close_code`; probed 1000/1004/1005/1006/1012/2999/3000/4999/5000 — encode and parse agree on every one. |
+| **n1–n5** | `drain_frames` raises `TypeError` on `bytes`; post-close bytes are dropped and counted (`post_close_bytes == 7` on a close+text feed); the key-order check is a `raise SchemaError`; `sys.path` is restored in `test_ws.py`; the surviving `check(True, …)` calls are all inside `except` blocks, i.e. real assertions. |
+
+## Other things that hold up (verified, not assumed)
+
+* **Suite**: `tests/run_all.sh` → `10 passed, 0 failed`, rc=0, with pymongo
+  absent (the GD-21/R-56 bare-checkout arm).
+* **Ownership**: `git status` shows only `aggregator/` and `tests/` added; no
+  `.touch/` anywhere; HEAD is still `579446e` (3 commits) — no commit added.
+  `.claude/skills/m-orchestrator/SKILL.md` + `network-recovery.md` were touched
+  at 00:40 (after the implementer's 00:17–00:27 writes), but their content is
+  a time-policy/network-recovery note — orchestrator/user in-flight state, not
+  this sub-plan. Not held against sp-04.
+* **GD-21/22/24/25/26/29**: zero pymongo, zero DB I/O, zero
+  `$inc`/`$set`/`$unset`/delete/TTL surface, no BSON subdocument `_id`, no
+  scalar `stream` field on disk (asserted by `test_record_shape`).
+* **GD-28**: `custom-state`/`control` really do refuse `harness`/`derived`/
+  `unknown`, and `kind`/`source` stay open at the tail so R-52 rides this file
+  unchanged (8 custom-state kinds appended without touching `store.py`).
+* **R-29**: probed independently — RFC accept-key vector, minimal-length
+  enforcement in both the 16- and 64-bit forms, ping-during-fragmentation,
+  UTF-8 split across a fragment boundary reassembling to `é`, `mask_bytes`
+  correct and involutive over 1000 random bytes including a leading-zero
+  payload, per-frame cap refused from the header. `drain_frames` is executed
+  against the real imported `monitor_server.parse_client_frames`.
+* Tests remain behavioural: real frozen fixtures, 20 MB byte-budget fixture,
+  4-process concurrent append asserting `seqs == range(1, 401)`.
+
+---
+
+## MAJOR
+
+### M1 — `Store._encode` never measures what it actually writes, so `MAX_RECORD_BYTES` is not a bound; an over-cap line permanently blinds the live `Tailer` for that stream
+`aggregator/store.py:653-668` (`_encode`), consequence at
+`aggregator/store.py:806-822` (`follow`) and `aggregator/tailer.py:74`
+(`DEFAULT_READ_CAP`).
+
+`_encode` measures `json.dumps(record)`, and when it is over the cap it stubs
+**`data` only** — then re-serializes and returns without re-measuring. `ref`,
+`kind`, `source`, `ts` and the stub's own `keys` list are all outside the cap.
+Reproduced:
+
+```python
+s.append(&quot;run:wf_1&quot;, kind=&quot;log&quot;, provenance=&quot;touch&quot;,
+         ref={&quot;galaxy&quot;: &quot;x&quot; * (10 * 1024 * 1024)}, data={&quot;k&quot;: 1})
+# line bytes = 10,485,935   (MAX_RECORD_BYTES = 1,048,576, stats[&quot;oversize&quot;] == 1)
+```
+
+A ref is not a hypothetical carrier: GD-11's open tail *requires* unknown ref
+shapes to be &quot;retained verbatim&quot; (`test_ref_union_rejects_and_retains` asserts
+exactly that), so an ingest sub-plan passing a harness subtree straight through
+is the designed path. The stub is unbounded for the same reason —
+`sorted(record[&quot;data&quot;])[:64]` is 64 key *strings* of arbitrary length.
+
+Two harms, both against invariants this sub-plan owns:
+
+1. **The documented guarantee is false.** `follow()`'s docstring justifies its
+   escalation with &quot;Store-written lines are capped at `MAX_RECORD_BYTES`
+   (1 MiB, well under the tailer's read cap), so the escalation can only ever
+   fire on a foreign writer's line.&quot; Verified false. The class docstring's
+   &quot;the cap is a memory bound on readers (GD-20 'no unlocked appends without a
+   length cap')&quot; is likewise not enforced.
+2. **It re-opens the M1 stall on Touch's own data.** Above
+   `tailer.DEFAULT_READ_CAP` (8 MiB) the line is unreadable by the live poll
+   path. Verified on the 10 MB line above:
+
+   ```
+   Tailer.poll -&gt; reason=oversize_line  lines=0  stalled=True     # forever
+   ```
+
+   Every subsequent record appended to that `.touch/` stream is behind the
+   wedge, so the stream goes dark for the live view while `read_all()` (which
+   escalates) still returns it — an aggregator that can replay history but
+   cannot serve it live is precisely the GD-22/GD-30 failure the amendment is
+   about, and `store.py` is the one writer that must never produce it.
+
+`test_oversize_record_is_stubbed_never_dropped:458-459` asserts
+`len(line) &lt; MAX_RECORD_BYTES`, but only for the oversize-**data** case, so it
+passes while the invariant is broken.
+
+**Fix:** make `_encode` a loop over the *encoded* blob, not the payload —
+after stubbing `data`, re-serialize and, if still over the cap, stub `ref` the
+same way (`{&quot;oversize&quot;: True, &quot;keys&quot;: [...]}` with each key truncated) and
+finally hard-truncate the `keys`/`bytes` metadata; assert
+`len(blob) + 1 &lt;= MAX_RECORD_BYTES` before returning. Then either correct
+`follow()`'s docstring or keep it and let the assertion be what makes it true.
+Add a regression test with an oversize `ref` and with 64 megabyte-long data
+keys, asserting the written line is under the cap and that a fresh
+`Tailer(path)` (default cap) returns the record.
+
+### M2 — `read_complete_lines` returns an empty list, silently, whenever any `.compact.tmp.*` is in the directory
+`aggregator/tailer.py:395-414`, reached via `aggregator/tailer.py:337-342`.
+
+`read_complete_lines` does not pass `skip_while_compacting=False`, so a
+compaction anywhere in the directory yields `reason=REASON_COMPACTING`,
+`more=False`, and the loop returns `out == []`. Reproduced on a 4-line file:
+
+```
+tail_once   -&gt; reason=compacting  compacting=True
+read_complete_lines -&gt; 0 lines   (the file really has 4)
+Tailer.drain        -&gt; 0 lines
+```
+
+This is the *same defect class* the attempt-1 M1 fix explicitly outlawed for
+this exact function — its own docstring now reads &quot;returning a short list
+silently is the one outcome a 'give me every line' helper may not have&quot; — just
+through a different door. It matters more here than the oversize door did:
+
+* the helper is documented for &quot;fixtures, boot-time scans&quot;, and the only place
+  `.compact.tmp.*` exists is `~/.claude/projects/&lt;slug&gt;/`, i.e. exactly where
+  boot-time transcript scans run;
+* `compaction_in_progress` is directory-scoped by design (&quot;we do not try to
+  match it to a specific transcript&quot;), so one compaction blanks **every**
+  transcript in that project directory;
+* `COMPACT_STALE_S` is 60 s, so the blank window is up to a minute;
+* the return value carries no signal at all — a caller cannot distinguish
+  &quot;empty session&quot; from &quot;deferred&quot;, and `Tailer.drain()` has the same shape.
+
+**Fix:** give the one-shot helper the outcome its contract demands. Either
+default it to `skip_while_compacting=False` (a one-shot read of a file being
+rewritten is the caller's decision, and `read_at`/`split_lines` already
+tolerate garbage), or keep the deferral and make it visible — raise a
+`CompactionInProgress` (or return `(lines, reason)`) instead of a bare `[]`.
+Same treatment for `Tailer.drain()`, which should surface `last_reason`
+rather than an indistinguishable empty list. Add a test that a compaction
+tmp file does not make a 4-line file read as empty-and-successful, and fix
+`test_compaction_backoff`'s opt-out arm (see n1) so it actually covers this.
+
+---
+
+## MINOR
+
+### m1 — `TailLine.__len__` makes a blank line falsy, re-introducing the exact line-number shift the module exists to prevent
+`aggregator/tailer.py:171-172`.
+
+The module docstring is emphatic: &quot;Blank lines are returned too (with
+`text == &quot;&quot;`) — skipping them here would silently shift the line numbers of
+everything after them.&quot; Then `__len__` returns `len(self.text)`, so:
+
+```python
+lines, _, _ = split_lines(b&quot;a\n\nb\n&quot;, 0, 0)
+[bool(l) for l in lines]        -&gt; [True, False, True]
+[l.line_no for l in lines if l] -&gt; [1, 3]        # line 2 filtered out
+```
+
+`if line:` is the single most natural thing a downstream ingest loop writes,
+and it silently drops precisely the records GD-24's `&lt;sessionId&gt;#&lt;line:08d&gt;`
+keys depend on. `TailResult` deliberately defines `__bool__`; `TailLine`
+defines `__len__` and inherits the implicit `__bool__` from it.
+
+**Fix:** delete `__len__` (nothing uses it — `grep` finds no caller), or add
+`def __bool__(self): return True`. Add a check to
+`test_split_lines_positions` asserting `all(lines)` for a buffer containing a
+blank line.
+
+### m2 — `cursor_key` re-implements the GD-24 `_id` grammar outside `refs.ref_key`, unescaped
+`aggregator/store.py:350-370`.
+
+SD-11 is unconditional: &quot;All `_id`s are strings from `refs.ref_key`&quot;. GD-24
+gives `events` and `custom_state_events` the `_id` `&lt;stream&gt;#&lt;seq:012d&gt;` and
+requires `%`-escaping of `% # | :` in **user-chosen** components. `cursor_key`
+builds that string here, and `validate_stream` deliberately *permits* raw `:`
+and `%` in a stream id. `store.py`'s own class docstring says the `_id`
+grammar &quot;lives in `mongo_store.py`, not here&quot;, while `cursor_key`'s docstring
+says it *is* &quot;the GD-24 event `_id`&quot; — the file contradicts itself.
+
+Concretely: `legacy:&lt;task&gt;` uses a user-chosen folder name (the tests already
+exercise `run:legacy:touch-repo-recon`). A task folder containing `:` or `%`
+produces a `cursor_key` that `refs.ref_key` (sp-05) will escape differently,
+so the file-side cursor and the Mongo `_id` diverge and the
+`{stream:1,seq:1}` unique index stops meaning what the mirror thinks it means.
+Nothing in this sub-plan can be broken by it today, which is why it is minor —
+but sp-05 will write the second implementation blind.
+
+**Fix:** state in `cursor_key`'s docstring that it is the *cursor token* and
+that `refs.ref_key` (sp-05) is the normative `_id` producer that must be
+proven equal to it, and leave a named hook (`# SD-11: refs.ref_key must
+round-trip this`) plus a note in the sp-05 hand-off. Better: have `cursor_key`
+percent-escape `%` and `:` in the stream component now, so the two grammars
+cannot diverge at all.
+
+### m3 — `DURABLE_STREAMS` fsync the file but never the parent directory, so the first append to the one unrecoverable stream can vanish
+`aggregator/store.py:738-739`, with `_ensure_dir` at `:496-499`.
+
+`os.fsync(fh.fileno())` makes the *contents* durable but does not commit the
+new directory entry created moments earlier by `open(..., &quot;a+b&quot;)` /
+`os.makedirs`. After a power loss the very first `custom-state` /
+`control` record — the one R-52 calls &quot;the ONE dataset not rebuildable from
+`~/.claude`&quot;, and D7 calls &quot;a legal record of intents&quot; — can be gone with the
+file itself. The docstring's &quot;crash-durable WAL&quot; and &quot;Streams whose loss is
+unrecoverable get an fsync per append&quot; both overstate what is implemented.
+
+**Fix:** when `durable` and the file was just created, `os.open(dirname,
+O_RDONLY)` → `os.fsync` → close the parent directory (once per stream is
+enough; cache a `set` of dirs already synced). Assert it in a test by
+monkey-patching `os.fsync` and checking a directory fd is among the sync
+targets on first append.
+
+### m4 — `torn_repairs` / `oversize` are incremented before the write, so a rejected batch inflates them permanently
+`aggregator/store.py:719` and `:665`.
+
+`_build_record` can raise (bad `kind`, `provenance`, `ts`, `ref`, `data`) part
+way through a batch, after `torn_repairs` was already bumped and after
+`_encode` may have bumped `oversize` — while `fh.write(payload)` is never
+reached, so nothing lands on disk. Reproduced:
+
+```
+append_many([good, {&quot;provenance&quot;: &quot;BOGUS&quot;}])  -&gt; SchemaError, file size unchanged
+stats[&quot;torn_repairs&quot;] == 1        # no repair was written
+next successful append            -&gt; stats[&quot;torn_repairs&quot;] == 2   # for ONE real repair
+```
+
+These counters are the observability GD-29 leans on (&quot;the duplicate-key
+counter … is how you notice one&quot;); double-counting makes them lie.
+
+**Fix:** accumulate the deltas locally and fold them into `self.stats` only
+after `fh.write(payload)` succeeds (they are already inside the lock, so a
+local dict + one update is enough).
+
+### m5 — nothing escalates an over-cap line on the *live* path, and `DEFAULT_READ_CAP` sits exactly on R-44's threshold
+`aggregator/tailer.py:74`, `:444-470`.
+
+`read_complete_lines` and `Store._read_lines`/`follow` all pass
+`escalate_oversize_line=True`; `Tailer` — the class the ingest poll loop will
+actually use — does not, and has no way to recover other than a caller
+changing `read_cap`. R-44 legislates for payloads **&gt;8 MB**, and
+`DEFAULT_READ_CAP` is exactly 8 MiB, so the first document R-44 was written
+for is also the first line that wedges the live tail. `test_line_longer_than_
+the_read_cap` covers the stalled/counter behaviour but never a caller
+recovering at the default cap.
+
+**Fix:** give `Tailer` a bounded escalation policy — e.g. after N consecutive
+`REASON_OVERSIZE_LINE` ticks on an unchanged file, retry once with
+`escalate_oversize_line=True` up to a hard `max_line_bytes`, and only then
+stay stalled with the named reason. Document the resulting worst-case tick
+cost against GD-30.
+
+### m6 — `normalize_ts` raises a bare `ValueError` on an unparseable legacy ts
+`aggregator/store.py:186-203`.
+
+Everything else in this module funnels rejections through `StoreError`
+subclasses (`__all__` exports them for exactly that reason). `normalize_ts`
+is the one documented to be *tolerant* of legacy input (&quot;a legacy line is
+history and cannot be fixed retroactively&quot;), yet
+`normalize_ts(&quot;not a ts&quot;)` → `ValueError: Invalid isoformat string`. The
+legacy adapter (R-27, sp-09) reads RUNSTATE-6's mixed-format streams and will
+hit it.
+
+**Fix:** wrap `fromisoformat` and re-raise as `SchemaError` (or return `None`
+with a documented contract), and add a case to `test_ts_format`.
+
+---
+
+## NITS
+
+* **n1** `tests/test_tailer.py:295-297` — the `skip_while_compacting=False`
+  opt-out is asserted *after* `os.unlink(tmpname)`, so no compaction is in
+  progress and the arm proves nothing. Move the `os.unlink` after the check.
+* **n2** `tests/test_store.py:526-529` — the &quot;no pymongo in `store.py`&quot; guard
+  is a chain of `.replace()` calls on the source text; it breaks the moment
+  the docstring rewords. `tests/test_stdlib_only.py` already does this
+  properly via AST — delete the duplicate or call `imports_of`.
+* **n3** `aggregator/ws.py:471-517` — `drain_frames` honours a 64-bit length
+  field with no cap, so a hostile peer sending `0x7F` + a huge length makes
+  the caller's buffer grow until the frame &quot;completes&quot;. Prior-art parity is
+  the requirement, so this is not a defect here, but the docstring should say
+  the caller owns the read budget.
+* **n4** `aggregator/tailer.py:152-158` — `int(True) == 1`, so
+  `Checkpoint.from_dict({&quot;offset&quot;: true})` yields offset 1 rather than the
+  default. One `isinstance(v, bool)` guard matches the care taken elsewhere in
+  the sub-plan (`validate_ref`/`normalize_tokens` both exclude bools).
+* **n5** `aggregator/store.py:435,493-494` — `_locks` and `_next_seq` grow one
+  entry per stream id forever. Bounded in practice by the number of sessions,
+  but a long-lived aggregator over a machine's whole `~/.claude` history is
+  the intended deployment; a note or an LRU would be honest.
+
+## Non-findings (checked, deliberately not raised)
+
+* `compaction_in_progress` globbing per changed tick — gated behind the
+  stat-first short circuit, and `glob` does match the dot-prefixed pattern
+  correctly (verified).
+* `_scan_seq`'s 256 KB tail window — line counting is exact and independent of
+  the window, so `max(lines, highest) + 1` is correct even when no parseable
+  seq is in the tail.
+* Percent-escaping in `_escape_component`/`_unescape_component` — verified
+  injective; `run:a:b` and `run:a%3Ab` map to distinct directories and both
+  round-trip through `streams()`.
+* `follow()` not looping on `more` — the checkpoint advances, so the next tick
+  continues; that is the intended O(delta) shape, not a loss.
+* `decode_frame`'s `consumed` being relative to `offset` — only `feed()` uses a
+  non-zero offset path, and it passes 0. Documented adequately.
+* `control` stream pinned to `{asserted, touch}` — still correct per GD-28.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

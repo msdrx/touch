@@ -1,0 +1,605 @@
+<title>sp-ingest-pipelines — cycle 2</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-ingest-pipelines — implement→test→critique, attempt 2/4</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 2 of sp-ingest-pipelines: addressed every finding in sp-ingest-pipelines-critique-attempt-1.md against the current tree. All 17 suites green (13 repo + 4 monitoring), plus the bare-checkout (pymongo blocked) arm 2/2 and the live-mongod arm executed against touch-mongo-sp05.
+
+BLOCKER B1 — per-path (--backfill) source arm was unscoped. Added `_scope_anchor()` + `_in_scope()` to `aggregator/ingest.py` and applied them in `_transcript_scans` and `_run_scans` before the memo, using the same ROOTED `sess.scoped_dirs(sess.project_cwd(cwd, env), root)` membership test `sessions.py:1319-1322` uses (anchor = `&lt;root&gt;/projects/&lt;slug&gt;`, found by walking up to the innermost uuid-shaped directory for agent transcripts/journals, or the parent for `&lt;sessionId&gt;.jsonl`). `iter_transcript_paths`/`iter_journal_paths` now thread `env`. Verified end-to-end: `mirror.iter_backfill_observations` over a foreign-slug-only root emitted `{'record': 46, 'streamMeta': 15, 'usage': 20}` before, `{}` now. New test `test_backfill_and_rebuild_see_exactly_the_same_files` drives the real `mr.iter_backfill_sources` walk over a root holding one owned + one foreign slug and asserts (a) the walk does see the foreign files, (b) zero observations come out of them, (c) --backfill and --rebuild agree on counts AND fingerprint. It needed a new `walkable_root()` helper: `os.walk` does not follow directory symlinks, so the existing `linked_root` slug-symlinks are invisible to the backfill walk — the tree is now recreated with real dirs and symlinked files.
+
+MAJOR M1 — `spill_containment` was a basename test. Now `spill_containment(path, *, root=None)`: realpaths both sides, requires the relative path to be exactly `projects/&lt;slug&gt;/&lt;sessionId&gt;/tool-results/&lt;name&gt;`, and returns False with no root. Threaded through `find_persisted_output(record, *, root=, session_id=)` ← `read_transcript(..., root=root)`. New counter `unrooted_spill` keeps &quot;unknown&quot; distinct from &quot;escaped&quot;. New test `test_containment_is_rooted_and_resolved_not_a_directory_name` covers symlink escape ⇒ False, `/tmp/evil/tool-results/x` ⇒ False, bare relative ⇒ False, wrong depth inside the root ⇒ False, `..` ⇒ False, symlinked root ⇒ True, and the path still stored verbatim with `contained:false`. The three real frozen pointers remain the regression guard: asserted contained under this machine's `sess.claude_root()`, with a clean skip if the corpus is ever replayed where those paths do not belong.
+
+MINORS: m1 — `runs` launch/snapshot collision closed by construction: `RunObservation.launch` is a namespaced sub-document (`map_run` writes `launch{}`), so the two independent sources write disjoint field sets and `launch.status` is now safe to carry (it was omitted before to half-close the hazard). New `test_the_runs_document_is_order_independent_across_its_two_sources` uses a deliberately contradicting pair and asserts equal fingerprints both orders; the live arm now also round-trips the shape through mongod's `$jsonSchema`. NOTE FOR DOWNSTREAM: `runs.taskId`/`workflowName`/`scriptPath`/`transcriptDir`/`summary` sourced from the launch record now live at `runs.launch.*` — R-49's session→run join and GD-8's stop handle are `launch.taskId`. m2 — `_record_ts` returns `(ts, ts_raw, error)`; `ts_raw` carried on both observation types and stored via new `_ts_pair()`, tested across four timestamp spellings. m3 — `usage_agent_conflict` counter added to `_skips()` and raised in `read_transcript`; docstring records the cross-file case as an explicit sp-12/sp-15 handoff; new `test_the_conflict_counter_has_a_runtime_path`. m4 — `link_spills` keys on `(sessionId, basename)` via a new `SpillPointer.session_id`; cross-session and session-less pointers refuse to link, tested. m5 — added walk-level memos `_TRANSCRIPT_WALK`/`_RUN_WALK` keyed on every in-scope file's `(dev, ino, size, mtime_ns)`; `_run_scans(path=None)` no longer re-walks and the launch arm reuses the transcript walk. New `test_the_rebuild_walk_is_read_once_not_once_per_source` proves all five rebuild sources together read each transcript exactly once, and that a rewrite invalidates the memo. The one remaining double read (`read_run(times=True)` re-opening agent transcripts) is documented with the reason it is not eliminated: `find_run_dirs` globs directories the scoped walk does not enumerate, so sharing times would make --rebuild and --backfill disagree.
+
+NITS: n1 — added `note()` to the test file and converted the launch test's misleading `skip()` (it ran eleven green checks). n2 — `_launch_scan` now takes `root` and uses `_rel`. n3 — a journal `result` with no `key` increments `unmatched_result`; tested, plus a corpus-wide assertion that no frozen journal has one.
+
+m6 (no code change, as the critique directed) — the &quot;unkeyable positional&quot; deviation from R-47 is now a named block in the module docstring flagged as a handoff to sp-15, stating the amendment it needs: GD-24's `stream_meta` row wants `&lt;sessionId&gt;#&lt;fileDiscriminator&gt;#&lt;line:08d&gt;` (or a `filePath` key member) before uuid-less lines in agent transcripts can be mirrored. Please carry this into the docs sub-plan.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites green: tests/test_ingest.py (33 test fns, 185 checks) and tests/test_usage.py (12 fns, 65 checks), exit 0, only the R-42 live-mongod arm skipping cleanly. Full-suite regression gate 17/17 green (4 monitoring + 13 repo), RC=0, no baseline or new failures. Bare-checkout arm with pymongo/bson/gridfs/dns blocked via a find_spec meta-path hook: 13/13 repo suites pass; ingest.py has zero driver imports. Live-mongod arm executed against the existing mongo:7 container (127.0.0.1:27117, loopback+auth): both owned suites green server-side — identical stored-byte fingerprints across normal/reversed/shuffled ingest, $setOnInsert on run_nodes, launch/snapshot disjointness verified on the server, each dropping only its own test DB. Ownership clean: mtimes show only aggregator/ingest.py (05:53), tests/test_usage.py (06:01), tests/test_ingest.py (06:04) touched this loop; sessions.py/mirror.py/legacy.py untouched. Plan verification green for R-26 (all six amendments), R-47, R-49, R-50, GD-24/25/26/28, SD-1, SD-11, with attempt-1 critique items visibly fixed: n1 (skip-then-assert replaced by a note() helper), n2 (_launch_scan now uses _rel), n3 (keyless journal result now counted as unmatched_result), B1 (per-path backfill arm now applies sessions.scoped_dirs; backfill and rebuild produce identical counts and bytes), m3 (new runtime-path test for the agentId conflict counter).</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 2 blockers, 1 major, 3 minors, 2 nits. All ten attempt-1 findings are genuinely fixed (I re-reproduced B1's foreign-slug leak: now zero observations; the spill containment predicate is properly realpath-rooted; walk memos, tsRaw, link_spills key, note() helper, _rel, unmatched_result all correct). But GD-25's acceptance property FAILS on the live in-scope corpus, reproduced end-to-end through the real mappers + mongo_store's own upsert model: normal vs reversed fingerprints differ. (B1) map_usage puts sessionId under $setOnInsert (ingest.py:1927), yet 3 message.ids on disk span two sessionIds — one agent's fragments under two session dirs, the /clear-mid-run topology this module's own find_run_dirs exists for; nothing counts it (usage_conflicts watches agentId, which agrees in all 3). (B2) the m1 fix namespaced launch under launch{} and map_run:1958 now asserts &quot;order cannot matter&quot;, but _launch_scan emits one observation per launch record and wf_455b348c-e17 has TWO launch records with different taskIds in one transcript, both $set into launch{} — so the stored launch.taskId, amended GD-8's run-level stop handle, is picked by walk order. (M2) both order-independence tests build from a single-session fixture that structurally cannot contain either shape, so the suite is green and the invariant is false. Fixes are in-scope: $min on usage.sessionId and on runs.launch both pass ms.validate_update, so no sp-05 file is needed.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 3/4</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 2 of sp-ingest-pipelines: addressed every finding in sp-ingest-pipelines-critique-attempt-1.md against the current tree. All 17 suites green (13 repo + 4 monitoring), plus the bare-checkout (pymongo blocked) arm 2/2 and the live-mongod arm executed against touch-mongo-sp05.
+
+BLOCKER B1 — per-path (--backfill) source arm was unscoped. Added `_scope_anchor()` + `_in_scope()` to `aggregator/ingest.py` and applied them in `_transcript_scans` and `_run_scans` before the memo, using the same ROOTED `sess.scoped_dirs(sess.project_cwd(cwd, env), root)` membership test `sessions.py:1319-1322` uses (anchor = `&lt;root&gt;/projects/&lt;slug&gt;`, found by walking up to the innermost uuid-shaped directory for agent transcripts/journals, or the parent for `&lt;sessionId&gt;.jsonl`). `iter_transcript_paths`/`iter_journal_paths` now thread `env`. Verified end-to-end: `mirror.iter_backfill_observations` over a foreign-slug-only root emitted `{'record': 46, 'streamMeta': 15, 'usage': 20}` before, `{}` now. New test `test_backfill_and_rebuild_see_exactly_the_same_files` drives the real `mr.iter_backfill_sources` walk over a root holding one owned + one foreign slug and asserts (a) the walk does see the foreign files, (b) zero observations come out of them, (c) --backfill and --rebuild agree on counts AND fingerprint. It needed a new `walkable_root()` helper: `os.walk` does not follow directory symlinks, so the existing `linked_root` slug-symlinks are invisible to the backfill walk — the tree is now recreated with real dirs and symlinked files.
+
+MAJOR M1 — `spill_containment` was a basename test. Now `spill_containment(path, *, root=None)`: realpaths both sides, requires the relative path to be exactly `projects/&lt;slug&gt;/&lt;sessionId&gt;/tool-results/&lt;name&gt;`, and returns False with no root. Threaded through `find_persisted_output(record, *, root=, session_id=)` ← `read_transcript(..., root=root)`. New counter `unrooted_spill` keeps &quot;unknown&quot; distinct from &quot;escaped&quot;. New test `test_containment_is_rooted_and_resolved_not_a_directory_name` covers symlink escape ⇒ False, `/tmp/evil/tool-results/x` ⇒ False, bare relative ⇒ False, wrong depth inside the root ⇒ False, `..` ⇒ False, symlinked root ⇒ True, and the path still stored verbatim with `contained:false`. The three real frozen pointers remain the regression guard: asserted contained under this machine's `sess.claude_root()`, with a clean skip if the corpus is ever replayed where those paths do not belong.
+
+MINORS: m1 — `runs` launch/snapshot collision closed by construction: `RunObservation.launch` is a namespaced sub-document (`map_run` writes `launch{}`), so the two independent sources write disjoint field sets and `launch.status` is now safe to carry (it was omitted before to half-close the hazard). New `test_the_runs_document_is_order_independent_across_its_two_sources` uses a deliberately contradicting pair and asserts equal fingerprints both orders; the live arm now also round-trips the shape through mongod's `$jsonSchema`. NOTE FOR DOWNSTREAM: `runs.taskId`/`workflowName`/`scriptPath`/`transcriptDir`/`summary` sourced from the launch record now live at `runs.launch.*` — R-49's session→run join and GD-8's stop handle are `launch.taskId`. m2 — `_record_ts` returns `(ts, ts_raw, error)`; `ts_raw` carried on both observation types and stored via new `_ts_pair()`, tested across four timestamp spellings. m3 — `usage_agent_conflict` counter added to `_skips()` and raised in `read_transcript`; docstring records the cross-file case as an explicit sp-12/sp-15 handoff; new `test_the_conflict_counter_has_a_runtime_path`. m4 — `link_spills` keys on `(sessionId, basename)` via a new `SpillPointer.session_id`; cross-session and session-less pointers refuse to link, tested. m5 — added walk-level memos `_TRANSCRIPT_WALK`/`_RUN_WALK` keyed on every in-scope file's `(dev, ino, size, mtime_ns)`; `_run_scans(path=None)` no longer re-walks and the launch arm reuses the transcript walk. New `test_the_rebuild_walk_is_read_once_not_once_per_source` proves all five rebuild sources together read each transcript exactly once, and that a rewrite invalidates the memo. The one remaining double read (`read_run(times=True)` re-opening agent transcripts) is documented with the reason it is not eliminated: `find_run_dirs` globs directories the scoped walk does not enumerate, so sharing times would make --rebuild and --backfill disagree.
+
+NITS: n1 — added `note()` to the test file and converted the launch test's misleading `skip()` (it ran eleven green checks). n2 — `_launch_scan` now takes `root` and uses `_rel`. n3 — a journal `result` with no `key` increments `unmatched_result`; tested, plus a corpus-wide assertion that no frozen journal has one.
+
+m6 (no code change, as the critique directed) — the &quot;unkeyable positional&quot; deviation from R-47 is now a named block in the module docstring flagged as a handoff to sp-15, stating the amendment it needs: GD-24's `stream_meta` row wants `&lt;sessionId&gt;#&lt;fileDiscriminator&gt;#&lt;line:08d&gt;` (or a `filePath` key member) before uuid-less lines in agent transcripts can be mirrored. Please carry this into the docs sub-plan.</li><li>Test gate PASSED: PASS. Owned suites green: tests/test_ingest.py (33 test fns, 185 checks) and tests/test_usage.py (12 fns, 65 checks), exit 0, only the R-42 live-mongod arm skipping cleanly. Full-suite regression gate 17/17 green (4 monitoring + 13 repo), RC=0, no baseline or new failures. Bare-checkout arm with pymongo/bson/gridfs/dns blocked via a find_spec meta-path hook: 13/13 repo suites pass; ingest.py has zero driver imports. Live-mongod arm executed against the existing mongo:7 container (127.0.0.1:27117, loopback+auth): both owned suites green server-side — identical stored-byte fingerprints across normal/reversed/shuffled ingest, $setOnInsert on run_nodes, launch/snapshot disjointness verified on the server, each dropping only its own test DB. Ownership clean: mtimes show only aggregator/ingest.py (05:53), tests/test_usage.py (06:01), tests/test_ingest.py (06:04) touched this loop; sessions.py/mirror.py/legacy.py untouched. Plan verification green for R-26 (all six amendments), R-47, R-49, R-50, GD-24/25/26/28, SD-1, SD-11, with attempt-1 critique items visibly fixed: n1 (skip-then-assert replaced by a note() helper), n2 (_launch_scan now uses _rel), n3 (keyless journal result now counted as unmatched_result), B1 (per-path backfill arm now applies sessions.scoped_dirs; backfill and rebuild produce identical counts and bytes), m3 (new runtime-path test for the agentId conflict counter).</li><li>Critique REJECTED: REJECTED — 2 blockers, 1 major, 3 minors, 2 nits. All ten attempt-1 findings are genuinely fixed (I re-reproduced B1's foreign-slug leak: now zero observations; the spill containment predicate is properly realpath-rooted; walk memos, tsRaw, link_spills key, note() helper, _rel, unmatched_result all correct). But GD-25's acceptance property FAILS on the live in-scope corpus, reproduced end-to-end through the real mappers + mongo_store's own upsert model: normal vs reversed fingerprints differ. (B1) map_usage puts sessionId under $setOnInsert (ingest.py:1927), yet 3 message.ids on disk span two sessionIds — one agent's fragments under two session dirs, the /clear-mid-run topology this module's own find_run_dirs exists for; nothing counts it (usage_conflicts watches agentId, which agrees in all 3). (B2) the m1 fix namespaced launch under launch{} and map_run:1958 now asserts &quot;order cannot matter&quot;, but _launch_scan emits one observation per launch record and wf_455b348c-e17 has TWO launch records with different taskIds in one transcript, both $set into launch{} — so the stored launch.taskId, amended GD-8's run-level stop handle, is picked by walk order. (M2) both order-independence tests build from a single-session fixture that structurally cannot contain either shape, so the suite is green and the invariant is false. Fixes are in-scope: $min on usage.sessionId and on runs.launch both pass ms.validate_update, so no sp-05 file is needed.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-ingest-pipelines-test-attempt-2.md</summary><pre># sp-ingest-pipelines — test gate, attempt 2 — **PASS**
+
+Read-only gate. No source or test file was edited by this gate.
+
+Implementer's declared change-set:
+- `/home/laniakea/Projects/touch/aggregator/ingest.py`
+- `/home/laniakea/Projects/touch/tests/test_ingest.py`
+- `/home/laniakea/Projects/touch/tests/test_usage.py`
+
+---
+
+## 1. Targeted suites (owned files) — GREEN
+
+Run from the repo root; stdlib-only, standalone executables.
+
+| suite | exit | test fns | `check(...)` sites | skips |
+|---|---|---|---|---|
+| `python3 tests/test_ingest.py` | 0 | 33 | 185 | 1 (live-mongod arm, clean) |
+| `python3 tests/test_usage.py` | 0 | 12 | 65 | 1 (live-mongod arm, clean) |
+
+Both footers read `all … tests passed`.
+
+The only skip in the default environment is `test_live_mongod_arm`
+(&quot;TOUCH_MONGO_URI is not set — R-42's loopback+auth recipe&quot;) in each file.
+There is one further *conditional* skip in `test_ingest.py:539` (the
+containment arm degrades honestly if the frozen pointers do not name this
+machine's `~/.claude` root) — it did **not** fire here; the arm ran and asserted.
+
+### Attempt-1 critique nits are demonstrably fixed in the tests/code
+
+- **n1 (skip-then-assert)** — `test_the_launch_tool_use_result_is_the_taskid_join`
+  no longer calls `skip()`. A new `note()` helper (`tests/test_ingest.py:121-128`)
+  prints the fixture-gap remark without polluting the skip list; all eleven
+  assertions of that arm run and are green. The footer no longer misreports the
+  arm as skipped.
+- **n2 (absolute `source_path` in `_launch_scan`)** — now
+  `source_path=_rel(root, scan.path)` (`aggregator/ingest.py:2308`), matching the
+  two journal call sites (`:1474`, `:1566`). No absolute `source_path` remains.
+- **n3 (a journal `result` with no `key` dropped silently)** — an explicit
+  `elif kind == &quot;result&quot;:` fallthrough (`aggregator/ingest.py:1334-1341`) now
+  increments `skipped[&quot;unmatched_result&quot;]`, and `test_a_result_attaches_by_agent_id_and_never_guesses`
+  asserts both that the counter fires and that no node is attached by guesswork.
+- **B1 (per-path arm ignored R-25 project scope)** — covered by
+  `test_backfill_and_rebuild_see_exactly_the_same_files`, which shows the backfill
+  walk *sees* the foreign slug's 5 files and yields **zero** observations from
+  them (the same rooted `sessions.scoped_dirs` test the rebuild arm gets), and
+  that `--backfill` and `--rebuild` produce identical counts **and** bytes
+  (`{'records': 1090, 'run_nodes': 7, 'runs': 1, 'usage': 328}`).
+- **m3 (conflict counter with no runtime path)** — new
+  `test_the_conflict_counter_has_a_runtime_path` in `test_usage.py` drives the
+  counter through the scan, asserts the key is pre-declared, that the stored
+  `agentId` is unchanged ($setOnInsert), that the ordinary split-record case does
+  *not* fire it, and that the frozen corpus raises none.
+
+## 2. Full-suite regression gate — GREEN (17/17)
+
+```
+cd /home/laniakea/Projects/touch &amp;&amp; rc=0
+for t in .claude/shared/monitoring/tests/test_*.py; do (cd &quot;$(dirname &quot;$t&quot;)&quot; &amp;&amp; python3 &quot;$(basename &quot;$t&quot;)&quot;) || rc=1; done
+for t in tests/test_*.py; do [ -e &quot;$t&quot; ] || continue; python3 &quot;$t&quot; || rc=1; done; exit $rc
+```
+
+`SUITE RC=0`. All pass:
+
+- monitoring module (baseline four): `test_frontend`, `test_server`,
+  `test_shell`, `test_watcher`
+- repo (thirteen): `test_bootstrap`, `test_fixtures`, `test_ingest`,
+  `test_mirror`, `test_mongo_deploy`, `test_mongo_store`, `test_refs`,
+  `test_sessions`, `test_stdlib_only`, `test_store`, `test_tailer`,
+  `test_usage`, `test_ws`
+
+No baseline failure and no new failure. `test_stdlib_only.py` and
+`test_mirror.py` — the two suites most sensitive to a module registering new
+mirror sources/mappers — are green, so `ingest.py`'s five registrations still
+do not disturb sp-06's mirror contract.
+
+### 2a. Bare-checkout arm (GD-21 / R-56: no third-party packages) — GREEN 13/13
+
+`pymongo==4.17.0` is installed in this environment, so the default run alone
+does not prove the no-driver posture. Re-ran all 13 repo suites under a
+`sitecustomize.py` meta-path hook whose `find_spec` raises `ImportError` for
+`pymongo`, `bson`, `gridfs`, `dns` (block verified to fire before running):
+
+```
+PYTHONPATH=&lt;blocker&gt; python3 tests/test_&lt;x&gt;.py   →   13/13 PASS   (BARE RC=0)
+```
+
+Both owned suites pass with the driver absent; `grep -c 'pymongo\|bson'
+aggregator/ingest.py` = **0**, so the GD-21 exception stays confined to
+`mongo_store.py` / `mirror.py`. Mongo-dependent arms skip cleanly rather than
+erroring.
+
+### 2b. Live-mongod arm (R-42) — GREEN, executed rather than skipped
+
+A `mongo:7` container from an earlier sub-plan is up on the R-42 loopback+auth
+recipe (`touch-mongo-sp05`, `127.0.0.1:27117`). With
+`TOUCH_MONGO_URI=mongodb://touch:touchpw@127.0.0.1:27117/?authSource=admin`
+both owned suites pass.
+
+`test_ingest.py::test_live_mongod_arm`
+- identical stored-byte fingerprint for normal / reversed / shuffled ingest
+  (`dbc5a0a5…6de742` three times) — GD-25 order-independence **on the server**,
+  not only in the model
+- 9 run-node documents survive a real `$setOnInsert` on the `_id`'s components
+- mongod stores the launch sub-document beside the snapshot's own fields and its
+  `$jsonSchema` accepts the shape; both arrival orders read back as the same
+  document (the m1/`runs`-disjointness fix, verified server-side)
+- drops only the database it created (`touch_test_141872`), per GD-27
+
+`test_usage.py::test_live_mongod_arm` — green; `$max` commutative server-side,
+stored totals equal the in-memory model, conflicting `agentId` never overwrites,
+`$group` rollup matches the computed figure, drops only its own test database.
+
+Both arms skip cleanly with the URI unset (verified in §1), so the R-56
+no-mongod posture holds.
+
+## 3. Plan verification
+
+Against `plan/touch-mongo-live-subplans.md` §&quot;sp-08 — ingest-pipelines&quot; and items
+R-26 (all six amendments), R-47, R-49, R-50, plus GD-24/25/26/28, SD-1, SD-11.
+
+**Ownership — clean.** `aggregator/` and `tests/` are still untracked
+directories, so `git diff` cannot discriminate; mtimes were used. The three
+declared files are the only ones touched in this loop's window
+(`ingest.py` 05:53, `test_usage.py` 06:01, `test_ingest.py` 06:04); the next
+most recent files are `sessions.py` 04:10 / `test_sessions.py` 04:14 (the prior
+sp-sessions-arm loop) and `mirror.py` 02:45. `git status --porcelain` for
+tracked paths is unchanged apart from the orchestrator's own `events.jsonl`.
+The explicit prohibition list holds: `agents.py` does not exist; `sessions.py`,
+`legacy.py`, `mirror.py` untouched.
+
+**R-47 (12-type bucket table).** `test_the_bucket_table_is_the_only_decider`
+proves the decision is by TYPE even when a meta type carries a uuid, that an
+unknown/future type buckets positionally rather than being dropped (GD-26), and
+that an uppercase uuid is refused as a key. On the frozen corpus:
+1157 uuid-bearing ⇒ `records`, 30 uuid-less ⇒ `stream_meta`, counts recomputed
+from the bytes; a second pass changes no byte. `sessionId` injection from the
+path (with the source recorded and the path overruling a contradicting in-line
+claim), `lineNo` + `byteOffset` on every document with the offset at the line's
+first byte, `queue-operation` uniquely `render:false` and never deduped against
+its `user` twin — all asserted.
+
+**R-26, six amendments.** uuid-less keying `&lt;sessionId&gt;#&lt;line:08d&gt;` with
+uniqueness/ascension; cross-session agent assembly deferred (a mapper writing
+`agents` is structurally refused; the allowed set is exactly the five GD-24
+collections); no clock (AST assertion, hits `[]`; grep: 0 `datetime.now` /
+`time.time` / `utcnow`); snapshot back-fill never an error (the live-run fixture
+has no `workflows/` dir — the miss is counted, the run doc is still built from
+the first journal `started`, nothing fabricated); `agentCount` →
+`harnessTotals.nodeCount`, display-only, neither name at top level; tokens as
+upserted docs (see R-50). Persisted-output regex fires on the real spill
+pointers and not on the 12 real false-positive files; containment is realpath-
+rooted (symlink escape, same-named `tool-results/` outside the root, bare
+relative pointer, wrong depth, and `..` all refused; both sides resolved; the
+un-rooted case counted as a *different* fact from an escape) — the attempt-1 M1.
+The `tool-results/` scan is keyed `(sessionId, basename)`, an unpointed spill
+stays `linkedToolUseId: None`, and an absent directory is not an exception.
+
+**R-49.** Run doc from the FIRST journal `started`; ordinal = 0-based count of
+preceding `started` with the same key, asserted verbatim against R-49's
+acceptance on `wf_455b348c-e17` (9 nodes, 6 keys, ordinals `0,0,0,0,0,0,1,1,1`);
+`journalSeq` = physical line; no DB counter. Launch `toolUseResult` persisted on
+`runs` under `launch{}` (taskId / transcriptDir / scriptPath / workflowName) as
+the session→run join and run-level stop handle, disjoint from the snapshot's
+fields so arrival order cannot decide the document. Results attach by `agentId`
+with an oldest-un-resulted fallback and counted no-match cases (both
+&quot;agentId unknown&quot; and the new &quot;no key&quot;). No `state` on any node (GD-23).
+
+**R-50.** `_id = message.id` via `refs.usage_key`; update uses exactly
+`$setOnInsert` / `$max` / `$min`, four token fields under `$max`, ids immutable;
+no `$inc` in the module. `mongo_store.validate_update` refuses a `$set` on `out`
+— structural, demonstrated. Rollups are `$group`/`$sum` over absolute documents,
+grouping keys restricted to the three indexed fields, and the harness's own
+`totalTokens` (1089990) is explicitly shown *not* to be substituted.
+
+**Non-tautology.** Assertions are measurements recomputed from the frozen bytes
+with negative arms: 1157/30 bucket split, an 877765-byte line stored whole,
+667 observations → 328 message ids (naive vs deduped over-count 1.95× on
+`cached`), 12 false-positive spill files, 4 foreign slug directories excluded,
+order-independence as a fingerprint over 1765 operations *plus* equal counts
+(the half that catches a silent collapse), the rebuild seam (`path=None`)
+reproducing the direct walk record-for-record (1090), and a read memo
+invalidated by a same-size rewrite via `(dev, ino, size, mtime)`. No check
+compares a value to itself or restates a module constant.
+
+## 4. Failures
+
+None. No new failure, no baseline regression, no skip concealing a defect.
+
+## 5. Verdict
+
+**PASS** — targeted suites green (33 + 12 test functions, 250 checks),
+full suite 17/17 green, bare-checkout no-driver arm 13/13 green, live-mongod
+arm executed and green, ownership boundary clean, all owned items present and
+behaviorally asserted, and every attempt-1 critique nit (n1/n2/n3) plus the B1
+scope finding visibly addressed in code and covered by a test.
+</pre></details>
+<details><summary>Critique findings — sp-ingest-pipelines-critique-attempt-2.md</summary><pre># sp-ingest-pipelines — adversarial critique, attempt 2
+
+**Verdict: REJECTED.** 2 blockers, 1 major, 3 minors, 2 nits.
+
+**depth: in-scope** — both blockers are fixable inside
+`aggregator/ingest.py` + `tests/test_ingest.py` + `tests/test_usage.py` with the
+operator vocabulary `mongo_store` already exposes (I verified `$min` on
+`usage.sessionId` and on `runs.launch` both pass `ms.validate_update`, so no
+sp-05 file has to be touched). No architectural rework, no missing research.
+
+**critical_defect: false** — the defect is one wrong operator choice on two
+fields of two documents, not a wrong model. Nothing downstream is built on the
+broken behaviour: `mirror.py` drives whatever ops the mapper returns, and the
+sp-14 acceptance that would catch this has not been written yet.
+
+Reviewed: full content of the three owned files (untracked tree ⇒ full-file
+review, `git diff` is empty for them), against sp-08 in
+`touch-mongo-live-subplans.md`, R-26/R-47/R-49/R-50 + GD-21…GD-30 in
+`touch-mongo-live-plan.md`, R-26 in `touch-full-recon-plan.md`, and the
+attempt-1 critique.
+
+---
+
+## Attempt-1 findings: disposition (all independently re-checked)
+
+| # | attempt-1 finding | status |
+|---|---|---|
+| B1 | `--backfill` per-path arm unscoped | **FIXED, properly.** `_in_scope` (`ingest.py:2168`) + `_scope_anchor` (`:2147`) apply the rooted `sessions.scoped_dirs` test to the transcript arm (`:2223`), the journal arm (`:2252`) and the launch arm (`:2261`). I re-ran my attempt-1 reproduction: a foreign-slug-only root now yields `{}` observations through `mirror.iter_backfill_observations`, and the new `test_backfill_and_rebuild_see_exactly_the_same_files` asserts the *stronger* property (same counts **and** same bytes), which is R-55 stated as a seam property. |
+| M1 | `spill_containment` not realpath-contained | **FIXED, properly.** `:553-590` is root-anchored, realpath-resolves both sides, and pins the exact 5-component shape. The replacement test (`test_containment_is_rooted_and_resolved_not_a_directory_name`) covers symlink escape, same-named dir outside the root, bare relative, wrong depth inside the root, `..`, and the symlinked-root positive. `unrooted_spill` is its own counter, distinct from `uncontained_spill`. This is a better fix than the one I proposed. |
+| m1 | `runs` contested scalars via `$set` | **PARTLY fixed — and the residue is now blocker B2 below.** Namespacing launch under `launch{}` closes launch-vs-snapshot. It does not close launch-vs-**launch**, and the real corpus has that shape. |
+| m2 | `tsRaw` re-derived | FIXED (`_record_ts` → `(ts, raw, error)` at `:1168`, `_ts_pair` at `:1832`). |
+| m3 | conflict counter had no runtime path | Partly fixed: `skipped[&quot;usage_agent_conflict&quot;]` (`:1152`) gives the within-file agentId case a runtime path, and the cross-file gap is a written handoff (`:109-113`). See minor **m3'** — the counter still watches the wrong field for the conflict that actually exists on disk. |
+| m4 | `link_spills` keyed on basename | FIXED (`:1243-1270`, `(session_id, basename)`, unknown session links nothing). |
+| m5 | rebuild re-reads the corpus | FIXED (`_transcript_walk`/`_RUN_WALK` at `:2207`/`:2265`, keyed on every file's `(dev, ino, size, mtime_ns)`); the new test asserts 8 reads over 8 files. |
+| m6 | unratified `stream_meta` deviation | FIXED as documentation (`:66-79`, names the exact GD-24 amendment needed). |
+| n1 | skip-then-assert | FIXED (`note()` helper, `tests/test_ingest.py:121`). |
+| n2 | absolute `source_path` in `_launch_scan` | FIXED (`:2308`, `_rel`). |
+| n3 | keyless journal `result` uncounted | FIXED (`unmatched_result`). |
+
+I also re-verified the gate's own claims rather than trusting them:
+`tests/test_ingest.py` rc=0, `tests/test_usage.py` rc=0, `tests/run_all.sh`
+**17/17 green in 48 s**, only the `TOUCH_MONGO_URI` arm skipping. `ingest.py`
+imports exactly `datetime, glob, json, os, re, dataclasses, __future__` plus
+three sibling aggregator modules — no driver name (GD-21). Zero
+`deleteOne|deleteMany|drop(|$unset|$inc|expireAfterSeconds` (GD-26), zero
+`now(|time.time|utcnow|ingestedAt` outside prose (R-26 amendment 3).
+
+---
+
+## BLOCKERS
+
+### B1 — `usage.sessionId` is written with `$setOnInsert`, but a `message.id` *does* span sessions on the live corpus: GD-25's acceptance property fails, reproduced
+
+`aggregator/ingest.py:1927` (`map_usage`, `on_insert = {&quot;sessionId&quot;: obs.session_id, …}`).
+
+R-50's `$setOnInsert:{agentId, sessionId, runId}` is justified by &quot;a `message.id`
+never spans **agents**&quot;. That is true. It says nothing about sessions, and
+`$setOnInsert` makes the *whole* payload first-writer-wins. `_split_ops`'
+docstring (`:1803-1806`) states the governing rule itself: &quot;`$setOnInsert` is the
+one operator whose payload must not vary&quot;.
+
+It varies. Probed over the **in-scope** transcript set (144 files, exactly what
+`--rebuild` ingests — not the whole of `projects/`):
+
+```
+in-scope usage observations: 9153, distinct message ids: 4607
+$setOnInsert-varying message ids: 3
+  msg_011CdPtgjqzpmL4ti1bM5hE3  agent a28ddb3df3b1cf1dc  run wf_1a3ffcdd-c60
+       sessionId 0ff58ac5-…f858   and   7e7386b8-…6887
+  msg_011CdPvNu28Y2AsGMDWDuuWq  agent a2d7dd6be1461c53d  run wf_1a3ffcdd-c60
+       sessionId 2c59e5dc-…9a84fb  and   500eaa77-…f858
+  msg_011CdPkATis92oV22Av58M5s  agent a45a5c78def2f3576  run wf_1a3ffcdd-c60
+       sessionId 5a868514-…7b1d6   and   e8ea27a3-…b3b068f2e
+```
+
+The two sources of each pair are two fragments of **one agent** under **two
+session directories** — `…/&lt;sessionA&gt;/subagents/workflows/wf_1a3ffcdd-c60/agent-a28ddb3df3b1cf1dc.jsonl`
+and `…/&lt;sessionB&gt;/…/agent-a28ddb3df3b1cf1dc.jsonl`. That is not an anomaly: it is
+the documented `/clear`-mid-run topology this very module builds
+`find_run_dirs` (`:1363`) for, and MONGOSCHEMA-9's &quot;two `a2fc883c` files are
+disjoint continuations&quot; shape. `usage.sessionId` is simply not a function of
+`message.id`.
+
+Driven end-to-end through the real mapper and `mongo_store`'s own upsert model
+(the same model the tests use), over all five sources on the in-scope corpus:
+
+```
+counts {'records': 15390, 'run_nodes': 108, 'runs': 7, 'stream_meta': 1008, 'usage': 4612}
+fingerprint normal == reversed : False
+fingerprint normal == shuffled : False
+  records:     reversed-diff 0
+  stream_meta: reversed-diff 0
+  run_nodes:   reversed-diff 0
+  usage:       reversed-diff 3   (sessionId flips)
+```
+
+This is **GD-25's named acceptance property** (R-44: &quot;fingerprint over all
+documents sorted by `_id` is identical on every pass&quot;), failing on real data
+today. It also breaks R-55's wipe/rebuild equivalence in the way that actually
+matters in production: a live tail applies usage observations in file-arrival
+order, a `--rebuild` applies them in sorted-path order, so the same installation
+stores two different documents depending on how it got there. And nothing
+notices — `usage_conflicts` (`:1719`) and `skipped[&quot;usage_agent_conflict&quot;]`
+(`:1152`) both watch `agentId`, which agrees in all three cases.
+
+**Fix (in-scope, no sp-05 change).** Take `sessionId` out of `$setOnInsert` and
+give it an order-free operator. I verified `ms.validate_update({&quot;$min&quot;:
+{&quot;sessionId&quot;: …}}, &quot;usage&quot;, _id=…)` is accepted, so the one-line version is:
+
+```python
+on_insert = {&quot;provenance&quot;: PROVENANCE}          # agentId/runId may stay here
+if obs.agent_id is not None: on_insert[&quot;agentId&quot;] = obs.agent_id
+if obs.run_id  is not None: on_insert[&quot;runId&quot;]  = obs.run_id
+ops = [ms.op_set_on_insert(on_insert), ms.op_max(tokens),
+       ms.op_min({&quot;sessionId&quot;: obs.session_id})]   # deterministic: BSON string min
+```
+
+and say in the docstring *why* `sessionId` is `$min` and not `$setOnInsert`
+(an agent's fragments span sessions; the earliest-sorting id is an arbitrary but
+**order-free** choice). If you would rather keep the full set, the honest shape
+is `$addToSet: {sessionIds: …}` — but that needs `sessionIds` added to
+`SPECS[&quot;usage&quot;].set_fields` in `mongo_store.py` so `fingerprint` sorts it, and
+that file is sp-05's; record it as a handoff instead of reaching across.
+
+Either way, count the divergence: extend `usage_conflicts` to return
+per-message-id conflicts for `sessionId` and `runId` as well as `agentId` (the
+function already has the whole stream), and note in the module docstring that
+`sessionId` divergence is *expected* while `agentId` divergence is an anomaly.
+
+**Test to add** (`tests/test_usage.py`): two `UsageObservation`s with the same
+`message_id`, same `agent_id`, **different** `session_id` — assert
+`state_of([a, b])` and `state_of([b, a])` fingerprint identically. Then assert
+it on the real shape: the corpus arm must stop being fixture-only (see M2).
+
+---
+
+### B2 — `runs.launch` is `$set` from *two* launch records of one `runId` on the live corpus, so the stored `launch.taskId` — amended GD-8's run-level stop handle — is chosen by walk order
+
+`aggregator/ingest.py:1979-1981` (`map_run`), `:2278-2309` (`_launch_scan`).
+
+`map_run`'s docstring now *asserts* the property the m1 fix was supposed to
+establish (`:1958-1961`):
+
+&gt; So the launch's copy lands under `launch{}` and the two sources write
+&gt; **disjoint field sets**: order cannot matter […]
+
+The two *sources* are disjoint. The `launch{}` field is not single-writer:
+`_launch_scan` emits one `RunObservation` **per launch record**, and a transcript
+can hold two launch records naming the same `runId`. One does, right now:
+
+```
+wf_455b348c-e17 — 2 launch records, both in
+    ~/projects/-home-laniakea-Projects-touch/e423cd3c-…9b4ac.jsonl
+    taskId wzd027fky   status async_launched
+    taskId wgm4nvzgk   status async_launched
+```
+
+Through the real pipeline over the in-scope corpus (same probe as B1):
+
+```
+  runs: reversed-diff 1
+      wf_455b348c-e17  launch.taskId  'wgm4nvzgk'  (normal)
+                                      'wzd027fky'  (reversed)
+```
+
+Consequences, in order of seriousness:
+
+1. **Amended GD-8 / CONVO-12.** `launch.taskId` is *the* run-level stop handle
+   and the only deterministic main-session→run join. Touch will offer a &quot;stop
+   this run&quot; control whose target depends on which order the walk read two lines
+   of one file. One of the two ids is wrong, and nothing records that a second
+   one was ever seen.
+2. **GD-25 by construction**, the same rule B1 breaks — and this one is the very
+   rule the m1 fix was written to satisfy, so the file now carries a docstring
+   claim contradicted by its own corpus. That is worse than the original `$set`,
+   which at least did not promise anything.
+3. `_launch_scan`'s docstring (&quot;Several launches in one file is normal … the
+   first is the scan's `run` and the rest are its `extra_runs`&quot;) reads as though
+   the multi-launch case were handled. It handles *several runIds*, not *several
+   launches of one runId*.
+
+**Fix (in-scope, no sp-05 change).** Make the field order-free. Two workable
+shapes, both accepted by `ms.validate_update` (I checked):
+
+* `ms.op_min({&quot;launch&quot;: {...}})` — deterministic under BSON document
+  comparison because `_launch_scan` builds the sub-document with a fixed field
+  order; cheapest, but silently keeps one of two real taskIds; or
+* better, keep `launch` for the min and additionally emit
+  `$addToSet: {launchTaskIds: [...]}` so the second handle is not *lost* — a
+  run that was launched twice is a fact the stop control needs. (`launchTaskIds`
+  would want a `set_fields` entry in `mongo_store.py` for the fingerprint sort;
+  if you would rather not reach into sp-05's file, use `$min` alone and write
+  the `set_fields` request into this sub-plan's handoff.)
+
+Whichever you pick, add a counter (`skipped[&quot;duplicate_launch&quot;]` or similar) and
+delete the &quot;order cannot matter&quot; sentence unless the code makes it true.
+
+**Test to change** (`tests/test_ingest.py:913`,
+`test_the_runs_document_is_order_independent_across_its_two_sources`): it tests
+launch-vs-snapshot only. Add a launch-vs-launch arm with two *disagreeing*
+`taskId`s for one `runId` — the exact `wf_455b348c-e17` pair, since it is real —
+and assert the two orders fingerprint identically. Do the same in the live-mongod
+arm at `tests/test_ingest.py:1505`, which today also only contradicts a snapshot.
+
+---
+
+## MAJOR
+
+### M2 — the GD-25 acceptance tests run on a corpus that *structurally cannot* contain either failing shape, so both blockers were invisible to a green suite
+
+`tests/test_ingest.py:1152` (`test_the_algebra_is_order_independent`),
+`tests/test_usage.py:214` (`test_shuffled_and_reversed_ingest_give_identical_totals`).
+
+Both build their observation set from **one** run fixture
+(`RUN`/`-fixture` + `RUN_ID`) under **one** session directory. The two shapes
+that break the property both require *two session directories*:
+
+* B1 needs one agentId's fragments split across two sessions (`/clear` mid-run);
+* B2 needs two launch records for one runId.
+
+So the suite's strongest assertion — &quot;normal / reversed / shuffled ingest
+fingerprint IDENTICALLY (GD-25's acceptance property)&quot; — is true of the fixture
+and false of the machine it runs on, and reports green. That is not a missing
+edge case; it is the acceptance test for the sub-plan's central invariant
+measuring something narrower than the invariant.
+
+Note the fixtures are sp-02's and are frozen — **do not** go add fixture files.
+The in-scope fix is to build the adversarial shapes *in the test*, which both
+suites already do comfortably elsewhere (`linked_root`, hand-built
+`UsageObservation`s, `read_launch` from a literal dict):
+
+1. a two-session `linked_root` where the same `agent-&lt;id&gt;.jsonl` basename
+   appears under two session dirs carrying one shared `message.id`;
+2. the two-launch record pair above;
+3. keep the existing fixture arm as the regression floor.
+
+Optionally add a third arm that is a *property* rather than a fixture: assert
+that for every emitted op, `$setOnInsert`'s payload is deep-equal across all ops
+sharing a `(collection, _id)`. That single assertion would have caught B1 on any
+corpus, and it is ~6 lines.
+
+---
+
+## MINOR
+
+### m1' — `find_snapshot` and `find_run_dirs` glob `&lt;root&gt;/projects/*/*/…`, the one pattern R-25-as-amended names as forbidden
+
+`aggregator/ingest.py:1349-1360` and `:1363-1376`.
+
+`_in_scope` now fences the *entry* points, and correctly. These two lookups
+re-open the fence from inside: both glob every slug directory under
+`&lt;root&gt;/projects`, and their results feed `runs.sessionIds` (`$addToSet`) and
+node `startedAt`/`endedAt` (`read_run:1426-1446`). A foreign project that
+happens to hold a directory of the same `wf_&lt;12hex&gt;` runId contributes its
+sessionIds and its transcripts' timestamps to *this* project's run document.
+
+R-26 does justify the *snapshot* glob explicitly (&quot;the snapshot lands under
+whichever session was current when the run ended&quot;), and a runId collision across
+projects is implausible, which is why this is minor and not a blocker. But the
+scope rule is stated absolutely and the mitigation is currently &quot;runIds are
+unique enough&quot;.
+
+**Fix.** Intersect both glob results with
+`sess.scoped_dirs(sess.project_cwd(cwd, env), root)` — the anchor is already
+computable with `_scope_anchor`. If you deliberately keep the snapshot glob
+unscoped (R-26's clause), say so in the docstring in one line and scope
+`find_run_dirs`, which has no such clause. Test: a foreign slug holding the same
+runId contributes no sessionId and no node time.
+
+### m3' — the conflict counter watches the one identity field that never diverges
+
+`aggregator/ingest.py:1149-1154`, `:1719` (`usage_conflicts`).
+
+Follow-on from B1, recorded separately because it survives whatever operator you
+pick: on the live in-scope corpus `agentId` conflicts = **0** and `sessionId`
+conflicts = **3**. The counter that exists never fires; the divergence that
+happens is uncounted. `tests/test_usage.py:316` even asserts
+`usage_conflicts(real) == {}` as evidence that &quot;the invariant holds on the frozen
+bytes&quot; — which is true of the frozen bytes and misleading as a claim about the
+invariant.
+
+**Fix.** Return conflicts per field (`{message_id: {&quot;sessionId&quot;: (a, b)}}`), keep
+the agentId arm as the anomaly and label the sessionId arm as expected-and-benign
+once B1's operator makes it harmless. Update the docstring's &quot;A `message.id`
+never spans agents&quot; paragraph (`:104-113`) to add the sentence it is missing:
+*and it does span sessions.*
+
+### m4' — `read_run` merges other sessions' agent transcripts for node times but the run's `_id`-level fields still come from one journal only
+
+`aggregator/ingest.py:1394-1487`.
+
+Not a defect today (I verified: 6 journals, 6 distinct runIds, no runId has two
+journals, so `runs` has exactly one journal writer). Recording it because the
+docstring at `:1406-1411` explains why only `run_dir`'s own journal is read
+(GD-7's ordinal is per-journal) without noting the consequence: **if** a second
+`journal.jsonl` for one runId ever appears, `status`/`summary`/`phases` go back
+to two `$set` writers and B2 recurs on a different field. One sentence in the
+docstring naming that as the invariant being relied on (&quot;exactly one journal per
+runId; two would reintroduce the two-writer `$set` hazard&quot;) would make the next
+reader check it.
+
+---
+
+## NITS
+
+### n1' — `map_run`'s docstring makes a claim the code does not enforce
+
+`aggregator/ingest.py:1958-1961`. Covered by B2, called out separately because
+the sentence should be *deleted or made true* rather than softened: an in-file
+assertion of an invariant is load-bearing documentation, and this one is now
+falsified by the corpus in the same repo.
+
+### n2' — `_launch_scan`'s &quot;invariant this function must not break&quot; paragraph names the wrong invariant
+
+`aggregator/ingest.py:2286-2294`. It says the danger is *promoting a field to the
+top level*. The danger that actually materialised is *two launches writing the
+same namespaced field*. Both are true; only one is written down.
+
+---
+
+## Checklist disposition
+
+| item | verdict |
+|---|---|
+| GD-21 dependency policy | PASS — imports are `datetime/glob/json/os/re/dataclasses` + 3 siblings; no driver name; module imports on bare stdlib |
+| GD-22 Mongo off the liveness path | PASS — no client, no DB I/O in this module at all |
+| GD-24 string `_id`s via `ref_key` only | PASS — all five keys via `refs.*_key`; no sub-document `_id`; `test_every_id_comes_from_refs` re-parses every one |
+| GD-25 upsert algebra | **FAIL — B1 (`usage.sessionId` `$setOnInsert`) and B2 (`runs.launch` `$set`), both reproduced on the live in-scope corpus**; no `$inc`, deltas wire-only, `$max`/`$min`/`$addToSet` correct elsewhere |
+| GD-26 no delete verbs / no TTL | PASS — zero `deleteOne\|deleteMany\|drop(\|$unset\|expireAfterSeconds` |
+| GD-27 security | PASS — containment predicate now realpath-rooted (attempt-1 M1 fixed); no credential anywhere |
+| GD-28 provenance | PASS — `PROVENANCE=&quot;harness&quot;` under `$setOnInsert` on every op, asserted |
+| GD-29 no agent holds a client | PASS |
+| GD-30 latency budget | PASS — walk memos make a rebuild read each file once (8 reads / 8 files, asserted) |
+| GD-15 one file one owner | PASS — `_only_ours` wall intact; mtimes show only the three owned files touched (ingest.py 05:53, test_usage.py 06:01, test_ingest.py 06:04) |
+| R-26 six amendments | PASS |
+| R-47 bucket table | PASS (the `stream_meta` deviation is now documented as a deviation with the exact GD-24 amendment it needs) |
+| R-49 runs/run_nodes | PASS on ordinals/journalSeq/back-fill/no-state; **B2** on the launch join |
+| R-50 usage | **B1** on `$setOnInsert`; **m3'** on the counter; `$max` algebra and rollups correct |
+| R-25-amended project scope | PASS on the entry seams (attempt-1 B1 fixed and strengthened); **m1'** on the two internal globs |
+| scope of edits | PASS |
+| tests real, skip cleanly | Mostly PASS — behavioral, recount-from-bytes, strong negative arms, live-mongod arm skips cleanly; **M2** on the acceptance corpus |
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

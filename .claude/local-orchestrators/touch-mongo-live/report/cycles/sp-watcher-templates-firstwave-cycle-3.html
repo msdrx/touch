@@ -1,0 +1,262 @@
+<title>sp-watcher-templates-firstwave — cycle 3</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-watcher-templates-firstwave — implement→test→critique, attempt 3/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 3 addresses every finding in critique attempt 2 (attempt 2's test gate had PASSED; attempt-1 F1/F2/F3 were verified still fixed).
+
+M1 — self-exit no longer fires on the watcher's own inference. `terminal_complete_seen()` is gone; `stream_terminal_close()` gained a `writer` filter and the exit site now calls the new `exit_authorized(EVENTS, events_baseline)`, which requires a `w:&quot;agent&quot;` `orchestrator complete done|failed` line appended after the startup baseline (i.e. the templates' `closeRun`). `state[&quot;run_complete&quot;]` remains the badge only. Falsifiability proved out-of-tree: the same fixture makes a mutated copy (exit also on `run_complete`) exit rc 0 while the shipped module closes the badge and stays alive (rc 124); the suite arm asserts exactly that plus &quot;the post-close spawn is still monitored&quot;.
+
+m2 — killed runs no longer orphan a watcher: new `transcript_idle_for()`/`abandoned_agents()` close never-resulted agents `stale` after `ORCH_ABANDON_QUIET_SECS` (default 10x the exit window) of journal AND transcript silence, and `abandoned_exit()` then stops the watcher with a distinct &quot;run abandoned&quot; message. `ORCH_NO_SELF_EXIT` disables both routes. The critique's third clause (&quot;require no promised next stage&quot;) is deliberately not implemented — it would make this branch unreachable for the only case it exists for; reason recorded in the docstring.
+
+M2 — caps/strategy are re-read while running: `config_path()`/`apply_caps()`/`refresh_caps()` re-parse `orch-config.json` on mtime change, emit `config reloaded: …`, report reload warnings immediately and trim the queue. A subprocess arm publishes a config after the watcher starts and asserts the reload; a unit arm asserts `describe_result` then narrates `re-gate 2/7` instead of the built-in 2. Both templates' comments now name `close_state_for()` as what prevents the fabricated badge (guarded: the old &quot;what stops a fabricated&quot; claim must be absent).
+
+m1 — the implement template publishes `strategy: 'sequential'`, never the legacy `serial` opt-in; the retained legacy sequenced close now writes `serial advance -&gt; &lt;plan&gt;` so a new run cannot collide with SD-4's historic `loop exited -&gt;` re-label signature (guards on both).
+
+m3 — the `closeRun` epilogue verifies `/proc/&lt;pid&gt;/cmdline` contains `decision_watcher` before signalling, unlinks a provably stale pid file, skips when unverifiable, and `monitoring.md`'s run block now documents the launch-side `echo $! &gt; &quot;$TASK/watcher.pid&quot;` half so the guard covers a real mechanism.
+
+m4 — `monitoring.md` documents the agent block's `shortId`/`identity`/`flags`/`unconventional`, pins identity to the full 17-hex `id`, and records the mixed-width `monitor.html` double-row as a carried consequence. Also corrected the doc's stale &quot;a new sequenced plan starting closes the prior one&quot; promise.
+
+m5 — R-58 is now proved through the real `main()`: a subprocess arm runs the watcher over the frozen `tests/fixtures/run-wf_829e6f58` research run (6 researchers + synthesizer, two session dirs) asserting zero `failed` plan badges, no `loop exited -&gt;` detail, `research`/`synthesis` done + &quot;closed, no verdict&quot;, `orchestrator complete done`, six distinct stage chips and 17-hex ids. Plus an SD-4 fold over the frozen `tests/fixtures/legacy/*-events.jsonl` (failed-then-done ⇒ `done`, with the genuine-failure control).
+
+n1–n4 — `runStatus` uses `spawnSync` and logs status.sh's stderr (with a one-time emitter probe log); `publishConfig` mkdirs before reading; `run_watcher` polls for exit/conditions instead of sleeping fixed windows (suite back to ~29 s despite six new subprocess arms); `stream_terminal_close`'s docstring notes the `plan queued` seed-line case.
+
+Suites: all four monitoring suites plus `tests/test_bootstrap.py` and `tests/test_fixtures.py` green, zero skips, no pymongo/mongod needed (`SUITE rc=0`). `status.sh`, `monitor_server.py` and `test_server.py` carry attempts 1–2 work unchanged. `git status` shows only the nine owned files (plus this task's `events.jsonl`); the `.gitignore` hunk and untracked `tests/`, `.temp-develop/` are other sub-plans' residue, untouched. No commits made.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Full suite rc=0: 4/4 monitoring suites (test_watcher, test_shell, test_server 21 tests, test_frontend) plus baseline tests/test_bootstrap.py and tests/test_fixtures.py all green, with no services running and no third-party packages (no pymongo reference anywhere in the owned files). All attempt-2 critique findings closed with falsifiable assertions: m4 (monitoring.md now documents shortId/identity/flags/unconventional plus the &quot;identity is the full 17-hex id&quot; rule and the monitor.html double-row carried consequence), m5 (new subprocess arm drives the REAL decision_watcher main() over the frozen wf_829e6f58 journal -&gt; zero failed plan badges, research+synthesis close done, &quot;closed, no verdict&quot;; third affected stream touch-aggregator-events.jsonl now covered via the re-label-predicate handshake; frozen legacy event streams folded with SD-4 last-event-wins in file order, with the fabricated line asserted present and touch-repo-recon as negative control), n1 (spawnSync captures and logs status.sh stderr, statically guarded), n2 (mkdirSync before readFileSync). Ownership clean: exactly the nine owned files modified, test_frontend.py untouched, no commits (HEAD still sp-01's C2); the only other dirty paths are this task's own events.jsonl and the pre-existing 3-line comment-only .gitignore hunk from attempt 1. One open non-blocking nit: test_watcher.py wall-clock is ~29 s due to fixed sleep windows (n3) — suggest polling for child exit instead.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--muted)"><div class="role">critique</div><div class="verdict" style="color:var(--muted)">○ NOT RUN</div><div class="sum"></div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 4/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 3 addresses every finding in critique attempt 2 (attempt 2's test gate had PASSED; attempt-1 F1/F2/F3 were verified still fixed).
+
+M1 — self-exit no longer fires on the watcher's own inference. `terminal_complete_seen()` is gone; `stream_terminal_close()` gained a `writer` filter and the exit site now calls the new `exit_authorized(EVENTS, events_baseline)`, which requires a `w:&quot;agent&quot;` `orchestrator complete done|failed` line appended after the startup baseline (i.e. the templates' `closeRun`). `state[&quot;run_complete&quot;]` remains the badge only. Falsifiability proved out-of-tree: the same fixture makes a mutated copy (exit also on `run_complete`) exit rc 0 while the shipped module closes the badge and stays alive (rc 124); the suite arm asserts exactly that plus &quot;the post-close spawn is still monitored&quot;.
+
+m2 — killed runs no longer orphan a watcher: new `transcript_idle_for()`/`abandoned_agents()` close never-resulted agents `stale` after `ORCH_ABANDON_QUIET_SECS` (default 10x the exit window) of journal AND transcript silence, and `abandoned_exit()` then stops the watcher with a distinct &quot;run abandoned&quot; message. `ORCH_NO_SELF_EXIT` disables both routes. The critique's third clause (&quot;require no promised next stage&quot;) is deliberately not implemented — it would make this branch unreachable for the only case it exists for; reason recorded in the docstring.
+
+M2 — caps/strategy are re-read while running: `config_path()`/`apply_caps()`/`refresh_caps()` re-parse `orch-config.json` on mtime change, emit `config reloaded: …`, report reload warnings immediately and trim the queue. A subprocess arm publishes a config after the watcher starts and asserts the reload; a unit arm asserts `describe_result` then narrates `re-gate 2/7` instead of the built-in 2. Both templates' comments now name `close_state_for()` as what prevents the fabricated badge (guarded: the old &quot;what stops a fabricated&quot; claim must be absent).
+
+m1 — the implement template publishes `strategy: 'sequential'`, never the legacy `serial` opt-in; the retained legacy sequenced close now writes `serial advance -&gt; &lt;plan&gt;` so a new run cannot collide with SD-4's historic `loop exited -&gt;` re-label signature (guards on both).
+
+m3 — the `closeRun` epilogue verifies `/proc/&lt;pid&gt;/cmdline` contains `decision_watcher` before signalling, unlinks a provably stale pid file, skips when unverifiable, and `monitoring.md`'s run block now documents the launch-side `echo $! &gt; &quot;$TASK/watcher.pid&quot;` half so the guard covers a real mechanism.
+
+m4 — `monitoring.md` documents the agent block's `shortId`/`identity`/`flags`/`unconventional`, pins identity to the full 17-hex `id`, and records the mixed-width `monitor.html` double-row as a carried consequence. Also corrected the doc's stale &quot;a new sequenced plan starting closes the prior one&quot; promise.
+
+m5 — R-58 is now proved through the real `main()`: a subprocess arm runs the watcher over the frozen `tests/fixtures/run-wf_829e6f58` research run (6 researchers + synthesizer, two session dirs) asserting zero `failed` plan badges, no `loop exited -&gt;` detail, `research`/`synthesis` done + &quot;closed, no verdict&quot;, `orchestrator complete done`, six distinct stage chips and 17-hex ids. Plus an SD-4 fold over the frozen `tests/fixtures/legacy/*-events.jsonl` (failed-then-done ⇒ `done`, with the genuine-failure control).
+
+n1–n4 — `runStatus` uses `spawnSync` and logs status.sh's stderr (with a one-time emitter probe log); `publishConfig` mkdirs before reading; `run_watcher` polls for exit/conditions instead of sleeping fixed windows (suite back to ~29 s despite six new subprocess arms); `stream_terminal_close`'s docstring notes the `plan queued` seed-line case.
+
+Suites: all four monitoring suites plus `tests/test_bootstrap.py` and `tests/test_fixtures.py` green, zero skips, no pymongo/mongod needed (`SUITE rc=0`). `status.sh`, `monitor_server.py` and `test_server.py` carry attempts 1–2 work unchanged. `git status` shows only the nine owned files (plus this task's `events.jsonl`); the `.gitignore` hunk and untracked `tests/`, `.temp-develop/` are other sub-plans' residue, untouched. No commits made.</li><li>Test gate PASSED: PASS. Full suite rc=0: 4/4 monitoring suites (test_watcher, test_shell, test_server 21 tests, test_frontend) plus baseline tests/test_bootstrap.py and tests/test_fixtures.py all green, with no services running and no third-party packages (no pymongo reference anywhere in the owned files). All attempt-2 critique findings closed with falsifiable assertions: m4 (monitoring.md now documents shortId/identity/flags/unconventional plus the &quot;identity is the full 17-hex id&quot; rule and the monitor.html double-row carried consequence), m5 (new subprocess arm drives the REAL decision_watcher main() over the frozen wf_829e6f58 journal -&gt; zero failed plan badges, research+synthesis close done, &quot;closed, no verdict&quot;; third affected stream touch-aggregator-events.jsonl now covered via the re-label-predicate handshake; frozen legacy event streams folded with SD-4 last-event-wins in file order, with the fabricated line asserted present and touch-repo-recon as negative control), n1 (spawnSync captures and logs status.sh stderr, statically guarded), n2 (mkdirSync before readFileSync). Ownership clean: exactly the nine owned files modified, test_frontend.py untouched, no commits (HEAD still sp-01's C2); the only other dirty paths are this task's own events.jsonl and the pre-existing 3-line comment-only .gitignore hunk from attempt 1. One open non-blocking nit: test_watcher.py wall-clock is ~29 s due to fixed sleep windows (n3) — suggest polling for child exit instead.</li><li>Critique did not run.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-watcher-templates-firstwave-test-attempt-3.md</summary><pre># sp-watcher-templates-firstwave — TEST GATE, attempt 3
+
+**Verdict: PASS.** 4/4 monitoring suites green, 2/2 pre-existing repo suites
+green, full-suite `rc=0`, ownership clean, and every attempt-2 critique finding
+(m4, m5, n1, n2) is closed with falsifiable assertions. Only nit n3 (suite
+wall-clock) remains open — non-blocking.
+
+Read-only gate: no source or test file was edited, nothing was committed,
+nothing reverted or stashed.
+
+---
+
+## 1. Targeted suites (all owned test files, run from their own dir)
+
+```
+cd /home/laniakea/Projects/touch/.claude/shared/monitoring/tests
+python3 test_watcher.py    -&gt; rc 0   &quot;ALL WATCHER TESTS PASSED&quot;
+python3 test_shell.py      -&gt; rc 0   &quot;all sp-shell tests passed&quot;
+python3 test_server.py     -&gt; rc 0   &quot;all 21 tests passed&quot;
+python3 test_frontend.py   -&gt; rc 0   (not owned; run as regression)
+```
+
+## 2. Full-suite regression gate
+
+```
+cd /home/laniakea/Projects/touch
+for t in .claude/shared/monitoring/tests/test_*.py; do (cd $(dirname $t) &amp;&amp; python3 $(basename $t)); done
+for t in tests/test_*.py; do python3 &quot;$t&quot;; done
+```
+
+```
+PASS .claude/shared/monitoring/tests/test_frontend.py
+PASS .claude/shared/monitoring/tests/test_server.py
+PASS .claude/shared/monitoring/tests/test_shell.py
+PASS .claude/shared/monitoring/tests/test_watcher.py
+PASS tests/test_bootstrap.py        (sp-01, baseline)
+PASS tests/test_fixtures.py         (sp-02, baseline)
+SUITE_RC=0
+```
+
+Bare-checkout / no-services posture verified:
+
+- `grep -rn pymongo .claude/shared/monitoring/ .claude/skills/` -&gt; **no hits**.
+  Nothing in this sub-plan imports a third-party package, so the GD-21/R-56
+  no-mongod arm is vacuously satisfied here; no Mongo test arm exists in the
+  owned files to skip.
+- No daemon, port, or network dependency: the four subprocess arms in
+  `test_watcher.py` spawn `decision_watcher.py` against temp state dirs only.
+- Fixture dependence is guarded: every fixture-backed arm
+  (`WF_829`, `tests/fixtures/legacy/*.jsonl`, `_fixture()` in
+  `test_server.py`) tests `os.path.isfile` and prints `skip - …` instead of
+  failing, so the monitoring module stays usable outside this repo.
+
+Syntax/static sanity on all six changed files:
+`node --check` OK on both `*.workflow.js`; `ast.parse` OK on
+`decision_watcher.py` + `monitor_server.py`; `bash -n status.sh` OK.
+
+## 3. Item verification against the plans
+
+Checked `touch-mongo-live-subplans.md` §sp-03 against the tree. Every owned
+item is present and asserted by a behavioral (non-tautological) test:
+
+- **R-07 / R-08 / GD-10** — `close_state_for` / `close_detail` / `run_outcome`
+  with the verbatim predicate, `last_plan` heuristic gated on
+  `strategy==&quot;serial&quot;`, verdict-less closes labelled &quot;closed, no verdict&quot;.
+  Now additionally exercised *through the real `main()`* (see m5 below).
+- **R-09** — script-side `runStatus` + `publishConfig`; guarded statically in
+  `test_shell.py:330-400` for the terminal `plan done`, the variable-state
+  `runStatus('orchestrator','complete',state,…)`, `closeRun(state, summary)`
+  arity, and the absence of a hardcoded close state.
+- **R-10** — `flock`'d single-line append, 1 KB detail cap at both writers,
+  `PARSE_FAILURES` surfaced by `/health`
+  (`test_server.py::test_health_parse_failure_counter`).
+- **R-13** — stage-qualified labels, full 17-hex `id`, display-only `shortId`.
+  Asserted end-to-end: `len(chips)==6` distinct researcher chips,
+  `all(len(i)==17)`, `shortId == id[:8]` for every emitted agent block.
+- **R-39** — `w:&quot;agent&quot;` / `w:&quot;watcher&quot;` from both writers; five-key core shape
+  preserved; documented additively in `monitoring.md`.
+- **R-40** — `should_exit` (terminal complete AND quiet window), stale-complete
+  immunity, stays alive with no terminal complete, clean rc 0; epilogue kills by
+  recorded `watcher.pid` **verified against `/proc/${pid}/cmdline` before
+  `process.kill`**, no `pkill`, never touches the shared `monitor.pid`.
+- **R-58** — forward fix plus all three affected real streams, see below.
+- **R-01:guard / SD-3** — all eight `.gitignore` entries asserted verbatim, both
+  negative `git check-ignore` assertions, plus the positive checkpoint and
+  mongo-dump ones (`test_shell.py::test_gitignore`, 14 ok lines).
+
+Correctly out of scope and untouched: `monitor.html`, `test_frontend.py`, R-11,
+R-17's full doc refresh, R-14/R-15/R-18/R-19/R-21, and the CLAUDE.md/plan-file
+wording halves of R-40 (sp-15).
+
+### Attempt-2 critique findings — all closed
+
+- **m4 (agent-block schema drift + `monitor.html` re-key consequence)** — closed.
+  `monitoring.md:38` now shows the full agent block including `shortId`,
+  `identity`, `flags`, `unconventional`; `:45-46` document each key and state
+  the normative rule *&quot;Identity is `id`, and `id` is the FULL 17-hex agentId …
+  readers key rows on `id` and never on `shortId`&quot;*, plus the carried
+  double-row consequence for `monitor.html` and the `legacy:&lt;task&gt;:&lt;id8&gt;`
+  bridge. Guarded by two `test_shell.py` doc assertions.
+- **m5 (R-58 asserted only against a re-implementation of `main()`; 1 of 3
+  streams and the frozen event streams uncovered)** — closed on all three
+  counts:
+  - `test_watcher.py:1296-1352` adds the subprocess arm through the **real
+    `main()`** over `tests/fixtures/run-wf_829e6f58/.../wf_829e6f58-b2f`
+    (the journal that produced the historic fabricated badge): zero `failed`
+    plan events, no `loop exited -&gt;` detail anywhere, `research` and
+    `synthesis` both close `done`, the research close carries
+    &quot;closed, no verdict&quot;, and the run closes `orchestrator complete done`.
+    A regression *inside* `main()` now fails the gate, not just a string guard.
+  - Third stream covered: `test_server.py:354-380` folds
+    `touch-aggregator-events.jsonl` (whose `research plan failed
+    &quot;loop exited -&gt; synthesis&quot;` at line 571 has **no** corrective `done`) and
+    pins the handshake with the sp-09 re-labeler — every surviving
+    `stage=plan, state=failed` line starts with `loop exited -&gt;`. Verified
+    independently: the fixture does contain exactly that line.
+  - Frozen event streams are read: `fold_plan_states()` over
+    `tests/fixtures/legacy/touch-mongo-live-events.jsonl` and
+    `touch-full-recon-events.jsonl` asserts SD-4 last-event-wins in **file**
+    order (the corrective line's `ts` is deliberately earlier, so a ts sort
+    would resurrect the failure), and each arm also asserts the fabricated line
+    is genuinely present — so the test cannot pass on an empty/wrong fixture.
+    Negative control: `touch-repo-recon-events.jsonl` still folds to `failed`
+    and none of its details match the re-label predicate.
+- **n1 (`stdio:'ignore'` discarded status.sh's stderr)** — closed.
+  `runStatus` uses `spawnSync` with `encoding:'utf8'`, logs `r.stderr`, and a
+  one-shot `log('status emitter ready (node:child_process)')` probe makes an
+  import failure visible. Statically guarded (`no stdio:'ignore'`,
+  `r.stderr` + `log(` present) in both templates.
+- **n2 (`mkdirSync` after `readFileSync`)** — closed; `fs.mkdirSync(TASK,
+  {recursive:true})` now precedes the read in `publishConfig`.
+
+### Open, non-blocking
+
+- **n3 — suite wall-clock.** `test_watcher.py` still takes **~29 s**
+  (`real 0m29.288s`; `user 0m0.765s` — almost all of it is fixed
+  `wait=`/`sleep` windows in the five subprocess arms, now including the 90 s-cap
+  R-58 e2e arm). Not a failure and not attributable to a defect, but it is paid
+  on every gate for the rest of this pass. Suggested (out of this gate's scope,
+  and a test-only change): replace the fixed windows with a poll for the child's
+  exit and for the expected event line, e.g. loop on
+  `proc.poll() is not None and expected_line_present(state_dir)` with a short
+  sleep and the current value only as a hard timeout.
+- **n4 (docstring word about `plan queued` seed lines vs
+  `stream_terminal_close`)** — cosmetic; not verified as addressed and not
+  gate-relevant.
+
+## 4. Ownership check (`git status`)
+
+Modified, exactly the nine owned files:
+`decision_watcher.py`, `status.sh`, `monitor_server.py`, `monitoring.md`,
+`tests/test_shell.py`, `tests/test_watcher.py`, `tests/test_server.py`,
+`execute-research/templates/research.workflow.js`,
+`implement-plan/templates/implement.workflow.js`.
+`test_frontend.py` untouched, as required.
+
+Also dirty, neither new nor attributable to this sub-plan:
+
+- `.claude/local-orchestrators/touch-mongo-live/events.jsonl` — this task's own
+  monitoring stream (expected; the gate itself appends to it).
+- `.gitignore` — the same **3-line comment-only** hunk present since attempt 1
+  (it explains why `*.bson` is unanchored and references
+  `!tests/fixtures/**/*.bson`, i.e. sp-01/sp-02 residue landed after C1). No
+  rule was added, removed, or narrowed; `git diff --stat` = `1 file changed,
+  3 insertions(+)`, all comment lines. Correctly left alone.
+- Untracked: prior findings files under this task's `findings/`, `tests/`
+  (sp-01/sp-02 output), and one `.temp-develop/*.png`.
+
+No commits were made by this sub-plan (`HEAD` still `579446e orchestration
+history`, sp-01's C2). SD-6 respected.
+
+## 5. Conclusion
+
+**Gate PASSES.** Full suite `rc=0` on a bare-checkout posture with no services
+and no third-party packages; all attempt-2 majors and blocking nits closed with
+assertions that would fail if the fix were reverted; ownership clean. This
+satisfies the GD-23 hard precondition for every mirror write — sp-04 and later
+may proceed.
+</pre></details>
+
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

@@ -1,0 +1,476 @@
+<title>sp-server-api — cycle 4</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-server-api — implement→test→critique, attempt 4/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 4 addressed every open item from sp-server-api-critique-attempt-3 (attempts 1-2 findings were verified already fixed in the tree by attempt 3's audit and re-verified here), plus one contract lie found while working.
+
+M1 (late-stream truncation recorded but never published): `_emit_backfill` now emits a `{&quot;type&quot;:&quot;anchors&quot;,&quot;live&quot;:true,&quot;stream&quot;:…,&quot;oldest&quot;:…,&quot;truncated&quot;:…}` frame whenever it runs after the mode switch, immediately before the frames it describes. `mode` stays the ONE boundary; the contract table and a new clause document the anchors frame. Test `test_a_late_streams_truncation_is_published_not_just_recorded` drives the critique's probe verbatim (window=5, 60 records born after `switch()`) and asserts oldest==56 on a real frame.
+
+M2 (subscribe acked a rewind and replayed nothing): `subscribe` now returns the frames to send, ending with the ack. A pair behind the session's position re-delivers that range as `live:false` backfill via the new `_resume`, ending back at the delivered cursor; a pair at it is a no-op; a pair ahead of it is refused with the socket's real position; pairs outside the `?stream=` selection and malformed pairs are refused with reasons; the ack carries `rejected`/`backfilled`. `HttpServer.stream` sends the frames then the ack, under a new per-socket `asyncio.Lock` that also wraps hello→replay→switch and each tick so a subscribe cannot interleave with them.
+
+m1: `currentRun` is computed only over streams the store has observed, and `hello` publishes `streamsUnobserved` (the selector is still served — that is how a page waits for a run to start).
+m2: `tick()` is capped at the new `MAX_TICK_EVENTS` (5000) frames per stream per tick; the remainder is carried in `_carry` (not re-read, which would duplicate frames after a held token record) and drains on the next tick with no gap or duplicate; `session.capped` counts it.
+m3: a malformed `?from=` comes back raw as `fromRejected`, so &quot;not sent&quot;, &quot;unusable&quot; and &quot;unparseable&quot; are three distinguishable cases.
+n1: `/api/events`'s backwards page sets `cursor` to the OLDEST record (the next `before=`); a test walks the whole history by feeding it back.
+n2: the whole-file read per page is recorded in `h_events`' docstring with the condition under which to seek by byteOffset.
+n3: `pending_floor` skips seq-less held records instead of flooring them to 0 (which froze the cursor at -1).
+
+Also found and fixed: the normative frame table advertised a `{&quot;type&quot;:&quot;tick&quot;}` idle keepalive marker that no code ever sent (a browser cannot observe a WS pong). The keepalive now sends the ping AND that frame; `HttpServer` gained a `keepalive=` parameter so it is testable. And `subscribe` bounds a client-supplied seq to the cursor grammar's 12-digit ceiling (`MAX_SEQ`) and truncates the echoed reject (`MAX_REJECT_ECHO`), so an unbounded socket message cannot be mirrored back.
+
+Verification: `python3 tests/test_server_core.py` rc 0 (23 tests), `python3 tests/test_api.py` rc 0 (34 tests). The whole repo suite (20 files) and the four monitoring baselines are also rc 0 — the two failures previous gates recorded as pre-existing baseline (test_mirror.py, test_sessions.py) now pass and were not touched. No imports added (still stdlib + relative siblings, no pymongo/mirror), no commit, no file outside the three owned ones modified.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites green: tests/test_server_core.py rc 0 (23 tests, 176 assertions), tests/test_api.py rc 0 (35 tests, 204 assertions). Full suite 22 pass / 2 fail — test_mirror.py (3) and test_sessions.py (1), character-identical to the attempt-1/2/3 baseline, owned by sp-mirror-deploy and sp-sessions-arm (files untouched, mtimes hours before this attempt). No new failure. Bare-checkout arm green with pymongo shadowed by an ImportError stub; server.py imports stdlib + relative siblings only, no driver, no mirror import. Ownership clean: only aggregator/server.py, tests/test_api.py, tests/test_server_core.py modified in the attempt window; HEAD still 579446e, no commit. All five attempt-3 critique findings now have named behavioural (non-tautological) tests: late-stream anchors frame, subscribe rewind replay+ordered ack, streamsUnobserved/currentRun None, MAX_TICK_EVENTS tick cap with contiguous carry, malformed ?from= echoed on hello.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 2 majors, 2 minors, 3 nits. All five attempt-3 findings verified fixed by execution. New majors: (M1) a stream named by ?stream= or ?cursor= before it exists bypasses tick()'s late-stream backfill arm (gated on `stream not in self.cursors`, but replay() floors every selected stream at 0), so when the run starts its backlog arrives as 5000 live:true frames with no anchors frame and the replay window ignored — measured 5000 frames vs 5 for the identical append through the unselected door, contradicting the file's own contract at :88-99 and :119-123; the named ghost test stops before the first tick after the run starts. (M2) ?from= is silently overridden by a ?cursor= for the same stream while hello reports fromApplied:true — `?from=2&amp;cursor=...#5` replays seqs 6..10 and claims the parameter was applied, a fourth case the contract's &quot;three cases the client can tell apart&quot; does not cover. Minors: duplicate ?cursor= for one stream last-wins silently; the per-tick cap is per stream so four streams emit 20000 frames in one drain. Both suites green (test_server_core rc 0, test_api rc 0), ownership clean (only the three owned files newer than 20:05), HEAD still 579446e, GD-21/22/24-27/13 re-verified by AST walk, string scan, live probes and git check-ignore.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 5/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 4 addressed every open item from sp-server-api-critique-attempt-3 (attempts 1-2 findings were verified already fixed in the tree by attempt 3's audit and re-verified here), plus one contract lie found while working.
+
+M1 (late-stream truncation recorded but never published): `_emit_backfill` now emits a `{&quot;type&quot;:&quot;anchors&quot;,&quot;live&quot;:true,&quot;stream&quot;:…,&quot;oldest&quot;:…,&quot;truncated&quot;:…}` frame whenever it runs after the mode switch, immediately before the frames it describes. `mode` stays the ONE boundary; the contract table and a new clause document the anchors frame. Test `test_a_late_streams_truncation_is_published_not_just_recorded` drives the critique's probe verbatim (window=5, 60 records born after `switch()`) and asserts oldest==56 on a real frame.
+
+M2 (subscribe acked a rewind and replayed nothing): `subscribe` now returns the frames to send, ending with the ack. A pair behind the session's position re-delivers that range as `live:false` backfill via the new `_resume`, ending back at the delivered cursor; a pair at it is a no-op; a pair ahead of it is refused with the socket's real position; pairs outside the `?stream=` selection and malformed pairs are refused with reasons; the ack carries `rejected`/`backfilled`. `HttpServer.stream` sends the frames then the ack, under a new per-socket `asyncio.Lock` that also wraps hello→replay→switch and each tick so a subscribe cannot interleave with them.
+
+m1: `currentRun` is computed only over streams the store has observed, and `hello` publishes `streamsUnobserved` (the selector is still served — that is how a page waits for a run to start).
+m2: `tick()` is capped at the new `MAX_TICK_EVENTS` (5000) frames per stream per tick; the remainder is carried in `_carry` (not re-read, which would duplicate frames after a held token record) and drains on the next tick with no gap or duplicate; `session.capped` counts it.
+m3: a malformed `?from=` comes back raw as `fromRejected`, so &quot;not sent&quot;, &quot;unusable&quot; and &quot;unparseable&quot; are three distinguishable cases.
+n1: `/api/events`'s backwards page sets `cursor` to the OLDEST record (the next `before=`); a test walks the whole history by feeding it back.
+n2: the whole-file read per page is recorded in `h_events`' docstring with the condition under which to seek by byteOffset.
+n3: `pending_floor` skips seq-less held records instead of flooring them to 0 (which froze the cursor at -1).
+
+Also found and fixed: the normative frame table advertised a `{&quot;type&quot;:&quot;tick&quot;}` idle keepalive marker that no code ever sent (a browser cannot observe a WS pong). The keepalive now sends the ping AND that frame; `HttpServer` gained a `keepalive=` parameter so it is testable. And `subscribe` bounds a client-supplied seq to the cursor grammar's 12-digit ceiling (`MAX_SEQ`) and truncates the echoed reject (`MAX_REJECT_ECHO`), so an unbounded socket message cannot be mirrored back.
+
+Verification: `python3 tests/test_server_core.py` rc 0 (23 tests), `python3 tests/test_api.py` rc 0 (34 tests). The whole repo suite (20 files) and the four monitoring baselines are also rc 0 — the two failures previous gates recorded as pre-existing baseline (test_mirror.py, test_sessions.py) now pass and were not touched. No imports added (still stdlib + relative siblings, no pymongo/mirror), no commit, no file outside the three owned ones modified.</li><li>Test gate PASSED: PASS. Owned suites green: tests/test_server_core.py rc 0 (23 tests, 176 assertions), tests/test_api.py rc 0 (35 tests, 204 assertions). Full suite 22 pass / 2 fail — test_mirror.py (3) and test_sessions.py (1), character-identical to the attempt-1/2/3 baseline, owned by sp-mirror-deploy and sp-sessions-arm (files untouched, mtimes hours before this attempt). No new failure. Bare-checkout arm green with pymongo shadowed by an ImportError stub; server.py imports stdlib + relative siblings only, no driver, no mirror import. Ownership clean: only aggregator/server.py, tests/test_api.py, tests/test_server_core.py modified in the attempt window; HEAD still 579446e, no commit. All five attempt-3 critique findings now have named behavioural (non-tautological) tests: late-stream anchors frame, subscribe rewind replay+ordered ack, streamsUnobserved/currentRun None, MAX_TICK_EVENTS tick cap with contiguous carry, malformed ?from= echoed on hello.</li><li>Critique REJECTED: REJECTED — 2 majors, 2 minors, 3 nits. All five attempt-3 findings verified fixed by execution. New majors: (M1) a stream named by ?stream= or ?cursor= before it exists bypasses tick()'s late-stream backfill arm (gated on `stream not in self.cursors`, but replay() floors every selected stream at 0), so when the run starts its backlog arrives as 5000 live:true frames with no anchors frame and the replay window ignored — measured 5000 frames vs 5 for the identical append through the unselected door, contradicting the file's own contract at :88-99 and :119-123; the named ghost test stops before the first tick after the run starts. (M2) ?from= is silently overridden by a ?cursor= for the same stream while hello reports fromApplied:true — `?from=2&amp;cursor=...#5` replays seqs 6..10 and claims the parameter was applied, a fourth case the contract's &quot;three cases the client can tell apart&quot; does not cover. Minors: duplicate ?cursor= for one stream last-wins silently; the per-tick cap is per stream so four streams emit 20000 frames in one drain. Both suites green (test_server_core rc 0, test_api rc 0), ownership clean (only the three owned files newer than 20:05), HEAD still 579446e, GD-21/22/24-27/13 re-verified by AST walk, string scan, live probes and git check-ignore.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-server-api-test-attempt-4.md</summary><pre># sp-server-api — test gate, attempt 4
+
+**Verdict: PASS (green).** Both owned suites are 100% green, the full suite shows
+only the two known pre-existing baseline failures (character-for-character
+identical to the attempt-1/2/3 records), ownership is clean (only the three
+owned files carry this attempt's mtimes, `HEAD` still `579446e`, nothing
+committed), the bare-checkout / no-pymongo arm is green, and every attempt-3
+critique finding now has a named behavioural test behind it.
+
+Window of this attempt: owned-file mtimes 20:12–20:17 UTC; gate run 20:18–20:22 UTC.
+
+## 1. Targeted suites (must be 100% green)
+
+Run from the repo root, stdlib-only, standalone executables:
+
+| suite | rc | result |
+|---|---|---|
+| `python3 tests/test_server_core.py` | 0 | `all server core tests passed` — 23 test functions, 176 `ok:` assertions |
+| `python3 tests/test_api.py` | 0 | `all read API + wire tests passed` — 35 test functions, 204 `ok:` assertions |
+
+No failures, no errors, no unexpected skips. The only skips anywhere in the
+wider suite are the deliberate `TOUCH_MONGO_URI is not set` live-mongod arms
+(R-42) — the required clean-skip behaviour.
+
+## 2. Full-suite regression gate
+
+```
+cd /home/laniakea/Projects/touch &amp;&amp; rc=0
+for t in .claude/shared/monitoring/tests/test_*.py; do (cd &quot;$(dirname &quot;$t&quot;)&quot; &amp;&amp; python3 &quot;$(basename &quot;$t&quot;)&quot;) || rc=1; done
+for t in tests/test_*.py; do [ -e &quot;$t&quot; ] || continue; python3 &quot;$t&quot; || rc=1; done
+exit $rc
+```
+
+- **PASS (22):** `.claude/shared/monitoring/tests/test_frontend.py`,
+  `test_server.py`, `test_shell.py`, `test_watcher.py` (all four monitoring
+  baselines green); `tests/test_agents.py`, `test_api.py`, `test_bootstrap.py`,
+  `test_custom_state.py`, `test_fixtures.py`, `test_ingest.py`, `test_legacy.py`,
+  `test_mongo_deploy.py`, `test_mongo_store.py`, `test_reducer.py`,
+  `test_refs.py`, `test_server_core.py`, `test_slots.py`, `test_stdlib_only.py`,
+  `test_store.py`, `test_tailer.py`, `test_usage.py`, `test_ws.py`.
+
+- **FAIL (2) — pre-existing baseline, NOT attributable:**
+  - `tests/test_mirror.py` rc 1, `FAILED (3)`:
+    `…proven by the call count: the held ticks made no attempt`;
+    `the first generation lands`;
+    `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  - `tests/test_sessions.py` rc 1, `FAILED (1)`:
+    `wipe + --rebuild reproduces a byte-identical fingerprint`.
+
+  Identical strings to the baseline recorded in `sp-server-api-test-attempt-1.md`
+  and re-confirmed in attempts 2 and 3. They live in `aggregator/mirror.py` /
+  `aggregator/sessions.py` and their suites — files owned by **sp-mirror-deploy**
+  and **sp-sessions-arm**, two loops that closed RED with open findings. This
+  attempt touched none of them (mtimes `mirror.py` 07-26 11:29,
+  `test_mirror.py` 02:44, `sessions.py` 04:10, `test_sessions.py` 04:14 — all
+  many hours before this attempt's 20:12–20:17 edit window). Baseline failures
+  do not fail this gate. **No new failure anywhere.**
+
+## 3. Bare-checkout / no-third-party arm (GD-21, R-56)
+
+Both owned suites re-run with `pymongo` shadowed by a stub module that raises
+`ImportError` on import (`PYTHONPATH` shim), no services running:
+
+```
+PYTHONPATH=&lt;shim&gt; python3 tests/test_server_core.py  → rc 0
+PYTHONPATH=&lt;shim&gt; python3 tests/test_api.py          → rc 0
+```
+
+`server.py`'s import block is stdlib + relative siblings only
+(`asyncio, datetime, hashlib, hmac, json, os, re, secrets, sys, time,
+urllib.parse, dataclasses` + `. import agents/ingest/legacy/mongo_store/refs/
+store/ws`). No `pymongo`, no `bson`, no `import mirror` — the R-45 `/health`
+mirror block is injected, as the suite's own static guard
+`test_the_server_imports_no_driver` asserts.
+
+## 4. Ownership
+
+`find aggregator tests docs -newermt &quot;19:50&quot;` returns exactly:
+
+```
+tests/test_server_core.py   20:12
+tests/test_api.py           20:15
+aggregator/server.py        20:17
+```
+
+— the three owned files and nothing else. `git status` otherwise shows only
+the unrelated in-flight `.claude/` orchestrator state that predates this
+attempt. `git log -1` = `579446e` (no commit made).
+
+## 5. Plan conformance — attempt-3 critique findings all have live tests
+
+Verified by name in the green run, not by reading alone:
+
+| critique-3 finding | covering test | evidence it is behavioural |
+|---|---|---|
+| M1 — late stream's truncation recorded but never sent | `test_a_late_streams_truncation_is_published_not_just_recorded` (test_api.py:935) | drives the exact reproducer (window=5, 60 records into a stream born after `switch()`); asserts a real `anchors` frame with `oldest == 56`, `truncated is True`, ordered **before** the frames it describes, absent from the `mode` frame, and key-checked against the normative docstring table via `_contract_frame_keys` |
+| M2 — `subscribe` acks a rewind it never replays | `test_subscribe_resumes_and_never_acks_a_position_it_did_not_send` (test_api.py:1208) + `test_the_idle_marker_is_sent_and_a_subscribe_is_answered_in_order` (core:860) | on a session that has replayed/switched/ticked: the rewound range is re-delivered over the wire as backfill, the ack comes **last**, an ahead-of-position cursor is refused by name, per-pair rejections are individual, the echo of an unusable cursor is truncated, out-of-selection pairs refused, and the tail continues without duplicates |
+| m1 — unobserved `?stream=` presented as `currentRun` | `test_a_selector_for_a_run_that_has_not_started_is_labelled_unobserved` (test_api.py:972) | asserts `currentRun is None`, the ghost id in `streamsUnobserved`, and the mixed case where a real run beside a ghost is the current run |
+| m2 — unbounded tick burst (GD-30) | `test_one_tick_cannot_write_an_unbounded_burst` (test_api.py:1001) | appends `MAX_TICK_EVENTS + 7`; asserts the first tick emits exactly `MAX_TICK_EVENTS`, `session.capped == 1`, the cursor stops where the cap fell, the remainder arrives next tick, and seqs are contiguous with no duplicate. `MAX_TICK_EVENTS = MAX_REPLAY_EVENTS` (server.py:257) |
+| m3 — malformed `?from=` dropped silently | `test_from_is_applied_or_reported_never_silently_dropped` (test_api.py:824) + `test_a_handshake_names_the_parameters_it_could_not_use` (core:765) | &quot;a `?from=` that does not parse comes back raw on hello, like every other parameter this socket could not use&quot; and &quot;a handshake that sent none is a distinguishable case, not the same null&quot; |
+
+Owned sp-12 items remain covered end-to-end: R-30 (GD-13 posture — loopback
+default, `--open` opt-in, three token carriers via `hmac.compare_digest`,
+Origin/Host allowlist at upgrade only, static `(method,route)` table with a
+default 404 and no prefix match, `safe_artifact_path` containment incl. symlink
+realpath, CSP sandbox + nosniff + no-store, `/health` credential-free with
+per-tailer liveness, parse-failure counters and the R-45 mirror block that
+reports `down` instead of 500), R-31 (one shared id validator: 400 malformed /
+404 unknown / never another id's data; query-string-only; `(stream,seq)`
+cursors that round-trip), R-55:server (bounded replay with published edge,
+single `mode` boundary, `live` flags, `?from=`, resume via `?cursor=` and
+`subscribe` with no duplicates, absolute token frames coalesced ≥1 s, capped
+tail, `/api/query` Mongo arm with labelled memory fallback). Guards for
+GD-22/23 (server derives nothing — the reducer decides; no field is ever
+differenced), GD-27 (0600 `.touch/server.json`, 0700 dir, no path/URI/token on
+`/health`) and header-injection totality (CRLF, NUL, non-latin-1) all pass.
+
+**Gate result: PASS.**
+</pre></details>
+<details><summary>Critique findings — sp-server-api-critique-attempt-4.md</summary><pre># sp-server-api — adversarial critique, attempt 4
+
+**Verdict: REJECTED.** 0 blockers, 2 majors, 2 minors, 3 nits.
+Depth: **in-scope** — both majors are fixed inside `aggregator/server.py` plus
+a test each in `tests/test_api.py`. No other module, no other sub-plan, no new
+research.
+critical_defect: **false**.
+
+Reviewed: full content of the three untracked owned files (`git status` shows
+`?? aggregator/`, `?? tests/` — no diff base) against
+`touch-mongo-live-subplans.md` §sp-12, R-30/R-31 (base plan), R-55 +
+GD-21…GD-30 (amendment), and GD-11/GD-12/GD-13/GD-20/GD-22/GD-23.
+
+Both owned suites re-run here: `tests/test_server_core.py` rc 0,
+`tests/test_api.py` rc 0. Ownership clean — `find -newermt 20:05` returns
+exactly `aggregator/server.py`, `tests/test_server_core.py`,
+`tests/test_api.py`; `HEAD` is still `579446e`; nothing committed; `docs/` and
+every other `aggregator/*.py` carry mtimes hours older.
+
+## Attempt-3 findings: all five verified fixed
+
+Re-checked by execution, not by reading:
+
+| # | attempt-3 finding | status |
+|---|---|---|
+| M1 | a late-born stream's truncation recorded and never sent | fixed — the `anchors` frame (`:1596-1598`), on the contract table (`:70-71`, `:88-99`), and `test_a_late_streams_truncation_is_published_not_just_recorded` drives the 60-record/window-5 probe verbatim and asserts `oldest == 56` **and** frame order |
+| M2 | `subscribe` acked a rewind and replayed nothing | fixed — `_resume` (`:1715-1738`) re-delivers `(seq, delivered]` as `live:false`, ack last, ahead-of-position refused by name; verified live: `subscribe({stream:3})` on a session at 10 emits seqs 4…10 then the ack, and `cursors` end at 10 |
+| m1 | an unobserved `?stream=` became `currentRun` | fixed — `_observed()` + `_current_run_stream()` (`:1413-1467`), `streamsUnobserved` on hello (`:1541`), `currentRun is None` asserted |
+| m2 | `tick()` emitted an unbounded number of frames | fixed *per stream* — `MAX_TICK_EVENTS` + `_carry` (`:1691-1696`), contiguity across the cap boundary asserted with real records (see m2 below for the residue) |
+| m3 | a malformed `?from=` dropped without being echoed | fixed — `fromRejected` (`:1536`, `:2665`), three cases distinguishable |
+
+So this rejection is again narrow, and again the same shape as the last two:
+the file's own normative wire contract — the one sp-13 is instructed to restate
+**verbatim** — is false about the code underneath it in two places, and both are
+silent in exactly the way the module docstring says it refuses to be.
+
+---
+
+## MAJORS
+
+### M1 — a stream the client *asked for* by name is the one stream born after the boundary that gets no backfill treatment
+`aggregator/server.py:1672-1679` (`tick`'s late-stream arm), `:1603-1607`
+(`_emit_backfill`'s cursor floor), `:1545-1570` (`replay`), contract at
+`:88-99` and `:119-123`
+
+The contract states this unconditionally:
+
+&gt; **A backfill that happens after `mode` carries its own `anchors` frame.** …
+&gt; a stream born after the boundary (an ingest pass discovering a new
+&gt; transcript) and a `subscribe` rewind are both painted `live:false` by the
+&gt; same code path. … Every post-boundary backfill therefore publishes
+&gt; `{&quot;type&quot;:&quot;anchors&quot;}` naming its stream, its `oldest`, and whether anything
+&gt; was cut, immediately before the frames it describes.
+
+and it names the flow that breaks it two clauses later:
+
+&gt; A selector that is well-formed but names a stream this store has never seen
+&gt; *is* served — that is how a client watches a run before it starts
+
+The late-stream arm is gated on `if stream not in self.cursors`. But `replay()`
+runs `_emit_backfill` over **every** stream in `self.streams()`, and
+`_emit_backfill` floors an empty stream at `self.cursors[stream] = 0`
+(`:1603-1607`). A `?stream=` selector for a not-yet-written run is in
+`streams()` from the handshake, so it is in `cursors` from the handshake — and
+when the run finally starts, `tick()` skips the backfill arm entirely and tails
+it from seq 0 as live traffic.
+
+Reproduced. Same store, same 6000-record append after `switch()`,
+`window=5`, the only difference being how the client named the stream:
+
+```
+?stream= preselected            frames=5000  events=5000  live=[True]  anchors=0  firstSeq=1
+?cursor= for the unborn stream  frames=5000  events=5000  live=[True]  anchors=0  firstSeq=1
+no selector (documented door)   frames=6     events=5     live=[False] anchors=1  firstSeq=5996
+```
+
+Three consequences, and each is one the file argues against in its own prose.
+(a) `live:true` on a 5000-frame backlog is precisely what `_emit_backfill`'s
+docstring forbids — *&quot;would animate a burst sp-13 cannot tell apart from real
+activity, because the `live` flag is the only thing it has to go on&quot;*.
+(b) `window` is not applied at all: the bound on this path is `MAX_TICK_EVENTS`
+(5000), a thousand times the window the same session honours on every other
+stream, and `session.capped` ticks to 1 — the GD-30 write storm the cap was
+added *this attempt* to stop, delivered to the one client that asked politely.
+(c) No `anchors`, `mode.truncated == {}` and `session.truncated == {}`, so a
+page that reads the contract literally is told nothing was cut on a stream
+where the window says otherwise.
+
+`test_a_selector_for_a_run_that_has_not_started_is_labelled_unobserved`
+(`tests/test_api.py:972-998`) stops one line short of this: it asserts
+`session.replay() == []` and never ticks after the run starts, so the half that
+matters — what a client actually *sees* when the run it was waiting for begins
+— is unasserted.
+
+**Fix:** make the late-stream arm key off &quot;has this session ever emitted a
+frame for this stream&quot;, not off cursor presence. Concretely: track the streams
+`_emit_backfill` has actually painted (`self._painted = set()`, added when a
+window is emitted) and change `:1673` to
+`if stream not in self._painted and stream not in self._checkpoints:` — an
+unborn stream floored at 0 is not painted, so its first real backlog goes
+through `_emit_backfill` and gets the window, the `live:false` flag and the
+`anchors` frame, exactly as the unselected door does. `_resume`'s adopted
+cursor must count as painted so a `subscribe` rewind is not re-backfilled.
+Test: the probe above verbatim — `WsSession(model, streams=[ghost], window=5)`,
+`replay/switch/tick`, append 6000 records, assert the next tick yields 5
+`live:false` frames led by an `anchors` frame naming `oldest == 5996`, and that
+it is byte-identical to the no-selector session's output.
+
+### M2 — `?from=` is overridden by a `?cursor=` for the same stream and hello reports it applied
+`aggregator/server.py:1469-1477` (`_from_applies`), `:1556-1568` (`replay`'s
+precedence), `:1534-1536` (hello), contract at `:108-115`
+
+The rule is the one this file is built around:
+
+&gt; **a handshake parameter is never silently dropped**: after the 101 there is
+&gt; no status code left to refuse with, so every parameter that could not be
+&gt; used is *named on hello* instead — `fromApplied:false` plus the raw
+&gt; `fromRejected` for a `?from=` that did not parse or did not pair with
+&gt; exactly one stream (**three cases the client can tell apart**)
+
+There is a fourth case and it is reported as success. `_from_applies()` tests
+only `from_seq is not None and len(self.streams()) == 1`; `replay()` checks the
+cursor arm *first* (`:1558-1561`) and never reaches the `elif from_applies`
+arm when a cursor exists for that stream. Reproduced against a 10-record
+stream:
+
+```
+?stream=run:wf_probe0001-a&amp;from=2&amp;cursor=run:wf_probe0001-a#000000000005
+  hello: {'from': 2, 'fromApplied': True, 'fromRejected': None,
+          'cursors': {'run:wf_probe0001-a': 5}}
+  replayed seqs: [6, 7, 8, 9, 10]        &lt;- from=2 was ignored
+  mode: truncated={}  oldest={stream: 6}
+```
+
+The client asked to replay explicitly from seq 2 — the documented purpose of
+the parameter (`:101-107`: *&quot;`?from=&lt;seq&gt;` … replays explicitly from there&quot;*) —
+received records 6…10, and was told on the handshake frame that its `from` was
+applied. `truncated` is `{}` because `replay_window(from_seq=5)` genuinely cut
+nothing relative to *5*, so the one field a page could notice a shortfall with
+also says all is well. This is the attempt-2 M1 failure mode (a hello field
+that structurally cannot be false when the client needs it true) inverted: a
+hello field that is structurally `true` when the client needs it false, and
+sp-13 will restate this table verbatim and code `if (!hello.fromApplied)`
+against it.
+
+`test_from_is_applied_or_reported_never_silently_dropped`
+(`tests/test_api.py:824-851`) covers the no-parse arm and the many-streams arm.
+It never sends `?from=` and `?cursor=` together, which is how this survived.
+
+**Fix:** pick a precedence and make hello say it. Either (i) `?from=` wins for
+the stream it names — move the `from_applies` check above the cursor check in
+`replay()` and document that an explicit jump overrides a stale resume — or
+(ii) the cursor wins and `_from_applies()` returns False when
+`self.cursors.get(the single stream) is not None`, so hello publishes
+`fromApplied:false` and the client sees its parameter was not used. (ii) is the
+smaller change and matches `replay()`'s existing docstring. Test: the probe
+above, asserting the replayed seqs and `hello[&quot;fromApplied&quot;]` agree — whichever
+way the precedence falls.
+
+---
+
+## MINORS
+
+### m1 — two `?cursor=` values for one stream: last wins, silently
+`aggregator/server.py:1835-1843` (`parse_cursor_params`)
+
+```
+?cursor=run:X#000000000003&amp;cursor=run:X#000000000009
+  -&gt; accepted {'run:X': 9}   rejected []
+```
+
+The seq-3 pair is discarded and named nowhere. Every other repeated parameter
+on this server is a refusal with a reason (`one()` at `:521-533`: *&quot;`?session=a&amp;session=b` has no correct answer and the tempting ones (first wins, last wins) are both a silent wrong target&quot;*), and `?cursor=` is deliberately
+repeatable so per-entry handling is the whole point of the function. Last-wins
+is exactly the tempting answer `one()` refuses.
+
+**Fix:** on a second cursor for a stream already accepted, keep the *lower*
+seq (the conservative resume — a repaint beats a skip, the direction this file
+always chooses) and push the discarded raw string onto `rejected` with a
+reason, so hello names it. Extend
+`test_one_malformed_cursor_costs_only_itself` with the duplicate arm.
+
+### m2 — the per-tick cap is per *stream*; the socket's queue is still N × 5000
+`aggregator/server.py:1691-1696`, `:253-257`, drained at `:2745-2747`
+
+Measured with four streams and `MAX_TICK_EVENTS + 3` records appended to each:
+
+```
+frames emitted in ONE tick: 20000   capped counter: 4
+```
+
+The contract is honest about the shape (*&quot;one tick emits at most
+`MAX_TICK_EVENTS` frames per stream&quot;*, `:143-144`), so this is not a false
+statement — but GD-30's bounded queue is a property of the socket, and the
+justification written beside the constant is about the socket
+(*&quot;one unbounded write storm on every connected socket before the loop could
+sleep&quot;*). A restarted ingest catching up writes to every stream at once, which
+is the same scenario, multiplied by the number of streams.
+
+**Fix:** carry the budget across the stream loop — one `budget =
+MAX_TICK_EVENTS` decremented per emitted frame, with the remainder of every
+stream pushed into `_carry` when it hits zero — and change `:143-144` to say
+&quot;per tick&quot; rather than &quot;per stream&quot;. The `_carry` machinery already does the
+work; only the counter's scope changes. Test: the four-stream probe above,
+asserting one tick emits at most `MAX_TICK_EVENTS` frames in total and the
+remainder arrives contiguously.
+
+---
+
+## NITS
+
+### n1 — a request that 500s is counted twice
+`aggregator/server.py:2481`, `:2497`. `requests[&quot;handled&quot;]` is incremented
+before the handler runs and `requests[&quot;failed&quot;]` after it raises, so
+`handled + notFound` is the request total but `handled` is not &quot;served&quot;. The
+`/health` label reads as served/not-found/failed.
+**Fix:** increment `handled` only on the success path, or rename it `dispatched`.
+
+### n2 — hello mirrors a rejected raw `?cursor=`/`?stream=` untruncated
+`aggregator/server.py:1539-1540`, `:1835-1843`. `subscribe`'s ack truncates its
+echo at `MAX_REJECT_ECHO` for a stated reason (`:1775-1778`); the handshake path
+echoes whatever the query string held, bounded only by `MAX_HEAD_BYTES`
+(64 KiB) and repeatable. Not a vulnerability — the head is capped and the
+socket is authenticated — but the same rule, applied on one of two doors.
+**Fix:** run the hello echoes through the same `[:MAX_REJECT_ECHO]` slice.
+
+### n3 — `anchors` frames carry `live:true` while the frames they introduce are `live:false`
+`aggregator/server.py:1596-1598`. Consistent with `mode` (also `live:true`
+while it closes a `live:false` replay), so this is a naming observation rather
+than a defect — but sp-13's source guard is written about the `live` flag, and
+an anchors frame is the one frame whose flag describes neither the records
+before it nor the records after it.
+**Fix:** state in the contract table that `live` on `mode`/`anchors` marks the
+session's mode, not the frames they bracket.
+
+---
+
+## Checklist items verified clean (re-run this attempt, not inherited)
+
+- **GD-21** — `ast`-walked imports of `server.py`:
+  `{__future__, asyncio, dataclasses, datetime, hashlib, hmac, json, os, re,
+  secrets, sys, time, urllib}` plus relative siblings. No `pymongo`, `bson`,
+  `dns`; no `mirror` import; the strings `pymongo`/`bson` do not occur anywhere
+  in the file, prose included.
+- **GD-22** — every route reads `model.state`/`model.store`; `/api/query`'s
+  Mongo arm is injected and labelled (`source`); `/health` over a store whose
+  root does not exist answers 200 with `streamCount: 0` (verified live), and
+  over a raising mirror answers `state: down` rather than 500.
+- **GD-24/25/26** — no `_id` is constructed here (only `store.cursor_key`,
+  which round-trips through `parse_cursor_key`); the strings `$inc`, `$set`,
+  `$max`, `$unset`, `deleteMany`, `expireAfterSeconds` do not occur; tokens are
+  carried verbatim, never differenced — the `ast.BinOp`/tokenizer guards in
+  `test_server_core.py` are real (they strip comments and strings with
+  `tokenize`, so the &quot;no delta in executable code&quot; assertion cannot be
+  satisfied by prose).
+- **GD-27** — no token, URI, password or path on any response; `target_hash()`
+  keeps `/health` path-free; `.touch/server.json` is written 0600 via `os.open`
+  with the mode in the call, its directory chmod'ed 0700, and `.touch*/` is
+  covered by `.gitignore` (`git check-ignore -v .touch/server.json` →
+  `.gitignore:21`), so the per-boot token can never reach a commit.
+- **GD-13** — 127.0.0.1 default, `--open` opt-in with the `sbx ports` recipe,
+  `hmac.compare_digest` on three carriers with no short-circuit,
+  Origin/Host allowlist at the upgrade only (403 last, after 426/400/401),
+  static `(method, route)` dict with a default 404 and no prefix match.
+- **GD-28/29/30 (partial)** — no Mongo client held, no write path, no
+  provenance manufactured (`_node_payload`/`_agent_payload` project `provenance`
+  through); `tick()` is `store.follow`-incremental per stream; token coalescing
+  is ≥1 s and keyed on the store's real `kind: &quot;token&quot;`. The GD-30 residue is
+  m2 above.
+- **GD-15 / ownership** — `find -newermt` over the attempt window returns only
+  the three owned files; `docs/mongo.md` untouched; `HEAD` still `579446e`;
+  no commit.
+- **Tests assert behaviour, not tautologies** — spot-checked the ones easiest
+  to dismiss: `_contract_frame_keys` parses the normative docstring table as
+  data and asserts against it; `test_one_tick_cannot_write_an_unbounded_burst`
+  drives `MAX_TICK_EVENTS + 7` real records and asserts contiguity across the
+  cap boundary plus `session.tick() == []` after the drain;
+  `test_subscribe_resumes_and_never_acks_a_position_it_did_not_send` builds
+  four different subscribes on one live session and pins the tail afterwards.
+  No mongod-dependent arm is needed in this file and none is present.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

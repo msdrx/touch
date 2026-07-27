@@ -1,0 +1,822 @@
+<title>sp-mirror-deploy — cycle 4</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-mirror-deploy — implement→test→critique, attempt 4/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 4 addressed every item in `findings/sp-mirror-deploy-critique-attempt-3.md` (2 major, 4 minor, 2 nits). The attempt-1/attempt-2 items were verified already closed against the tree (test gate attempt 3 PASSED; only the critique rejected). Only the four owned files were touched; no commit (`git log -1` still `579446e`).
+
+MAJOR 1 — `tick()`/`start()` did raise on the lease path. `Mirror.acquire` caught only `ms.MongoUnavailable`, while its single call `guarded_update` has three other exits (server-side `$jsonSchema` refusal as `SchemaError`, `validate_document`'s `MongoStoreError`, and non-`PyMongoError` driver surprises — the module's own comment names `RuntimeError: Cannot use AsyncMongoClient in different event loop`). A renewal is due at least every `LEASE_TTL_S * LEASE_RENEW_AT`, so a surprise killed the drainer task while `/health` kept saying `live, lastError: null`. Fixes: `acquire` gained an `except Exception -&gt; _record_failure -&gt; return False`; `start` and `tick` were split into total wrappers over `_start`/`_tick` so &quot;never raises&quot;/&quot;every failure is a state&quot; are true by construction, not by branch enumeration; `run()` got a belt around `await self.tick()` (documented as deliberate redundancy — `CancelledError` is a `BaseException` and still passes through).
+
+MAJOR 2 — the GD-27 backstop skipped the whole `ref` sub-document unconditionally, justified by `refs.validate_ref` pinning it. Nothing on the write path calls `validate_ref`, and GD-24 deliberately makes `ref` an open tail (`kind:&quot;unknown&quot;` retains arbitrary keys). New `_scrub_ref` exempts a ref only when `refs.classify` names a declared kind; `none`/`unknown`/unclassifiable refs go through `scrub_value`. Declared kinds stay byte-identical (identity-asserted), so the GD-24 dot-notation joins are unaffected. `docs/mongo.md` §3 now says what the code does.
+
+MINOR 1 — `tick` branched on `state == STATE_REFUSED` after a renewal; a renewal that failed with `MongoUnavailable` (state `degraded`) fell through and wrote under an unrenewed lease. Now branches on `acquire()`'s boolean. New test uses a backend where only `writers` is unreachable (a whole-server outage hides the bug) and asserts zero `bulk_upsert` calls.
+
+MINOR 2 — `_requeue` re-queued already-scrubbed ops, so an outage re-paid the 8.79 ms/550 KB walk every tick. Added `ScrubbedOp(MirrorOp)` — the *type* is the flag, because CPython forbids non-empty `__slots__` on a variable-length built-in's subclass. `validate_op` mints one only after actually scrubbing and never re-walks one; `_requeue` preserves it; the two stampers deliberately drop it (they grow the update).
+
+MINOR 3 — split `refused_no_lease` (GD-29: lost lease / wrong stream) from a new `refused_policy` (GD-27 zero-users, refused schema). `docs/mongo.md` now enumerates all 17 counters, and `test_health_is_r45s_block_and_carries_no_credential` asserts the documented list equals `health()[&quot;counters&quot;]` in both directions, closing the drift the critique noted the existing test could not catch.
+
+MINOR 4 — `iter_backfill_sources` now consults `deny` *before* the `.jsonl` filter (every `DENY_BASENAMES` entry ends `.json`, so the old order made the check unreachable and the old test passed with the deny-list deleted). The test now uses a recording `deny` and asserts it was consulted for `session.jsonl`, plus `deny=…endswith(&quot;session.jsonl&quot;) -&gt; []`.
+
+NIT 1 — named `_MIN_LITERAL_SECRET = 3` with the reasoning (no word boundary in `str.replace`; the structural pass covers the URI form). NIT 2 — both discovery seams (`discover_mappers`, `iter_sources`) now compare `exc.name` to the fully-qualified `f&quot;{package}.{name}&quot;`; new test builds a temp package whose `legacy.py` fails on a missing top-level `legacy` and asserts it raises instead of being skipped.
+
+Verification: every new assertion was proven load-bearing by reverting each fix on a scratch copy and confirming the specific checks turn red (the reverted `run()` case reproduced the reported drainer death with an unhandled `RuntimeError` traceback). Final state — `tests/test_mirror.py` rc=0 and `tests/test_mongo_deploy.py` rc=0 in three arms: installed, pymongo-blocked (all Mongo arms skip cleanly by name), and against a live `mongo:7` provisioned from the doc's own loopback+auth recipe on `127.0.0.1:27431` (17/17 live checks incl. the real conditional-write lease, server-side retraction, and `--rebuild` fingerprint equality). `test_mongo_deploy.py`'s own docker arm ran and passed. Teardown verified: `list_database_names()` back to `admin config local`, my container and volume removed. The pre-existing `touch-mongo-sp05` container (sp-05's, not mine) was left alone.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites 100% green: tests/test_mirror.py rc=0 (254 assertions, 2 designed skips) and tests/test_mongo_deploy.py rc=0 (151 assertions, 0 skips) — the latter's live arm actually RAN (parsed the docker recipe out of docs/mongo.md, started mongo:7 on loopback+auth, ran the role bootstrap, proved the server itself refuses delete on `records`). Full suite 14/14 green, TOTAL_RC=0. Bare-checkout arm verified by shadowing pymongo with an ImportError module: both owned suites still exit 0 and skip cleanly (GD-21/R-56). The attempt-3 critique's MAJOR 1 (lease-path exception killing the drainer) and MAJOR 2 (unconditional `ref` scrub exemption) are closed in code with new load-bearing tests, as are MINOR 1/3/4 and NIT 1; MINOR 2 (_requeue re-scrubs already-scrubbed ops) is NOT closed — perf/docstring only, flagged for the critique gate. Ownership clean: only the 4 owned files carry this attempt's mtimes, git log -1 is still 579446e, nothing committed. One transient full-suite failure (.claude/shared/monitoring/tests/test_frontend.py, &quot;done === plansSeen&quot;) appeared mid-gate and is provably NOT attributable — that test opens only monitor.html and a concurrent Claude Code session (scratchpad 0ff58ac5-…) was half-way through a paired monitor.html/test_frontend.py edit; once its edit landed the test passed and the suite went 14/14. I did not touch those files.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 3 major, 4 minor, 2 nits, all reproduced by executing this checkout. MAJOR 1 (mirror.py:2084): _tick gates the whole lease branch on `self._lease[&quot;held&quot;]`, so when the FIRST acquire() fails for any non-race reason (start() then returns `degraded`, held=False) the drainer never retries the lease and never declines to write — it bulk_upserts with no lease at all while /health publishes state:&quot;live&quot; beside lease:{held:false}. Attempt 4 fixed the inner renewal condition (attempt-3 MINOR 1) and left the outer one open; verified for MongoUnavailable, RuntimeError and SchemaError (written=1, guarded_update calls=0). Direct GD-29 + GD-22 breach. MAJOR 2 (mirror.py:501): attempt-3's MAJOR 2 is only narrowed, not closed — `_scrub_ref` classifies with `refs.classify`, which explicitly does NOT enforce the closed key set the exemption's own justification rests on (only `refs.validate_ref` does, refs.py:747). A hand-built `{&quot;kind&quot;:&quot;uuid&quot;,&quot;uuid&quot;:…,&quot;authToken&quot;:&quot;sk-ant-…&quot;,&quot;password&quot;:&quot;hunter2&quot;}` is exempted whole and stored verbatim in an upsert-only store; the new test misses it because it builds its hostile ref through `canonical_ref`, which strips extras. One-identifier fix (`classify` → `validate_ref`; the existing `except refs.RefError` already routes it to the scrub) plus four prose corrections including docs/mongo.md:218-224. MAJOR 3 (mirror.py:2100/1839): after the breaker recovers, an idle mirror stays `down` forever — `_record_success` is reachable only via a tick that had batches, and a successful lease renewal never clears the failure count; five healthy work-free ticks still report down with a stale lastError. Minors: live mirror publishes a stale lastError against docs' literal alert-rule promise; `ScrubbedOp` is an exported type that disables GD-27's backstop and `Mapper.__call__` honours it on never-scrubbed mapper output; rebuild()'s drop/counts/fingerprint raise out of main()'s asyncio.run; backfill's len(item) unpack and enqueue's arg coercion mishandle shapes they accept. Correct and not to be churned: GD-21 laziness + bare-checkout skips, GD-26 delete walls (server-enforced in the live arm), GD-27 credential file/db-name/redaction/deny-list, the refused_no_lease/refused_policy split and its two-way doc equality, the once-per-op scrub via ScrubbedOp, the fully-qualified ModuleNotFoundError comparison, and R-42/R-57 doc coverage. Ownership clean: 4 owned files only, git log -1 still 579446e, nothing committed.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 5/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 4 addressed every item in `findings/sp-mirror-deploy-critique-attempt-3.md` (2 major, 4 minor, 2 nits). The attempt-1/attempt-2 items were verified already closed against the tree (test gate attempt 3 PASSED; only the critique rejected). Only the four owned files were touched; no commit (`git log -1` still `579446e`).
+
+MAJOR 1 — `tick()`/`start()` did raise on the lease path. `Mirror.acquire` caught only `ms.MongoUnavailable`, while its single call `guarded_update` has three other exits (server-side `$jsonSchema` refusal as `SchemaError`, `validate_document`'s `MongoStoreError`, and non-`PyMongoError` driver surprises — the module's own comment names `RuntimeError: Cannot use AsyncMongoClient in different event loop`). A renewal is due at least every `LEASE_TTL_S * LEASE_RENEW_AT`, so a surprise killed the drainer task while `/health` kept saying `live, lastError: null`. Fixes: `acquire` gained an `except Exception -&gt; _record_failure -&gt; return False`; `start` and `tick` were split into total wrappers over `_start`/`_tick` so &quot;never raises&quot;/&quot;every failure is a state&quot; are true by construction, not by branch enumeration; `run()` got a belt around `await self.tick()` (documented as deliberate redundancy — `CancelledError` is a `BaseException` and still passes through).
+
+MAJOR 2 — the GD-27 backstop skipped the whole `ref` sub-document unconditionally, justified by `refs.validate_ref` pinning it. Nothing on the write path calls `validate_ref`, and GD-24 deliberately makes `ref` an open tail (`kind:&quot;unknown&quot;` retains arbitrary keys). New `_scrub_ref` exempts a ref only when `refs.classify` names a declared kind; `none`/`unknown`/unclassifiable refs go through `scrub_value`. Declared kinds stay byte-identical (identity-asserted), so the GD-24 dot-notation joins are unaffected. `docs/mongo.md` §3 now says what the code does.
+
+MINOR 1 — `tick` branched on `state == STATE_REFUSED` after a renewal; a renewal that failed with `MongoUnavailable` (state `degraded`) fell through and wrote under an unrenewed lease. Now branches on `acquire()`'s boolean. New test uses a backend where only `writers` is unreachable (a whole-server outage hides the bug) and asserts zero `bulk_upsert` calls.
+
+MINOR 2 — `_requeue` re-queued already-scrubbed ops, so an outage re-paid the 8.79 ms/550 KB walk every tick. Added `ScrubbedOp(MirrorOp)` — the *type* is the flag, because CPython forbids non-empty `__slots__` on a variable-length built-in's subclass. `validate_op` mints one only after actually scrubbing and never re-walks one; `_requeue` preserves it; the two stampers deliberately drop it (they grow the update).
+
+MINOR 3 — split `refused_no_lease` (GD-29: lost lease / wrong stream) from a new `refused_policy` (GD-27 zero-users, refused schema). `docs/mongo.md` now enumerates all 17 counters, and `test_health_is_r45s_block_and_carries_no_credential` asserts the documented list equals `health()[&quot;counters&quot;]` in both directions, closing the drift the critique noted the existing test could not catch.
+
+MINOR 4 — `iter_backfill_sources` now consults `deny` *before* the `.jsonl` filter (every `DENY_BASENAMES` entry ends `.json`, so the old order made the check unreachable and the old test passed with the deny-list deleted). The test now uses a recording `deny` and asserts it was consulted for `session.jsonl`, plus `deny=…endswith(&quot;session.jsonl&quot;) -&gt; []`.
+
+NIT 1 — named `_MIN_LITERAL_SECRET = 3` with the reasoning (no word boundary in `str.replace`; the structural pass covers the URI form). NIT 2 — both discovery seams (`discover_mappers`, `iter_sources`) now compare `exc.name` to the fully-qualified `f&quot;{package}.{name}&quot;`; new test builds a temp package whose `legacy.py` fails on a missing top-level `legacy` and asserts it raises instead of being skipped.
+
+Verification: every new assertion was proven load-bearing by reverting each fix on a scratch copy and confirming the specific checks turn red (the reverted `run()` case reproduced the reported drainer death with an unhandled `RuntimeError` traceback). Final state — `tests/test_mirror.py` rc=0 and `tests/test_mongo_deploy.py` rc=0 in three arms: installed, pymongo-blocked (all Mongo arms skip cleanly by name), and against a live `mongo:7` provisioned from the doc's own loopback+auth recipe on `127.0.0.1:27431` (17/17 live checks incl. the real conditional-write lease, server-side retraction, and `--rebuild` fingerprint equality). `test_mongo_deploy.py`'s own docker arm ran and passed. Teardown verified: `list_database_names()` back to `admin config local`, my container and volume removed. The pre-existing `touch-mongo-sp05` container (sp-05's, not mine) was left alone.</li><li>Test gate PASSED: PASS. Owned suites 100% green: tests/test_mirror.py rc=0 (254 assertions, 2 designed skips) and tests/test_mongo_deploy.py rc=0 (151 assertions, 0 skips) — the latter's live arm actually RAN (parsed the docker recipe out of docs/mongo.md, started mongo:7 on loopback+auth, ran the role bootstrap, proved the server itself refuses delete on `records`). Full suite 14/14 green, TOTAL_RC=0. Bare-checkout arm verified by shadowing pymongo with an ImportError module: both owned suites still exit 0 and skip cleanly (GD-21/R-56). The attempt-3 critique's MAJOR 1 (lease-path exception killing the drainer) and MAJOR 2 (unconditional `ref` scrub exemption) are closed in code with new load-bearing tests, as are MINOR 1/3/4 and NIT 1; MINOR 2 (_requeue re-scrubs already-scrubbed ops) is NOT closed — perf/docstring only, flagged for the critique gate. Ownership clean: only the 4 owned files carry this attempt's mtimes, git log -1 is still 579446e, nothing committed. One transient full-suite failure (.claude/shared/monitoring/tests/test_frontend.py, &quot;done === plansSeen&quot;) appeared mid-gate and is provably NOT attributable — that test opens only monitor.html and a concurrent Claude Code session (scratchpad 0ff58ac5-…) was half-way through a paired monitor.html/test_frontend.py edit; once its edit landed the test passed and the suite went 14/14. I did not touch those files.</li><li>Critique REJECTED: REJECTED — 3 major, 4 minor, 2 nits, all reproduced by executing this checkout. MAJOR 1 (mirror.py:2084): _tick gates the whole lease branch on `self._lease[&quot;held&quot;]`, so when the FIRST acquire() fails for any non-race reason (start() then returns `degraded`, held=False) the drainer never retries the lease and never declines to write — it bulk_upserts with no lease at all while /health publishes state:&quot;live&quot; beside lease:{held:false}. Attempt 4 fixed the inner renewal condition (attempt-3 MINOR 1) and left the outer one open; verified for MongoUnavailable, RuntimeError and SchemaError (written=1, guarded_update calls=0). Direct GD-29 + GD-22 breach. MAJOR 2 (mirror.py:501): attempt-3's MAJOR 2 is only narrowed, not closed — `_scrub_ref` classifies with `refs.classify`, which explicitly does NOT enforce the closed key set the exemption's own justification rests on (only `refs.validate_ref` does, refs.py:747). A hand-built `{&quot;kind&quot;:&quot;uuid&quot;,&quot;uuid&quot;:…,&quot;authToken&quot;:&quot;sk-ant-…&quot;,&quot;password&quot;:&quot;hunter2&quot;}` is exempted whole and stored verbatim in an upsert-only store; the new test misses it because it builds its hostile ref through `canonical_ref`, which strips extras. One-identifier fix (`classify` → `validate_ref`; the existing `except refs.RefError` already routes it to the scrub) plus four prose corrections including docs/mongo.md:218-224. MAJOR 3 (mirror.py:2100/1839): after the breaker recovers, an idle mirror stays `down` forever — `_record_success` is reachable only via a tick that had batches, and a successful lease renewal never clears the failure count; five healthy work-free ticks still report down with a stale lastError. Minors: live mirror publishes a stale lastError against docs' literal alert-rule promise; `ScrubbedOp` is an exported type that disables GD-27's backstop and `Mapper.__call__` honours it on never-scrubbed mapper output; rebuild()'s drop/counts/fingerprint raise out of main()'s asyncio.run; backfill's len(item) unpack and enqueue's arg coercion mishandle shapes they accept. Correct and not to be churned: GD-21 laziness + bare-checkout skips, GD-26 delete walls (server-enforced in the live arm), GD-27 credential file/db-name/redaction/deny-list, the refused_no_lease/refused_policy split and its two-way doc equality, the once-per-op scrub via ScrubbedOp, the fully-qualified ModuleNotFoundError comparison, and R-42/R-57 doc coverage. Ownership clean: 4 owned files only, git log -1 still 579446e, nothing committed.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-mirror-deploy-test-attempt-4.md</summary><pre># sp-mirror-deploy — test gate, attempt 4
+
+**Verdict: PASS.** 0 new failures, 0 ownership violations, 0 commits.
+Owned suites 100 % green; full suite 14/14 green.
+
+Environment: Python 3.13, pymongo 4.17.0 present, Docker daemon available
+(`mongo:7` local), `TOUCH_MONGO_URI` unset.
+
+Implementer's changed set (all four are sub-plan-owned):
+`aggregator/mirror.py`, `docs/mongo.md`, `tests/test_mirror.py`,
+`tests/test_mongo_deploy.py`.
+
+---
+
+## 1. Targeted suites (sp-mirror-deploy owned) — GREEN
+
+Run from the repo root, standalone executables, stdlib only:
+
+| suite | rc | assertions | skips |
+|---|---|---|---|
+| `tests/test_mirror.py` | **0** | 254 `ok:` | 2 |
+| `tests/test_mongo_deploy.py` | **0** | 151 `ok:` | 0 |
+
+Both skips in `test_mirror.py` are the designed conditional arms, not silent
+holes:
+
+- `SKIP: no entity module exists yet — SD-1's purity rule has nothing to check`
+  (correct: `aggregator/{sessions,agents,…}.py` are sp-07…sp-11's, not on disk).
+- `SKIP: live mirror arm: TOUCH_MONGO_URI is not set (R-42's loopback+auth recipe)`.
+
+`tests/test_mongo_deploy.py` did **not** skip its live arm — it parsed the
+`docker run` recipe out of `docs/mongo.md`, started that container verbatim, and
+asserted against a real mongod. Evidence lines from the run:
+
+```
+ok: the documented `docker run` recipe starts, verbatim
+ok: the running container publishes on loopback only: '27017/tcp -&gt; 127.0.0.1:50381'
+ok: …and on no other address
+ok: an unauthenticated client cannot list databases / enumerate users / read / write (GD-27)
+ok: the documented role/user bootstrap runs as written
+ok: Touch reaches 'live' against the documented deployment, as the least-privilege user
+ok: …with NO lastError on /health
+ok: the SERVER refuses a delete on `records` … (GD-26)
+ok: …while the ONE legal delete (renumbered positional stream_meta) is permitted
+ok: --rebuild drops the reducer-owned collection AS THE DOCUMENTED ROLE
+ok: …and the grant is scoped: the same role cannot drop `records` (GD-26)
+```
+
+Container and volume were torn down by the suite (no Mongo residue).
+
+### Bare-checkout arm (GD-21 / R-56) — verified, not assumed
+
+Re-ran both owned suites with a shadow `pymongo.py` on `PYTHONPATH` that raises
+`ImportError` on import, simulating a checkout with no third-party packages:
+
+```
+PASS(no-pymongo) tests/test_mirror.py        (3 SKIP lines)
+PASS(no-pymongo) tests/test_mongo_deploy.py  (1 SKIP line)
+```
+
+Both exit 0 and skip cleanly. GD-21's &quot;absence is a state, never a startup
+failure&quot; holds at the suite level as well as inside `Mirror`.
+
+## 2. Full-suite regression gate — GREEN (14/14)
+
+```
+PASS .claude/shared/monitoring/tests/test_frontend.py
+PASS .claude/shared/monitoring/tests/test_server.py
+PASS .claude/shared/monitoring/tests/test_shell.py
+PASS .claude/shared/monitoring/tests/test_watcher.py
+PASS tests/test_bootstrap.py   PASS tests/test_fixtures.py
+PASS tests/test_mirror.py      PASS tests/test_mongo_deploy.py
+PASS tests/test_mongo_store.py PASS tests/test_refs.py
+PASS tests/test_stdlib_only.py PASS tests/test_store.py
+PASS tests/test_tailer.py      PASS tests/test_ws.py
+TOTAL_RC=0
+```
+
+`tests/run_all.sh` globs, so both owned suites are in the full run without
+editing a file this sub-plan does not own.
+
+### One transient failure, diagnosed and NOT attributable — resolved during the gate
+
+The first full-suite pass had `.claude/shared/monitoring/tests/test_frontend.py`
+failing:
+
+```
+File &quot;.claude/shared/monitoring/tests/test_frontend.py&quot;, line 229, in main
+    assert &quot;done === plansSeen&quot; in srender
+AssertionError: STATS-2: idle + all plans green must fold to done
+```
+
+Diagnosis — **not this sub-plan's change**, and I proved it rather than assumed it:
+
+- `test_frontend.py` opens exactly one file (`open(HTML…)` at line 31 is its only
+  file read) — `.claude/shared/monitoring/monitor.html`. It never imports or
+  reads anything under `aggregator/` or `tests/`, so no edit to `mirror.py`,
+  `docs/mongo.md`, `test_mirror.py` or `test_mongo_deploy.py` can reach it.
+- `monitor.html:1413` had been rewritten from `done === plansSeen` to
+  `else if (plansSeen &gt; 0 &amp;&amp; done === plansAll) flow = &quot;done&quot;;` — a monitoring
+  UI change, unrelated to Mongo.
+- mtimes showed a **concurrent Claude Code session** (pid 114274's command line
+  names scratchpad `0ff58ac5-…`, a different session id) actively editing the
+  monitoring module during this gate: `monitor.html` at 02:49:20, then
+  `test_frontend.py` at 02:51:41, alongside `status.sh`, `monitoring.md` and the
+  skill templates. `find -newermt 02:40` confirms the only repo files this
+  sub-plan's work touched in that window are `aggregator/mirror.py`,
+  `tests/test_mirror.py`, `tests/test_mongo_deploy.py`.
+- The failure was the momentary half-landed state of *that* session's paired
+  edit (HTML updated, test not yet). Once its `test_frontend.py` edit landed at
+  02:51:41, the test passed on re-run and the full suite went 14/14. This is the
+  &quot;unrelated in-flight state under `.claude/`&quot; the sub-plan brief tells this gate
+  to leave alone; I did not touch either file.
+
+## 3. Plan conformance
+
+Checked against `plan/touch-mongo-live-subplans.md` §`sp-06 — mirror-deploy`,
+`touch-mongo-live-plan.md` (GD-21…GD-30, R-42/R-45/R-57) and
+`touch-full-recon-plan.md`.
+
+Every owned item is present in the tree: `aggregator/mirror.py` (mirror runtime
+— queue, breaker, lease, cursors, generation sweep, rebuild, backfill),
+`docs/mongo.md` (deployment recipe, role bootstrap, `/health` block, growth and
+retention numbers, `--rebuild`/`--backfill`, &quot;Mongo down is a non-event&quot;, &quot;never
+publish 27017&quot;), and both owned suites.
+
+The attempt-3 critique's two majors and its minors are closed in code **and**
+carry new behavioural tests (not tautologies — I read them):
+
+- **MAJOR 1** (lease-path exception kills the drainer while `/health` says
+  `live`): `aggregator/mirror.py:1709/1737/1821` now widen the guards;
+  `mirror.py:2078` and `:2093` branch on `if not await self.acquire():`. New
+  test `test_a_driver_surprise_on_the_lease_path_degrades_instead_of_killing_the_drainer`
+  (`tests/test_mirror.py:430`) forces a due renewal, injects both real specimens
+  (`RuntimeError(&quot;Cannot use AsyncMongoClient in different event loop&quot;)` and
+  `ms.SchemaError`), and asserts `tick()` returns a report, `state` is
+  `degraded|down`, `lastError` names the exception, and the mirror recovers.
+  This test fails against the attempt-3 code — it is load-bearing.
+- **MAJOR 2** (`ref` sub-document exempted from the GD-27 scrub while GD-24
+  leaves an open tail): `scrub_op_update` (`mirror.py:968`) now delegates to
+  `_scrub_ref` (`mirror.py:472`), and `tests/test_mirror.py:876-892` builds the
+  hostile `kind:&quot;unknown&quot;` ref with `authToken`/`password`, confirms
+  `refs.validate_ref` still classifies it `unknown`, and asserts the open tail
+  is scrubbed while declared-kind refs stay byte-identical.
+- **MINOR 1** covered by `test_a_renewal_that_failed_stops_the_tick_even_when_it_was_not_a_refusal`
+  (`tests/test_mirror.py:531`).
+- **MINOR 3**: `refused_policy` counter exists (`mirror.py:1612/1883`), is split
+  from `refused_no_lease` (`mirror.py:1867`), is published on `/health`, and the
+  `docs/mongo.md` counter list is asserted **equal in both directions** to
+  `health()[&quot;counters&quot;]` — the doc-drift hole the critique flagged is now closed
+  (`ok: …and the list matches health()['counters'] exactly`).
+- **MINOR 4**: the deny-list is now genuinely load-bearing in the backfill walk
+  test — `ok: …and the deny-list is genuinely consulted, for the transcript as
+  well as for the credential file: ['.credentials.json', 'notes.txt',
+  'session.jsonl']` and `ok: …and a deny rule that DOES name a .jsonl file is
+  honoured … []`.
+- **NIT 1**: the minimum literal-redaction length is now documented and tested
+  (`ok: the literal redaction pass has a documented minimum length` /
+  `ok: …while the structural pass still removes a two-character password`).
+
+Not closed (carried, non-blocking for this gate): **MINOR 2** — `_requeue` still
+puts already-scrubbed ops back on the queue and the next drain re-scrubs them.
+`grep -n _scrubbed aggregator/mirror.py` is empty. This is a performance /
+docstring-accuracy issue (the scrub is idempotent, so the result stays correct),
+not a behavioural failure, and it is the critique's own classification as a
+minor. Flagging it for the critique gate rather than failing the test gate.
+
+## 4. Ownership
+
+`git log -1` is still `579446e orchestration history` — **nothing committed**.
+
+`find . -newermt &quot;2026-07-26 02:40&quot; -type f` (excluding `__pycache__` and
+`.git`) lists, from this sub-plan: `aggregator/mirror.py`,
+`tests/test_mirror.py`, `tests/test_mongo_deploy.py` — plus `docs/mongo.md` at
+02:39:10, also owned. Every other `aggregator/*.py` and `tests/*.py` carries an
+mtime from the prior pass (19:41–23:36), including `aggregator/__init__.py`,
+`aggregator/mongo_store.py`, `aggregator/refs.py` and `tests/run_all.sh`. The
+remaining recent paths (`.claude/shared/monitoring/*`,
+`.claude/skills/*/templates/*`, `.claude/local-orchestrators/…/events.jsonl`,
+`.watcher-state.json`) belong to the concurrent monitoring session and the
+running daemons, not to this sub-plan's implementer.
+
+No edits outside the ownership list.
+
+---
+
+**Gate result: PASS** — 405 assertions green across the two owned suites
+(254 + 151), 2 designed skips, full suite 14/14, bare-checkout arm verified,
+live-mongod arm exercised for real.
+</pre></details>
+<details><summary>Critique findings — sp-mirror-deploy-critique-attempt-4.md</summary><pre># sp-mirror-deploy — adversarial critique, attempt 4
+
+**Verdict: REJECTED.** 3 major, 4 minor, 2 nits. `depth: in-scope`,
+`critical_defect: false`.
+
+Reviewed (full content — the tree is untracked, `git diff` is empty for all four):
+
+- `aggregator/mirror.py` (2 662 lines)
+- `docs/mongo.md` (333 lines)
+- `tests/test_mirror.py` (1 761 lines)
+- `tests/test_mongo_deploy.py` (911 lines)
+
+Against `plan/touch-mongo-live-subplans.md` §`sp-06 — mirror-deploy`,
+`touch-mongo-live-plan.md` GD-21…GD-30 + R-42/R-45/R-57, and
+`touch-full-recon-plan.md` GD-1…GD-20.
+
+Ownership is clean: only the four owned files carry this attempt's mtimes,
+`git log -1` is still `579446e`, nothing committed, no sibling module touched.
+
+**Every finding below was reproduced by running this checkout**, not read off the
+page. Scripts are inlined so the next implementer can re-run them.
+
+Two of attempt 3's findings are genuinely closed and I will not re-litigate them:
+
+- **attempt-3 MAJOR 1** (lease-path exception killing the drainer). `acquire`
+  now has the broad `except Exception` (`mirror.py:1821`), `start`/`tick` wrap
+  their bodies (`mirror.py:1706`, `mirror.py:2045`), `run()` has the belt
+  (`mirror.py:2191`), and the new test at `tests/test_mirror.py:430` injects both
+  real specimens and asserts the task survives. I re-ran it; it is load-bearing.
+- **attempt-3 MINOR 4** (deny-list not load-bearing). `tests/test_mongo_deploy.py:536-560`
+  now records the `deny` calls *and* proves a `.jsonl`-naming rule is honoured.
+  Correct, and the walk asks `deny` before the extension filter
+  (`mirror.py:2538`), which is the ordering that makes the claim true.
+
+**attempt-3 MINOR 2** (`_requeue` re-scrubbing) is closed properly: `ScrubbedOp`
+(`mirror.py:876`) is a type-as-flag, minted only by `validate_op`, and the
+stampers drop it when they merge. See MINOR 2 below for the one hole it opens.
+
+**attempt-3 MAJOR 2 is NOT closed** — it was narrowed by one case and the
+remaining case is the one the fix's own docstring claims to have handled.
+
+---
+
+## MAJOR 1 — the drainer writes with **no writer lease at all** whenever the first `acquire()` fails for any reason other than a lost race, and `/health` then publishes `state:&quot;live&quot;` beside `lease:{held:false}`
+
+**File:** `aggregator/mirror.py:2084` (`_tick`'s lease branch), reached from
+`aggregator/mirror.py:1763` (`_start`) and unguarded by
+`aggregator/mirror.py:1881` (`enqueue`).
+
+```python
+        if self._lease[&quot;held&quot;] and self._lease_due():
+            if not await self.acquire():
+                report[&quot;skipped&quot;] = self.state
+                return report
+```
+
+Attempt 4 fixed the *inner* condition (attempt-3 MINOR 1: branch on the boolean,
+not the state — correct, and tested at `tests/test_mirror.py:531`). The **outer**
+one is the hole: the whole lease branch is gated on `self._lease[&quot;held&quot;]`, so if
+the lease was never acquired the tick never tries to acquire it and never
+declines to write. There is no other lease check between the queue and
+`bulk_upsert`; `enqueue` refuses only on `state == STATE_REFUSED` or a stream
+mismatch (`mirror.py:1881`), and a *failed* acquire produces `degraded`, not
+`refused`.
+
+`_start` reaches exactly that state:
+
+```python
+        if acquire_lease and not await self.acquire():
+            return self.state          # mirror.py:1763 — returns `degraded`, held=False
+```
+
+Attempt 4's own widening of `acquire`'s `except` is what makes this easy to
+reach: every non-race failure now becomes `_record_failure` → `degraded` →
+`return False`, and `degraded` is a state `enqueue` accepts and `_tick` writes in.
+
+**Failure scenario (executed against this checkout):**
+
+```python
+import asyncio, uuid as U
+from aggregator import mirror as mr, mongo_store as ms, refs
+
+class FlakyLease(mr.MemoryBackend):
+    &quot;&quot;&quot;ping/schema fine; only the `writers` write fails, then recovers.&quot;&quot;&quot;
+    def __init__(self, exc):
+        super().__init__(); self.exc = exc
+    async def guarded_update(self, collection, key, update, *, require=None, upsert=True):
+        if collection == &quot;writers&quot; and self.exc is not None:
+            raise self.exc
+        return await super().guarded_update(collection, key, update,
+                                            require=require, upsert=upsert)
+
+def op():
+    k = refs.ref_key({&quot;kind&quot;: &quot;uuid&quot;, &quot;uuid&quot;: str(U.uuid4())})
+    return mr.MirrorOp(&quot;records&quot;, k, ms.op_set(
+        {&quot;sessionId&quot;: &quot;s1&quot;, &quot;type&quot;: &quot;user&quot;, &quot;provenance&quot;: &quot;harness&quot;}))
+
+for exc in (ms.MongoUnavailable(&quot;writers unreachable&quot;),
+            RuntimeError(&quot;Cannot use AsyncMongoClient in different event loop&quot;),
+            ms.SchemaError(&quot;writers: server $jsonSchema refused&quot;)):
+    b = FlakyLease(exc)
+    m = mr.Mirror(mr.MongoConfig(&quot;mongodb://u:p@127.0.0.1:27017/&quot;, &quot;touch_test&quot;), backend=b)
+    st = asyncio.run(m.start(ensure_schema=False))   # -&gt; 'degraded', lease held=False
+    b.exc = None                                    # the blip clears
+    m.enqueue([op()])
+    asyncio.run(m.tick())
+    print(st, m.state, m._lease[&quot;held&quot;], m.stats[&quot;written&quot;], b.calls[&quot;guarded_update&quot;])
+```
+
+```
+degraded live False 1 0        # MongoUnavailable
+degraded live False 1 0        # RuntimeError  (the module's own named specimen)
+degraded live False 1 0        # SchemaError
+```
+
+So: `written == 1`, `guarded_update` calls `== 0` (the lease was never taken and
+never retried), and `health()` is
+
+```
+{'state': 'live', 'lease': {'held': False, 'expiresAt': None, ...}}
+```
+
+Three separate invariants break at once:
+
+- **GD-29** — &quot;a process that cannot hold the lease refuses to mirror while
+  remaining perfectly able to serve reads&quot; (`mirror.py:50-52`). This process
+  cannot hold the lease and mirrors anyway. If another aggregator *does* hold it,
+  these are the two live writers on one stream the lease exists to prevent, and
+  the tolerated-dup counter that is supposed to be the tell reads 0 because the
+  writes are upserts on disjoint uuids.
+- **GD-22 / R-45** — `/health` publishes `state:&quot;live&quot;` next to
+  `lease:{&quot;held&quot;:false}`. That block is served verbatim by sp-12's `server.py`,
+  and it is self-contradicting: nothing downstream can tell this apart from a
+  healthy mirror.
+- The module's own contract at `mirror.py:2084-2092`, whose comment explains at
+  length why the *renewal* must not write under an unrenewed lease — while the
+  never-renewed case walks past the same door.
+
+Why the gate missed it: `tests/test_mirror.py:551-553` forces
+`mirror._lease.update(held=True, …)` before exercising the renewal, and the
+`start()`-is-total arm at `tests/test_mirror.py:479-491` asserts only that
+`start` returns a state — it never ticks afterwards. `held=False` + a healthy
+server is untested.
+
+**Fix (one gated attempt):**
+
+1. Record that a lease is *required*: set a `self._lease_required = bool(acquire_lease)`
+   in `_start` (default True), or simply drop the `held` conjunct and let
+   `_lease_due()` — which already returns `True` when `not held` (`mirror.py:1845`)
+   — carry the branch:
+
+   ```python
+   if self._lease_required and self._lease_due():
+       if not await self.acquire():
+           report[&quot;skipped&quot;] = self.state
+           return report
+   ```
+
+   The flag is needed so `start(acquire_lease=False)` and the raw-`Mirror(...)`
+   test fixtures keep working without silently acquiring.
+2. Belt at the write: `if self._lease_required and not self._lease[&quot;held&quot;]:
+   report[&quot;skipped&quot;] = &quot;no-lease&quot;; return report` immediately before
+   `_take_batches`, so no future refactor of the branch above can re-open it.
+3. Make `health()` incapable of the contradiction: `state == STATE_LIVE` must
+   imply `lease[&quot;held&quot;]` whenever a lease is required (assert it in the health
+   test, `tests/test_mirror.py:1454`).
+4. Test it with the script above — the `FlakyLease` backend (only `writers`
+   fails, everything else healthy) is the shape none of the existing fakes have:
+   `MemoryBackend.fail` fails *everything*, which hides this exactly the way a
+   whole-server outage hides attempt-3's MINOR 1.
+
+---
+
+## MAJOR 2 — the `ref` exemption still rests on a property nothing checks: `_scrub_ref` classifies with `refs.classify`, which does **not** enforce the closed key set, so a hand-built declared-kind ref carries arbitrary secret keys straight into the store
+
+**File:** `aggregator/mirror.py:501` (inside `_scrub_ref`), with the claim
+restated at `aggregator/mirror.py:315-319`, `aggregator/mirror.py:484-487`,
+`aggregator/mirror.py:963-966` and `docs/mongo.md:218-224`.
+
+```python
+    try:
+        kind = refs.classify(value)
+    except refs.RefError:
+        kind = &quot;unknown&quot;
+    return value if kind not in UNPINNED_REF_KINDS else scrub_value(value)
+```
+
+The justification, stated four times:
+
+&gt; *&quot;A ref of one of GD-24's seven declared kinds has a closed key set and
+&gt; per-field value pins (`refs.KIND_SPECS`), so there is nowhere in it for a
+&gt; quoted credential to sit.&quot;* (`mirror.py:485-487`; `docs/mongo.md:218-220`:
+&gt; *&quot;skipped whole: one of GD-24's seven union members has a closed key set and
+&gt; per-field value pins, so there is nowhere in it for a credential to sit&quot;*)
+
+`refs.classify` checks neither. Its own docstring says so — *&quot;Name `ref`'s kind
+**without validating its values**&quot;* (`refs.py:704`) — and its declared-kind
+branch is a bare membership test (`refs.py:719-722`): `kind` in `KIND_SPECS` ⇒
+return it, whatever else the dict contains. The function that *does* enforce the
+closed key set is `refs.validate_ref`, at `refs.py:747-748`:
+
+```python
+    extra = set(ref) - {&quot;kind&quot;} - set(spec.fields)
+    if extra:
+        raise RefError(f&quot;ref kind {kind!r} has unexpected fields {sorted(extra)}&quot;)
+```
+
+and attempt 3's finding (a) — *nothing on the write path calls `validate_ref`* —
+is still true: `grep -n validate_ref aggregator/mongo_store.py` is empty, and
+`ms.validate_update` has no notion of a ref's shape. So the exemption is decided
+by the one classifier that cannot see the violation.
+
+**Failure scenario (executed):**
+
+```python
+import uuid as U
+from aggregator import mirror as mr, mongo_store as ms, refs
+
+hostile = {&quot;kind&quot;: &quot;uuid&quot;, &quot;uuid&quot;: str(U.uuid4()),           # a DECLARED kind
+           &quot;authToken&quot;: &quot;sk-ant-api03-&quot; + &quot;A&quot;*30,
+           &quot;password&quot;: &quot;hunter2&quot;}
+print(refs.classify(hostile))          # 'uuid'      -&gt; exempt
+refs.validate_ref(hostile)             # RefError: ref kind 'uuid' has unexpected
+                                       #           fields ['authToken', 'password']
+
+upd = ms.op_set({&quot;stream&quot;: &quot;s&quot;, &quot;seq&quot;: 2, &quot;source&quot;: &quot;touch&quot;,
+                 &quot;provenance&quot;: &quot;asserted&quot;, &quot;kind&quot;: &quot;k&quot;, &quot;ref&quot;: hostile})
+print(mr.scrub_op_update(upd)[&quot;$set&quot;][&quot;ref&quot;])
+key = refs.ref_key({&quot;kind&quot;: &quot;event&quot;, &quot;stream&quot;: &quot;s&quot;, &quot;seq&quot;: 2})
+print(mr.validate_op((&quot;events&quot;, key, upd), scrub=True).update[&quot;$set&quot;][&quot;ref&quot;])
+```
+
+```
+uuid
+{'kind': 'uuid', 'uuid': '8286…', 'authToken': 'sk-ant-api03-AAAA…', 'password': 'hunter2'}
+{'kind': 'uuid', 'uuid': '8286…', 'authToken': 'sk-ant-api03-AAAA…', 'password': 'hunter2'}
+```
+
+Both credentials survive the backstop, `validate_op` accepts the operation, and
+in an upsert-only mirror (GD-26) they are in `events` permanently and on every
+read route thereafter. Attempt 4 closed the `kind:&quot;unknown&quot;` door and left the
+`kind:&quot;&lt;declared&gt;&quot; + extra keys` door open — which is the *same* door, because
+the ref that reaches here has not been through `canonical_ref` (that is precisely
+attempt-3's point (a), and `canonical_ref` is what would have stripped the extras:
+it calls `validate_ref` first, `refs.py:757`).
+
+Reachability is not hypothetical: sp-07…sp-11 build refs, and they are being told
+by three code comments and a documentation page that `ref` is a safe subtree, so a
+mapper that assembles `{&quot;kind&quot;: &quot;agentId&quot;, &quot;agentId&quot;: …, **passthrough}` is the
+natural thing to write against this contract.
+
+The new test cannot catch it because it builds its hostile ref *through the
+constructor that strips extras*: `tests/test_mirror.py:876` is
+`refs.canonical_ref({&quot;kind&quot;: &quot;unknown&quot;, …})`, and the negative case at
+`tests/test_mirror.py:903` uses `{&quot;kind&quot;: &quot;not-a-real-kind&quot;}` — a kind
+`classify` refuses. Neither is a declared kind with an undeclared key.
+
+**Fix (one word plus a test):** classify with the function that enforces the
+claim. `validate_ref` raises `RefError` for extra fields and for a failed value
+pin, and `_scrub_ref`'s existing `except refs.RefError: kind = &quot;unknown&quot;` already
+routes that to the scrub — so the whole change is:
+
+```python
+    try:
+        kind = refs.validate_ref(value)     # not classify: THIS is the function
+    except refs.RefError:                   # that enforces the closed key set
+        kind = &quot;unknown&quot;                    # (refs.py:747) and the value pins
+```
+
+`UnknownRefError` subclasses `RefError` (`refs.py:138`), so the `except` still
+covers the bogus-kind case. Verify the declared-kind fast path is unchanged:
+`_scrub_ref(slot) is slot` must still hold (it does — `validate_ref` returns the
+kind and mutates nothing), so `{&quot;ref.sessionKey&quot;: …}` keeps joining. Then:
+
+- add the declared-kind-plus-extra-keys case to
+  `test_the_scrub_never_corrupts_a_schema_field_or_a_ref`
+  (`tests/test_mirror.py:792`), built **by hand**, not via `canonical_ref`;
+- correct the four prose sites to say what the code then does — the exemption is
+  for a ref that *validates* against its kind's spec, not one that merely names
+  a known kind (`mirror.py:315-319`, `mirror.py:484-492`, `mirror.py:963-966`,
+  `docs/mongo.md:218-224`).
+
+---
+
+## MAJOR 3 — after the breaker recovers, `/health` stays `down` **indefinitely** on an idle deployment: a successful lease renewal never clears the failure count, and a no-work tick returns before the state-clearing block
+
+**File:** `aggregator/mirror.py:2100-2101` (`if not batches: return report`) with
+`aggregator/mirror.py:1839-1842` (`acquire`'s success path, which never calls
+`_record_success`) and `aggregator/mirror.py:2152` (the only `_record_success`
+call site, after the batch loop).
+
+`_record_success` — the only thing that resets `_failures` and lets the state be
+promoted — is reachable **only** through a tick that actually had batches. An
+idle mirror (empty queue, which is the steady state between transcript writes)
+returns at `mirror.py:2101`, so:
+
+- `_failures` stays at `breaker_failures`, so the *next* single failure re-opens a
+  full 30 s breaker hold immediately rather than after N;
+- `self.state` stays `STATE_DOWN` even though the server is answering — proven by
+  the successful `guarded_update` on `writers` that the same tick just made.
+
+**Failure scenario (executed):**
+
+```python
+import asyncio
+from aggregator import mirror as mr, mongo_store as ms
+
+clock = {&quot;t&quot;: 1000.0}
+b = mr.MemoryBackend()
+m = mr.Mirror(mr.MongoConfig(&quot;u&quot;, &quot;touch_test&quot;), backend=b, monotonic=lambda: clock[&quot;t&quot;])
+asyncio.run(m.start(ensure_schema=False))            # live
+b.fail = ms.MongoUnavailable(&quot;down&quot;)
+for _ in range(3):                                   # trip the breaker
+    m._lease[&quot;expiresAt&quot;] = m.clock().isoformat().replace(&quot;+00:00&quot;, &quot;Z&quot;)
+    asyncio.run(m.tick())
+b.fail = None; clock[&quot;t&quot;] += 31.0                    # server healthy, hold lapsed
+for _ in range(5): asyncio.run(m.tick())             # 5 healthy, work-free ticks
+print(m.state, m._lease[&quot;held&quot;], m.queue.qsize())
+```
+
+```
+down True 0
+```
+
+Five consecutive ticks each renewed the lease against a healthy server — a real
+round trip, `acquired: True` — and `/health` still reports `down` with the stale
+`lastError: &quot;MongoUnavailable: down&quot;`. It clears only when a write happens to
+arrive:
+
+```python
+m.enqueue([op()]); asyncio.run(m.tick())   # -&gt; state 'live'
+```
+
+`docs/mongo.md:29` promises `degraded` for &quot;mongod slow or erroring&quot; and
+`down` for &quot;no mongod running&quot;. Neither describes this: nothing is wrong, and the
+one route an operator pages on says the mirror is dead for as long as the session
+is quiet. That is the same class of untruth as attempt-3's MAJOR 1 with the sign
+reversed — fail-safe rather than fail-open, so no data is lost, but GD-22's
+requirement is that `/health` be *truthful*, not that it be pessimistic, and this
+one never self-heals without traffic.
+
+**Fix (one gated attempt):**
+
+1. Call `self._record_success()` on `acquire`'s success path
+   (`mirror.py:1839-1842`) — it is a completed server round trip, and it is the
+   only one an idle mirror makes.
+2. Move the state-clearing block (`mirror.py:2153-2165`) so a work-free tick
+   reaches it, i.e. run it before the `if not batches: return report` early exit
+   (or drop that early return and let the empty `pending` loop fall through).
+3. Test: the script above, asserting `m.state == STATE_LIVE` after the healthy
+   work-free ticks and `m._failures == 0`. Extend
+   `test_the_breaker_holds_then_lets_the_mirror_recover`
+   (`tests/test_mirror.py:571`) — today it recovers *with* queued work, which is
+   why this passed.
+
+---
+
+## MINOR 1 — a recovered mirror publishes `state:&quot;live&quot;` with a stale `lastError`, contradicting `docs/mongo.md`'s literal promise
+
+**Files:** `aggregator/mirror.py:2153-2165` (the clean-tick block sets `state`
+and nothing else) vs `docs/mongo.md:42-45`.
+
+The page says, and offers as a contract:
+
+&gt; *&quot;`lastError` is only ever a **fault** … A `live` mirror never publishes a
+&gt; `lastError`, so an alert rule can read that field literally.&quot;*
+
+The re-take branch knows the rule and clears it (`mirror.py:2082`,
+`self.last_error = None`). The ordinary degrade→recover path does not. Executed:
+
+```
+after work arrives: state=live written=1 lastError='MongoUnavailable: down'
+```
+
+An alert rule written against the documented contract fires forever after the
+first transient blip. `tests/test_mirror.py:1513-1525` asserts the property only
+for a mirror that never had a fault, so the recovery case is uncovered.
+
+**Fix:** clear `self.last_error = None` in the clean-tick block alongside
+`self.state = STATE_LIVE` (`mirror.py:2165`) — the counters stay, which is the
+durable record the comment there already argues for — and assert
+`health()[&quot;lastError&quot;] is None` after a recovery in
+`test_the_breaker_holds_then_lets_the_mirror_recover`.
+
+## MINOR 2 — `ScrubbedOp` is an exported type whose mere presence disables GD-27's backstop, and `Mapper.__call__` honours it on mapper output, which by definition has never been scrubbed
+
+**Files:** `aggregator/mirror.py:949-950` (`validate_op`), `aggregator/mirror.py:133`
+(`__all__`), `aggregator/mirror.py:774` (`Mapper.__call__`).
+
+```python
+    if isinstance(item, ScrubbedOp):
+        return ScrubbedOp(collection, key, update)      # never walked
+```
+
+The type-as-flag is the right call for `_requeue` (attempt-3 MINOR 2, closed
+well). But `ScrubbedOp` is in `__all__`, and `Mapper.__call__` runs
+`validate_op(item, …, scrub=False)` over whatever a mapper returned — so a
+sp-07…sp-11 mapper that imports the exported class and yields
+`ScrubbedOp(...)` triples (a natural thing to do when a module already imports
+`MirrorOp` from here) silently opts its own payloads out of the only backstop
+GD-27 has. Nothing validates the claim the type makes.
+
+**Fix:** make the marker unforgeable at the boundary that can never legitimately
+carry it — in `Mapper.__call__`, downgrade: `op = validate_op(item, …, scrub=False)`
+then `if isinstance(op, ScrubbedOp): op = MirrorOp(*op)`. Mapper output has by
+definition not been scrubbed. And drop `&quot;ScrubbedOp&quot;` from `__all__`
+(`mirror.py:133`) — it is an internal transport marker, not part of the mapper
+contract; `MirrorOp` is what SD-1 needs. Assert both in
+`test_one_kind_has_one_owner_and_mapper_output_is_validated`
+(`tests/test_mirror.py:1355`) with a mapper that tries the forge.
+
+## MINOR 3 — `rebuild()` raises out of `main()` on a transient outage, against the module's &quot;every failure is a state&quot; posture
+
+**File:** `aggregator/mirror.py:2363` (`drop_collection`), `aggregator/mirror.py:2374-2375`
+(`counts()` / `fingerprint()`).
+
+Three unguarded awaits on the driver in the one method an operator invokes from a
+shell. Executed:
+
+```
+rebuild RAISED: MongoUnavailable derived: drop failed, server went away
+rebuild(2) RAISED: MongoUnavailable read failed
+```
+
+`main()` (`mirror.py:2654`) calls it inside `asyncio.run`, so the operator gets a
+traceback where the docstring promises *&quot;the difference between an operator who
+can see what happened and a traceback out of `asyncio.run`&quot;* (`mirror.py:2344-2346`)
+and `docs/mongo.md:267-277` promises a report on `/health`. The docstring's
+&quot;never raises&quot; is scoped to *mapping* failures, so this is a gap rather than a
+contradiction — but `--rebuild` is exactly the command run against a database
+someone is fiddling with.
+
+**Fix:** wrap the three calls: a failed `drop_collection` ⇒ `_record_failure` +
+`droppedDerived:False` + return the report without replaying (dropping is the
+precondition); a failed `counts`/`fingerprint` ⇒ `None` in the report plus a
+`lastError`. Add an arm to `test_wipe_and_rebuild_produce_the_same_fingerprint`
+(`tests/test_mirror.py:1200`) with a backend whose `drop_collection` raises.
+
+## MINOR 4 — `backfill`'s item unpack and `enqueue`'s arg coercion both accept shapes they then mishandle
+
+**Files:** `aggregator/mirror.py:2418`, `aggregator/mirror.py:1872`.
+
+```python
+            kind, observation, source = (item if len(item) == 3 else (*item, None))
+```
+
+`len(item)` requires a sized object (a generator from a streaming source raises
+`TypeError`), and a 4-tuple raises `ValueError: too many values to unpack`
+(executed) — out of a method whose whole design note is that a backfill of a
+large corpus must not die on one item. Separately, `enqueue`
+(`mirror.py:1872`) coerces any non-list/tuple to `[ops]`, so
+`enqueue(op for op in …)` queues the *generator object* as one operation
+(executed: `accepted=1`); it is later counted as `rejected` rather than lost, but
+the accepted-count return value lies.
+
+**Fix:** unpack defensively — `parts = tuple(item); kind, observation = parts[0], parts[1];
+source = parts[2] if len(parts) &gt; 2 else None`, and refuse a longer tuple as a
+counted `rejected` with a message naming the item, not an exception. In `enqueue`,
+coerce with `ops = list(ops) if isinstance(ops, (list, tuple, set, frozenset)) or
+hasattr(ops, &quot;__iter__&quot;) and not isinstance(ops, MirrorOp) else [ops]` — or more
+simply, refuse a non-`MirrorOp` non-sequence explicitly.
+
+## NIT 1 — `sweep(reinsert=())` permits the one legal delete with no re-insert
+
+`aggregator/mirror.py:2297-2308`: the `stream_meta` `delete_many` runs
+unconditionally, and `reinsert` defaults to `()`. GD-26 and the docstring frame
+the delete and its re-insert as *one code path* (`mirror.py:2280-2283`), which is
+what makes the exception defensible. A caller that forgets `reinsert=` gets a
+bare scoped delete that the code presents as the legal one. A file that genuinely
+shrank has nothing to re-insert, so this is a judgement call rather than a bug —
+but it deserves either a keyword-only `allow_empty_reinsert=False` or one comment
+saying the empty case is intentional.
+
+## NIT 2 — a non-`MapperError` raised inside `_take_batches` loses the operations it already dequeued
+
+`aggregator/mirror.py:1979-1987` catches `MapperError` only. `scrub_op_update`
+walks user-controlled depth, so a pathologically nested payload raises
+`RecursionError`, which escapes to `tick`'s blanket guard (`mirror.py:2047`) —
+after the operations have left the queue and before they entered a batch. They
+are recorded as a *failure*, not as `rejected` or `dropped`, so GD-26's &quot;never
+dropped quietly&quot; is technically breached in a corner nobody will reach. Widening
+that `except` to `Exception` and counting it as `rejected` costs one word.
+
+---
+
+## What I checked and found correct (so the next attempt does not churn it)
+
+- **GD-21.** `import pymongo` appears only inside function bodies
+  (`AsyncBackend.connect/bulk_upsert/guarded_update/update_many/delete_many/drop_collection`),
+  never at module scope; options come from `ms.client_options()`. I re-ran both
+  owned suites with a shadow `pymongo` module raising `ImportError`: rc=0 both,
+  skipping cleanly. `Mirror` resolves absence to `STATE_ABSENT` with a truthful
+  `lastError`, and `enqueue` books it under `skipped_absent`, not `dropped`.
+- **GD-22 / GD-30.** `enqueue` contains no `await`, cannot raise, and
+  drops+counts+degrades on a full queue; the breaker demonstrably stops the tick
+  before it touches the driver (asserted on `backend.calls`, not on timing);
+  `Mapper.__call__` passes `scrub=False`, so the 8.79 ms walk is off the poll
+  loop, and the scrub-count test (`tests/test_mirror.py:910`) proves 0 walks on
+  the loop side and exactly 8 on the drainer side for 8 operations.
+- **GD-24 / GD-25.** Every `_id` goes through `refs.ref_key`; `validate_op` runs
+  `spec_for`/`check_id`/`validate_update` at the registry boundary; no `$inc`
+  anywhere; `_take_batches` deliberately does not collapse two updates to one
+  `_id`; `save_cursor`'s `$set` is argued and correct (a shrink must rewind).
+- **GD-26.** No delete verb is *called* outside the two guarded doors; both
+  backends refuse every collection but `stream_meta` for `delete_many` and every
+  name but `derived` for `drop_collection`, in their own bodies;
+  `_assert_scoped` refuses `{}` and gen-only filters; no `expireAfterSeconds`,
+  no `$unset`. The live arm proves the *server* refuses `delete` on `records`
+  under the documented role, and that the documented role cannot drop `records`.
+- **GD-27 (except MAJOR 2).** 0600/0400 accepted, every group/other/exec bit
+  refused, symlink refused, `save_credentials` uses `O_EXCL|0600` at open time;
+  `database_name` is `touch_&lt;sha1(realpath)[:8]&gt;` fenced to `touch_` *with* the
+  underscore; no connection-string literal or bare `27017` under `aggregator/`;
+  `/health` carries no URI and no password in either spelling; `holderBoot` is a
+  digest, not the raw `boot_id`; `_MIN_LITERAL_SECRET` is now documented
+  (`mirror.py:361-370`) with the structural-pass argument, and NIT 1 of attempt 3
+  is properly closed; the deny-list is asked before the extension filter and is
+  load-bearing in the test.
+- **GD-28 / GD-29 (except MAJOR 1).** No `provenance:&quot;harness&quot;` is emitted here;
+  the lease is a real conditional write proven against a real mongod; tolerated
+  dups are counted, not swallowed; the TTL re-take is implemented, capped at once
+  per TTL, and correctly restricted to `_lease_lost`.
+- **`refused_no_lease` / `refused_policy`** (attempt-3 MINOR 3) is split
+  correctly (`mirror.py:1880-1885`), published, and the `docs/mongo.md:47-58`
+  list is asserted equal to `health()[&quot;counters&quot;]` in both directions — the
+  doc-drift hole is genuinely closed.
+- **`discover_mappers`** (attempt-3 NIT 2) now compares the fully-qualified name
+  (`mirror.py:805`), in both `discover_mappers` and `iter_sources`.
+- **R-42 / R-57 docs.** The `docker run` recipe is parsed out of the page and
+  re-run with only identifiers changed; `0.0.0.0` and bare `-p 27017:27017`
+  appear only inside prohibition paragraphs; all four measured growth numbers,
+  the no-TTL law, &quot;Mongo down is a non-event&quot;, `--rebuild`/`--backfill`, and
+  &quot;never publish 27017&quot; are present.
+- **Ownership.** Four files, nothing else; no commit; `tests/run_all.sh` globs,
+  so both suites are in the full run without editing a file this sub-plan does
+  not own.
+
+---
+
+## Verdict fields
+
+- `approved`: **false**
+- `depth`: **in-scope** — MAJOR 1 is one condition plus a flag in `_tick`,
+  MAJOR 2 is one identifier in `_scrub_ref` (`classify` → `validate_ref`) plus
+  four prose corrections, MAJOR 3 is one `_record_success()` call and moving one
+  early return. No sub-plan boundary is crossed and no new research is needed.
+- `critical_defect`: **false** — nothing here corrupts the store or invalidates
+  the remaining sub-plans' design. MAJOR 2 does carry a forward edge worth
+  naming to the next implementer for the second attempt running: sp-07…sp-11 are
+  being told, in three code comments and on a documentation page, that `ref` is
+  a safe subtree. Fixing that claim before those mappers are written is cheaper
+  than after, and cheaper still than an upsert-only store that already holds the
+  credential.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

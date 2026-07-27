@@ -1,0 +1,485 @@
+<title>sp-watcher-templates-firstwave — cycle 5</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-watcher-templates-firstwave — implement→test→critique, attempt 5/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 5 closes every open finding from the attempt-4 critique (3 major, 4 minor, 3 applicable nits); only the nine owned files changed.
+
+MAJORS
+- M-1 (dead self-exit): `stream_terminal_close()` now resets the terminal flag only on evidence the run is LIVE AGAIN — `complete running`, or a `plan` event whose state is not itself a close. A settle `plan done` no longer cancels the driver's close, and a foreign-writer close is neutral rather than cancelling. Mutation-verified: with the old rule the watcher never exits in 14 s under `QUIET=1/EXIT=3`; with the fix it exits at 3 s via &quot;run closed by the driver&quot;. New arms: 4 unit + a live arm that asserts (anti-vacuity) the watcher's own settle events really did land after the driver close, then that the authorized route still fires.
+- M-2 (SIGTERM race loses the last agent): `decision_watcher` installs SIGTERM/SIGINT handlers that ARM a drain (`ORCH_DRAIN_SECS`, default 3 s) instead of dying mid-poll — at least one more tail+emit pass, then checkpoint and clean return; a second signal exits at once. `poll_sleep()`/`tick_sleep()` make every `continue` path (including the missing-journal branch) reach the drain, so the process is still promptly stoppable. Live arm asserts the final result, its decision line and its token usage survive; a SIGKILL control (unhandleable, i.e. pre-fix behavior) shows those events ABSENT, so the arm cannot pass on a lucky poll tick.
+- M-3 (vacuous lock guard): added `test_status_append_waits_for_the_lock` — the test process holds `LOCK_EX` on events.jsonl, a `status.sh` writer must block and append nothing, then complete exactly once on release; mutation-verified (lock stripped ⇒ not blocked, 128 bytes appended behind the held lock ⇒ both checks fail). Added `test_append_sites_take_lock_ex` (source guards on both writers). The 24-writer arm keeps its value as a smoke test and its comment now states plainly that GD-11's 1 KB cap makes R-10's &quot;&gt;8 KiB tearing&quot; scenario unreachable.
+
+MINORS/NITS
+- m-1: one `resolve_config() -&gt; (path, values)`; the first EXISTING config wins outright (corrupt ⇒ defaults + stderr warning, same file stays watched so an in-place repair reloads).
+- m-2: `PARSE_FAILURES` popped on both early-return paths in `task_status`, so a deleted/rotated stream stops inflating `/health` forever (+test).
+- m-3: the settle pass ADOPTS terminal `plan` closes already in the stream (session-scoped fold, `stream_plan_closes()`) instead of writing a second &quot;(closed, no verdict)&quot; close over the script's verified one; the run-level `complete` is re-derived and only emitted when the verdict actually moved. Live arm asserts exactly ONE research close and that it is the script's.
+- m-4: `status.sh` imports fcntl defensively and skips the lock when absent, matching `emit()`'s contract.
+- n-1: `health_payload()` docstring rewritten. n-2: monitoring.md records that no template publishes `strategy:'serial'`, so that watcher branch is legacy-config-only (+doc guard). n-4: the research template's zero-report branch now closes the run failed and throws instead of spawning synthesis with nothing to synthesize (+guard).
+- Docs: monitoring.md's exit contract now describes shipped behaviour (what cancels a close, the drain, the config-resolution rule).
+- n-3 (`.gitignore` comment hunk) deliberately untouched — that file is sp-01's.
+
+Verification: `test_watcher.py` (268 checks), `test_server.py` (22), `test_shell.py`, `test_frontend.py` all rc 0; watcher suite 22 s → 30 s from the new live arms. Also re-ran every other suite that references these files (`tests/test_legacy.py`, `test_e2e_sim.py`, `test_agents.py`, `test_ws.py`, `test_reducer.py`, plus `test_bootstrap.py`, `test_fixtures.py`, `test_docs.py`, `test_register.py`) — all green. Both templates parse as wrapped async bodies; `bash -n status.sh` clean. No commit made.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites 100% green: test_watcher.py (ALL WATCHER TESTS PASSED), test_shell.py, test_server.py (22/22), test_frontend.py — all rc=0, stdlib-only, no services. Full-suite gate returns rc=1 solely from tests/test_mirror.py (3 fails) and tests/test_sessions.py (1 fail), which import only aggregator.{mirror,mongo_store,refs,tailer} and contain zero references to decision_watcher/status.sh/monitor_server/templates — pre-existing red state owned by sp-mirror-deploy/sp-sessions-arm, not a regression from this attempt. All attempt-4 critique defects closed with non-tautological arms: M-1 (settle pass no longer cancels the driver close; unit + e2e arms prove the exit fires by the driver route), M-2 (SIGTERM drain, with an unhandleable-signal control), M-3 (real LOCK_EX contention arm that fails if the flock is removed), m-1 (single resolve_config resolver), m-2 (PARSE_FAILURES popped on stat/OSError paths), m-3 (settle adopts the stream's close), m-4 (defensive fcntl import in both writers). Plan conformance verified for R-07/R-08/R-09/R-10-slice/R-13/R-01:guard/R-39/R-40/R-58 and SD-3/SD-4. Ownership clean: mtimes show exactly the nine owned files touched (07:11–07:25Z); monitor.html and test_frontend.py untouched; no commit.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 1 major, 3 minor, 4 nits. All four attempt-4 defects (M-1 settle-vs-driver-close, M-2 SIGTERM drain, M-3 vacuous lock guard, m-1..m-4) are genuinely closed with non-tautological arms; I re-derived M-1's semantics against the real module and all four suites are rc=0 here. The blocker that remains: implement.workflow.js:313 and implement-plan/SKILL.md:100-102 state that the workflow runtime's import() throws and that runStatus/closeRun/publishConfig &quot;silently no-op at runtime&quot;, while the same file's closeRun comment and monitoring.md's new lifecycle block describe those helpers as the live mechanism for R-09/R-40. Repo evidence backs the no-op claim (every loop-terminal plan event came from cycle_reporter.py per .cycle-reporter-state.json; cycle_reporter.py:207 skips every non-sp- plan and never emits orchestrator complete; zero finalgate events; the single plans_total event is hand-written and its value 19 != the template's 17). Consequence: this diff also DELETED the agent-side statusCmd('synthesis','plan','done') fallback (research.workflow.js:242) and added test_shell.py:539 forbidding its restoration, so nothing writes research/synthesis/divide/finalgate plan closes or the w:&quot;agent&quot; orchestrator complete that the (now-correct) exit_authorized() needs — the watcher falls back to the 20-min abandoned window, i.e. the CONVO-14 symptom R-40 exists to remove. Minors: monitor_server.py and monitoring.md exceed their explicitly recorded scope carve-outs (subplans.md Scope exclusion 1 / &quot;R-39 schema note only&quot;); /health's parse counter only refreshes on a /tasks poll, unlike R-10's stated acceptance; stop handlers installed after a long startup backfill.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">attempts exhausted</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 5 closes every open finding from the attempt-4 critique (3 major, 4 minor, 3 applicable nits); only the nine owned files changed.
+
+MAJORS
+- M-1 (dead self-exit): `stream_terminal_close()` now resets the terminal flag only on evidence the run is LIVE AGAIN — `complete running`, or a `plan` event whose state is not itself a close. A settle `plan done` no longer cancels the driver's close, and a foreign-writer close is neutral rather than cancelling. Mutation-verified: with the old rule the watcher never exits in 14 s under `QUIET=1/EXIT=3`; with the fix it exits at 3 s via &quot;run closed by the driver&quot;. New arms: 4 unit + a live arm that asserts (anti-vacuity) the watcher's own settle events really did land after the driver close, then that the authorized route still fires.
+- M-2 (SIGTERM race loses the last agent): `decision_watcher` installs SIGTERM/SIGINT handlers that ARM a drain (`ORCH_DRAIN_SECS`, default 3 s) instead of dying mid-poll — at least one more tail+emit pass, then checkpoint and clean return; a second signal exits at once. `poll_sleep()`/`tick_sleep()` make every `continue` path (including the missing-journal branch) reach the drain, so the process is still promptly stoppable. Live arm asserts the final result, its decision line and its token usage survive; a SIGKILL control (unhandleable, i.e. pre-fix behavior) shows those events ABSENT, so the arm cannot pass on a lucky poll tick.
+- M-3 (vacuous lock guard): added `test_status_append_waits_for_the_lock` — the test process holds `LOCK_EX` on events.jsonl, a `status.sh` writer must block and append nothing, then complete exactly once on release; mutation-verified (lock stripped ⇒ not blocked, 128 bytes appended behind the held lock ⇒ both checks fail). Added `test_append_sites_take_lock_ex` (source guards on both writers). The 24-writer arm keeps its value as a smoke test and its comment now states plainly that GD-11's 1 KB cap makes R-10's &quot;&gt;8 KiB tearing&quot; scenario unreachable.
+
+MINORS/NITS
+- m-1: one `resolve_config() -&gt; (path, values)`; the first EXISTING config wins outright (corrupt ⇒ defaults + stderr warning, same file stays watched so an in-place repair reloads).
+- m-2: `PARSE_FAILURES` popped on both early-return paths in `task_status`, so a deleted/rotated stream stops inflating `/health` forever (+test).
+- m-3: the settle pass ADOPTS terminal `plan` closes already in the stream (session-scoped fold, `stream_plan_closes()`) instead of writing a second &quot;(closed, no verdict)&quot; close over the script's verified one; the run-level `complete` is re-derived and only emitted when the verdict actually moved. Live arm asserts exactly ONE research close and that it is the script's.
+- m-4: `status.sh` imports fcntl defensively and skips the lock when absent, matching `emit()`'s contract.
+- n-1: `health_payload()` docstring rewritten. n-2: monitoring.md records that no template publishes `strategy:'serial'`, so that watcher branch is legacy-config-only (+doc guard). n-4: the research template's zero-report branch now closes the run failed and throws instead of spawning synthesis with nothing to synthesize (+guard).
+- Docs: monitoring.md's exit contract now describes shipped behaviour (what cancels a close, the drain, the config-resolution rule).
+- n-3 (`.gitignore` comment hunk) deliberately untouched — that file is sp-01's.
+
+Verification: `test_watcher.py` (268 checks), `test_server.py` (22), `test_shell.py`, `test_frontend.py` all rc 0; watcher suite 22 s → 30 s from the new live arms. Also re-ran every other suite that references these files (`tests/test_legacy.py`, `test_e2e_sim.py`, `test_agents.py`, `test_ws.py`, `test_reducer.py`, plus `test_bootstrap.py`, `test_fixtures.py`, `test_docs.py`, `test_register.py`) — all green. Both templates parse as wrapped async bodies; `bash -n status.sh` clean. No commit made.</li><li>Test gate PASSED: PASS. Owned suites 100% green: test_watcher.py (ALL WATCHER TESTS PASSED), test_shell.py, test_server.py (22/22), test_frontend.py — all rc=0, stdlib-only, no services. Full-suite gate returns rc=1 solely from tests/test_mirror.py (3 fails) and tests/test_sessions.py (1 fail), which import only aggregator.{mirror,mongo_store,refs,tailer} and contain zero references to decision_watcher/status.sh/monitor_server/templates — pre-existing red state owned by sp-mirror-deploy/sp-sessions-arm, not a regression from this attempt. All attempt-4 critique defects closed with non-tautological arms: M-1 (settle pass no longer cancels the driver close; unit + e2e arms prove the exit fires by the driver route), M-2 (SIGTERM drain, with an unhandleable-signal control), M-3 (real LOCK_EX contention arm that fails if the flock is removed), m-1 (single resolve_config resolver), m-2 (PARSE_FAILURES popped on stat/OSError paths), m-3 (settle adopts the stream's close), m-4 (defensive fcntl import in both writers). Plan conformance verified for R-07/R-08/R-09/R-10-slice/R-13/R-01:guard/R-39/R-40/R-58 and SD-3/SD-4. Ownership clean: mtimes show exactly the nine owned files touched (07:11–07:25Z); monitor.html and test_frontend.py untouched; no commit.</li><li>Critique REJECTED: REJECTED — 1 major, 3 minor, 4 nits. All four attempt-4 defects (M-1 settle-vs-driver-close, M-2 SIGTERM drain, M-3 vacuous lock guard, m-1..m-4) are genuinely closed with non-tautological arms; I re-derived M-1's semantics against the real module and all four suites are rc=0 here. The blocker that remains: implement.workflow.js:313 and implement-plan/SKILL.md:100-102 state that the workflow runtime's import() throws and that runStatus/closeRun/publishConfig &quot;silently no-op at runtime&quot;, while the same file's closeRun comment and monitoring.md's new lifecycle block describe those helpers as the live mechanism for R-09/R-40. Repo evidence backs the no-op claim (every loop-terminal plan event came from cycle_reporter.py per .cycle-reporter-state.json; cycle_reporter.py:207 skips every non-sp- plan and never emits orchestrator complete; zero finalgate events; the single plans_total event is hand-written and its value 19 != the template's 17). Consequence: this diff also DELETED the agent-side statusCmd('synthesis','plan','done') fallback (research.workflow.js:242) and added test_shell.py:539 forbidding its restoration, so nothing writes research/synthesis/divide/finalgate plan closes or the w:&quot;agent&quot; orchestrator complete that the (now-correct) exit_authorized() needs — the watcher falls back to the 20-min abandoned window, i.e. the CONVO-14 symptom R-40 exists to remove. Minors: monitor_server.py and monitoring.md exceed their explicitly recorded scope carve-outs (subplans.md Scope exclusion 1 / &quot;R-39 schema note only&quot;); /health's parse counter only refreshes on a /tasks poll, unlike R-10's stated acceptance; stop handlers installed after a long startup backfill.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-watcher-templates-firstwave-test-attempt-5.md</summary><pre># sp-watcher-templates-firstwave — TEST GATE, attempt 5 — PASS
+
+Read-only gate. No source or test file was edited; only executed and inspected.
+
+## 1. Targeted suites (owned by this sub-plan) — 100% green
+
+Run from `.claude/shared/monitoring/tests/` (stdlib, standalone, rc=0 each):
+
+| file | result |
+|---|---|
+| `test_watcher.py` | `ALL WATCHER TESTS PASSED` (rc 0) |
+| `test_shell.py` | `all sp-shell tests passed` (rc 0) |
+| `test_server.py` | `all 22 tests passed` (rc 0) |
+| `test_frontend.py` | `all assertions passed` (rc 0) — not owned, run as neighbour |
+
+No third-party packages installed for the run, no daemons started, no network.
+`decision_watcher.py` / `monitor_server.py` / `status.sh` import and execute on
+bare stdlib; nothing in the owned set references `pymongo`.
+
+## 2. Full-suite regression gate — rc=1, but **no new failure**
+
+```
+cd /home/laniakea/Projects/touch
+rc=0
+for t in .claude/shared/monitoring/tests/test_*.py; do (cd &quot;$(dirname &quot;$t&quot;)&quot; &amp;&amp; python3 &quot;$(basename &quot;$t&quot;)&quot;) || rc=1; done
+for t in tests/test_*.py; do [ -e &quot;$t&quot; ] || continue; python3 &quot;$t&quot; || rc=1; done
+exit $rc                                                    # -&gt; GATE_RC=1
+```
+
+All four monitoring tests green. Two repo-level files fail:
+
+- **`tests/test_mirror.py`** — 3 failures:
+  `…proven by the call count: the held ticks made no attempt`,
+  `the first generation lands` (`counts() == {&quot;records&quot;: 3, &quot;stream_meta&quot;: 3}`),
+  `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  The live-mongod arm skipped cleanly (`TOUCH_MONGO_URI` unset), as GD-21/R-56
+  requires.
+- **`tests/test_sessions.py`** — 1 failure:
+  `wipe + --rebuild reproduces a byte-identical fingerprint`. Live-Mongo arm
+  skipped cleanly.
+
+**Not attributable to this sub-plan.** Both files exercise
+`aggregator/{mirror,mongo_store,refs,tailer,sessions}.py` only — their imports
+are `from aggregator import mirror | mongo_store | refs | tailer` plus stdlib.
+`grep -n &quot;decision_watcher\|status\.sh\|monitor_server\|workflow\.js&quot;` over both
+files returns **zero** hits, so no code path of theirs reaches any of the nine
+files this attempt touched. The failing assertions are drainer hold/generation
+and rebuild-fingerprint semantics — sp-06 mirror-deploy / sp-07 sessions-arm
+territory, and sp-mirror-deploy is one of this pass's still-red loops with an
+interrupted implementer (its partial edits are explicitly out of bounds here).
+These are pre-existing red state from other owners, not a regression introduced
+by attempt 5 — the gate treats them as baseline. Every other repo test file
+(`test_bootstrap`, `test_fixtures`, `test_store`, `test_tailer`, `test_ws`,
+`test_refs`, `test_mongo_store`, `test_ingest`, `test_legacy`, `test_agents`,
+`test_reducer`, `test_custom_state`, `test_slots`, `test_api`,
+`test_server_core`, `test_touch_frontend`, `test_usage`, `test_docs`,
+`test_register`, `test_e2e_sim`, `test_stdlib_only`, `test_mongo_deploy`)
+completed without failing.
+
+## 3. Attempt-4 critique defects — all closed with non-tautological arms
+
+Attempt 4 was REJECTED with 3 major + 4 minor. Each now has a real guard:
+
+- **M-1** (watcher's own settle pass invalidated the driver's close, killing
+  R-40's authorized exit). Fixed and covered twice: unit arms at
+  `test_watcher.py:615-647` assert `exit_authorized(ev_settled) is True` under
+  the *shipped* ordering (agent close → watcher settle `plan done` → watcher
+  `complete done`), that a settle `plan done` is a close and not a sign of life,
+  that a card genuinely *moving* (`queued`) after the close still cancels it,
+  and that a foreign-writer close is neutral. The e2e arm at `:1377-1404`
+  drives the real watcher and asserts the settle events landed *after* the
+  driver close, that the exit still fires, and that it takes the **driver**
+  route, not the abandoned one. `:1534+` is the negative control (watcher-only
+  close ⇒ no authorized exit).
+- **M-2** (SIGTERM raced the 1 s poll, losing the last result/verdict/tokens).
+  `test_watcher.py:1445-1530`: the SIGTERM'd watcher exits rc 0 after draining,
+  the final agent result and orchestrator decision line survive, its usage
+  enters the totals, the drain announces why it stopped — plus a control with
+  an unhandleable signal proving the drained content is genuinely absent
+  without the fix (so the arm is not vacuous).
+- **M-3** (the R-10 write-integrity test passed with the lock deleted).
+  `test_shell.py:329-372` is now behavioral: the test process holds `LOCK_EX`
+  on `events.jsonl`, launches one `status.sh`, asserts it **blocks** and appends
+  nothing while held, then completes rc 0 and lands exactly one line after
+  release. This arm fails if the flock is removed. `:374-390` adds source
+  guards that both append sites take `LOCK_EX`/`LOCK_UN`. The misleading
+  &quot;&gt;8 KiB&quot; claim is corrected in-place (`:291` note).
+- **m-1** — one `resolve_config() -&gt; (path, dict)` resolver
+  (`decision_watcher.py:60`) used by both `config_path()` and `read_config()`;
+  arms at `test_watcher.py:668-690` prove the watched path and the applied
+  values agree even with a corrupt state-dir config.
+- **m-2** — `PARSE_FAILURES.pop(events_path, None)` now on the stat-failure and
+  `OSError` paths (`monitor_server.py:169,178,183`); `test_health_parse_failure_counter`
+  covers it.
+- **m-3** — the settle pass folds the stream's last terminal `plan` event before
+  emitting (`test_watcher.py:649-666` for the fold, `:1409-1436` for the
+  adopt-not-duplicate behaviour).
+- **m-4** — `status.sh` imports `fcntl` defensively (`status.sh:56 except
+  ImportError`) and skips the lock when absent; asserted for **both** writers at
+  `test_shell.py:383-389` via the `try: import fcntl … except ImportError` +
+  `if fcntl is not None: fcntl.flock` source patterns.
+
+## 4. Plan conformance (subplans.md §&quot;sp-03 — watcher-templates-firstwave&quot;)
+
+Owned items present and asserted, not merely mentioned:
+
+- **R-07** nested state dir, deferred cap warnings, shrink/inode rebuild — live
+  process arms.
+- **R-08 / R-09 / R-13** (= R-58's execution scope): the e2e replay over the
+  frozen real run emits **zero** `failed` plan badges, carries no fabricated
+  `loop exited -&gt;` detail, closes the research fan-out and synthesis plans
+  `done` with the &quot;closed, no verdict&quot; label, closes the run
+  `orchestrator complete done`, gives six researchers six distinct stage chips,
+  and puts the full 17-hex `agentId` on every agent row with `shortId`
+  display-only alongside.
+- **R-10 slice** — flock on both append sites (behavioral, above) + `/health`
+  parse-failure counter (`test_server.py::test_health_parse_failure_counter`).
+- **R-39** — `w` is additive on both writers, five-key core preserved
+  (`test_watcher.py:326-333`, heartbeat line at `:1262`).
+- **R-40** — self-exit requires journal quiet **and** an agent-written terminal
+  close; stale-complete and badge-only arms prove neither alone suffices; the
+  abandoned route is distinguishable from the driver route by its detail text.
+- **R-58 static guards** — `test_shell.py::test_templates_emit_terminal_events`
+  asserts both templates emit the terminal `plan done` and
+  `runStatus('orchestrator','complete',…)` (present at
+  `implement.workflow.js:144`, `research.workflow.js:118`).
+- **R-01:guard / SD-3** — `test_gitignore` covers the module-dir `events.jsonl`
+  and `.watcher-state.json`, `.touch/`, `.touch*/`, `settings.local.json`,
+  `*.pid`, `mongo-data/`, `mongo-dump/`, `*.bson`, plus the negative assertions
+  (nothing ignores `.claude/local-orchestrators/` itself or `events.jsonl`
+  underneath it).
+- **SD-4** — read-side last-event-wins fold verified on both real streams plus a
+  genuinely-failed control (`test_server.py::test_r58_*`,
+  `test_watcher.py` SD-4 arms).
+
+## 5. Ownership — clean
+
+Files modified by attempt 5 (mtimes 2026-07-27 07:11–07:25Z) are exactly the
+nine owned files:
+
+```
+status.sh                          07:11:56
+monitor_server.py                  07:12:17
+execute-research/templates/research.workflow.js   07:12:47
+implement-plan/templates/implement.workflow.js    07:12:47
+monitoring.md                      07:13:41
+tests/test_server.py               07:16:37
+tests/test_watcher.py              07:19:08
+tests/test_shell.py                07:22:53
+decision_watcher.py                07:25:20
+```
+
+`monitor.html` (07-26 03:05) and `tests/test_frontend.py` (07-26 02:51) are
+untouched by this attempt, as §sp-03 requires. The other dirty paths in
+`git status` (`CLAUDE.md`, `README.md`, `inception.md`, `.gitignore`, the three
+`SKILL.md` files, the task folders) all predate this attempt and belong to
+sp-01/sp-15 or to live orchestrator state. No commit was made.
+
+## Verdict
+
+**PASS.** Targeted suites 100% green; the only red files in the full suite are
+`tests/test_mirror.py` and `tests/test_sessions.py`, owned by other (still-red)
+sub-plans and provably unreachable from anything this sub-plan changed.
+</pre></details>
+<details><summary>Critique findings — sp-watcher-templates-firstwave-critique-attempt-5.md</summary><pre># Adversarial critique — sp-watcher-templates-firstwave, attempt 5
+
+**Verdict: REJECTED.** 1 major, 3 minor, 4 nits.
+depth: `in-scope` · critical_defect: `false`
+
+Scope reviewed: `git diff` of the nine owned files (`decision_watcher.py`,
+`status.sh`, `monitor_server.py`, `monitoring.md`, `tests/test_watcher.py`,
+`tests/test_shell.py`, `tests/test_server.py`,
+`execute-research/templates/research.workflow.js`,
+`implement-plan/templates/implement.workflow.js`) against
+`touch-mongo-live-subplans.md §sp-03`, R-07/R-08/R-09/R-10(slice)/R-13/R-01:guard
+(base), R-39/R-40/R-58 (amendment), GD-9…GD-15, GD-21…GD-30, SD-3/SD-4/SD-10.
+
+---
+
+## What holds up (re-verified here, not taken on trust)
+
+- **Every attempt-4 defect is genuinely closed, with non-tautological arms.**
+  - **M-1** — `stream_terminal_close()` (`decision_watcher.py:851-860`) now
+    resets only on *liveness* (`complete running`, or a `plan` event whose state
+    is not itself a close). I re-derived the whole shipped ordering against the
+    real module (probe: driver `complete done` w=agent → watcher settle
+    `plan done` → watcher `complete done`) ⇒ `exit_authorized` stays **True**;
+    a watcher-only close never authorizes; a later `plan queued` seed correctly
+    cancels. `test_watcher.py:1380-1405` drives the same ordering end-to-end
+    with an explicit anti-vacuity assertion that the settle events really landed
+    after the driver's close, and asserts the exit came by the *driver* route.
+  - **M-2** — `SIGTERM`/`SIGINT` arm a drain (`:307-347`, `:1364-1381`), and the
+    arm at `test_watcher.py:1448-1520` has a real control: the same stimulus
+    delivered as `SIGKILL` (unhandleable) demonstrably loses the result, the
+    decision line and the tokens, so the passing arm is not a lucky poll tick.
+  - **M-3** — `test_shell.py:330-373` holds `LOCK_EX` from the test process and
+    proves the writer *blocks* and then lands exactly one line after release;
+    `:375-390` adds source guards for both append sites plus the m-4
+    defensive-import shape. The old 24-writer arm now documents honestly that it
+    does **not** prove the lock.
+  - **m-1** — one `resolve_config()` returns `(path, values)` from the same file
+    (`:60-103`); **m-2** — `PARSE_FAILURES.pop()` on both the stat- and
+    OSError-failure paths (`monitor_server.py` `task_status`); **m-3** —
+    `stream_plan_closes()` + the adoption at `:1647-1660` (arm at
+    `test_watcher.py:1418-1446` asserts *exactly one* close and that it is the
+    script's, not a `(closed, no verdict)` duplicate); **m-4** — `status.sh:50-57`
+    now mirrors the watcher's `try/except ImportError`.
+- **R-58 / GD-10 forward fix.** `close_state_for()` is the predicate verbatim and
+  is the only close rule at all three sites. `test_watcher.py` replays the frozen
+  real streams and folds the SD-4 last-event-wins rule with a genuinely-failed
+  negative control.
+- **R-39 / R-13 / R-07.** `w` is additive on both writers, five-key core intact;
+  full 17-hex `id` with display-only `shortId`; nested state dir, deferred cap
+  warnings and the SD-10 shrink/inode rebuild all exercised as live processes.
+- **Mongo invariants.** No `pymongo`/`mongodb://`/`27017`/`MONGO_` token anywhere
+  in the nine files (grepped); `decision_watcher` and `monitor_server` import
+  clean on bare stdlib (re-checked). No `$`-ops, no `_id`, no delete verbs, no
+  TTL, no credentials — GD-21…GD-30 are untouched by this diff.
+- **Suites.** `test_watcher.py` (268 ok), `test_server.py` (22/22),
+  `test_shell.py`, `test_frontend.py` — all rc=0 here. `test_frontend.py` and
+  `monitor.html` carry no mtime from this attempt (2026-07-26 02:5x); the nine
+  owned files were all touched 07:11–07:25Z today. No commit (SD-6).
+
+---
+
+## MAJOR
+
+### M-1 — The templates' script-side emitters are inert: R-09's and R-40's template halves ship as dead code, and this diff deletes the one producer that worked
+
+`implement.workflow.js:313-315` vs `:118-150`; `research.workflow.js:86-118`;
+`research.workflow.js:242` (deleted prompt line); `test_shell.py:539`;
+`monitoring.md` (the new &quot;When the run ends, stop its watcher&quot; block)
+
+The reviewed diff makes **two mutually exclusive normative claims about the same
+two helpers**, roughly 180 lines apart in the same file:
+
+```js
+// implement.workflow.js:313 (cycle-report block)
+// The workflow runtime has NO filesystem or Node API access (import() throws in
+// scripts; the try/catch'd runStatus/closeRun helpers above are the documented
+// contract but silently no-op at runtime), so the script CANNOT write pages itself
+```
+```js
+// implement.workflow.js:124 / research.workflow.js:95 (closeRun block)
+// This event is ALSO what authorizes the watcher to stop: decision_watcher.py
+// exits only on a `w:&quot;agent&quot;` `orchestrator complete done|failed` line ...
+// So this call is the mechanism; the pid signal below is only a fast path.
+```
+
+`.claude/skills/implement-plan/SKILL.md:100-102` repeats the first claim verbatim,
+and `monitoring.md` now asserts the second (&quot;This is what makes the templates'
+`closeRun` epilogue safe — it signals ~0.2 s after the harness appended the final
+agent's `result`&quot;). One of these is false in the **normative protocol file**
+(CLAUDE.md: &quot;Both skills' `templates/*.workflow.js` are the normative protocol&quot;).
+A maintainer adapting the template cannot tell which, and the sub-plan's own
+static guards (`test_shell.py:442-533`, ~25 assertions) assert only that the
+*text* is present — they cannot distinguish a working emitter from dead code.
+
+**The evidence in this repo says the &quot;silently no-op&quot; claim is the true one:**
+
+| Check | Result |
+| --- | --- |
+| Who wrote every loop-terminal `plan` event in `touch-mongo-live/events.jsonl`? | `cycle_reporter.py` — `.cycle-reporter-state.json` `emitted` lists all 15 `sp-*` plans |
+| The only `plans_total` event | `{&quot;plan&quot;:&quot;divide&quot;, …,&quot;plans_total&quot;:19}` with detail `15 sub-plans; run totals 19 plan cards incl research, synthesis, divide, finalgate` — neither the template's text nor its value (`SUBPLANS.length + 2` = 17). Hand-written by the driver |
+| `finalgate` plan events in the whole stream | **0** (the template emits one on both branches) |
+| Non-`sp-` plans in the daemon | `cycle_reporter.py:207` — `if slot is None or not plan.startswith(&quot;sp-&quot;): continue`; `emit_close` never emits `orchestrator complete` |
+| Runtime probe log `status emitter ready (node:child_process)` | never appears in any transcript or log; only as source text |
+
+**Concrete failure scenario (execute-research, run as the template ships):**
+1. `runStatus('research','plan','done', …)` and `runStatus('synthesis','plan',
+   'done', …)` no-op inside their `catch`.
+2. The **agent-side** fallback that used to write the synthesis close was deleted
+   by this diff — `research.workflow.js:242` removed
+   `Then: ${statusCmd('synthesis','plan','done','plan written')}` from the
+   synthesis prompt — and `test_shell.py:539` now **forbids restoring it**
+   (`check(&quot;statusCmd('synthesis', 'plan', 'done'&quot; not in research)`).
+3. `cycle_reporter.py` skips both plans (`sp-` prefix filter).
+   ⇒ **nobody** writes `research plan done` / `synthesis plan done`. Both cards
+   sit `running` until the watcher's 60 s settle pass closes them
+   `(closed, no verdict)` — the &quot;card hangs open because nobody emitted the
+   terminal event&quot; class of defect R-09 exists to remove, reintroduced.
+4. `closeRun('done', …)` no-ops too ⇒ no `w:&quot;agent&quot; orchestrator complete done`,
+   so `exit_authorized()` (the M-1 fix I just verified) is **never satisfied**
+   and the watcher can only stop through the 10× ABANDONED window (20 min by
+   default) — the exact CONVO-14 orphan symptom R-40 exists to remove, and the
+   `run abandoned — no driver close` detail is then honest but useless.
+5. `publishConfig()` no-ops ⇒ `orch-config.json` gets no
+   `max_plan_attempts`/`max_finalgate_attempts`/`strategy` from the script, so
+   the watcher narrates its built-in defaults — defect D4, which R-09's
+   config-publishing half exists to close. (In *this* task the file is
+   driver-written, which is why nobody noticed.)
+
+Note the finding is robust to which claim is true: if `import()` *does* work,
+then `implement.workflow.js:313` and `SKILL.md:100-102` are a false statement
+that tells every future maintainer the entire R-09/R-40 template mechanism is
+decorative — and the reference daemon (`cycle_reporter.py`) was built on that
+false premise. Either way the normative template is wrong about itself.
+
+**Fix (all inside this sub-plan's owned files):**
+1. Settle the fact and say it **once**. Keep the probe log that already exists
+   (`status emitter ready (node:child_process)`); if it never fires, state at the
+   top of both templates that `runStatus`/`closeRun`/`publishConfig` are the
+   *contract* and name the component that actually fulfils each event, and delete
+   the contradicting &quot;this call is the mechanism&quot; sentences from
+   `closeRun`'s comment and from `monitoring.md`'s new lifecycle block.
+2. Restore a **working producer for the non-`sp-` plan cards**: put the
+   `statusCmd(plan,'plan','done', …)` line back in the synthesis prompt (and the
+   equivalent for `research`/`divide`/`finalgate`) as the belt-and-braces path,
+   and drop the `test_shell.py:539` assertion that forbids it. R-09's &quot;not
+   agent-emitted&quot; preference is only worth honouring while a script *can* emit.
+3. Retarget the R-09/R-40 guards at whatever really writes the events, so a
+   future regression is caught by behavior rather than by string presence.
+4. Record the runtime limitation as a deviation note next to this findings file —
+   R-09 as written (&quot;script-emitted … adapted scripts write/merge
+   `orch-config.json`&quot;) is not implementable in this runtime and the plan should
+   say so.
+
+---
+
+## MINOR
+
+### m-1 — `monitor_server.py` and `monitoring.md` both exceed their explicitly recorded scope carve-outs
+`monitor_server.py` (`replay_plan_states` continuation-reopen + the new
+`elif &quot;running&quot; in plans` fold); `monitoring.md` (~140 changed lines)
+
+`touch-mongo-live-subplans.md §Scope exclusions 1` is unambiguous:
+&quot;`monitor_server.py` receives ONLY R-10's slice (sp-03)&quot;, R-11/R-12 OUT; and
+§sp-03 fences `monitoring.md` to the &quot;R-39 schema note only; R-17's full refresh
+is out of scope&quot;. This diff adds to `monitor_server.py` a FRONTEND-6 continuation
+reopen and a **behavioral change to every task's home-grid verdict** (a running
+plan now beats a failed one), and to `monitoring.md` a large normative refresh
+including `monitor.html` prose (header zoom, session timeplan, stats page,
+artifacts popup) that describes another sub-plan's deliverables. The changes look
+correct and are tested — the objection is scope, and it matters because sp-12
+(`server.py`) and sp-13 (frontend) reason about these semantics from their own
+sections. Some of the `monitoring.md` prose may predate this attempt (another
+sub-plan writing into a file it does not own, a GD-15 breach of its own); either
+way this sub-plan is the file's owner and should either drop the out-of-scope
+hunks or record them as an accepted deviation.
+
+### m-2 — `/health`'s R-10 counter is only as fresh as the last `/tasks` poll, which is not what R-10's acceptance test says
+`monitor_server.py` `health_payload()` / `PARSE_FAILURES`
+
+`PARSE_FAILURES` is populated exclusively as a by-product of `task_status()`,
+i.e. of a `/tasks` request. R-10's stated test is &quot;`/health` counter increments
+on a poisoned stream&quot; — as shipped, a probe that polls only `/health` reports
+`0` forever no matter how poisoned the stream is. The docstring is admirably
+honest about this (&quot;a probe taken before the first scan honestly reports zero&quot;),
+so this is a spec/behavior mismatch rather than a lie. **Fix:** either scan on
+demand in `health_payload()` (cheap: the per-file scan is already cached by
+`(mtime_ns, size)`) or amend the R-10 wording where it is restated so no future
+reader treats `/health` as self-sufficient.
+
+### m-3 — the stop handlers are installed after a potentially long startup backfill
+`decision_watcher.py:1308-1340`
+
+The one-time token backfill runs one `agent_paths()` glob plus a full transcript
+read per already-tracked agent (dozens of agents, multi-MB transcripts) *before*
+`install_stop_handlers()`. A `closeRun`/operator SIGTERM that lands in that window
+still kills the process where it stands — precisely M-2's loss scenario, for the
+case where a watcher is restarted just as its run is being closed. The comment
+justifies the order by checkpoint safety, but `save_state()` is already atomic
+(`tmp` + `os.replace`), and the risk of re-emitting a delta is bounded by the
+monotonic clamp. **Fix:** install the handlers first and check `stop_requested()`
+between agents in the backfill loop, saving before the early return.
+
+---
+
+## NITS
+
+- **n-1** `test_shell.py:330-373` infers &quot;the writer blocked&quot; from a fixed
+  `proc.wait(timeout=1.5)`. I measured an uncontended `status.sh` at ~0.06 s, so
+  the 25× margin is fine today — but `test_watcher.py` already has the better
+  idiom (`AUTH_EXIT_LATENCY` / `negative_window()`), and using it here would make
+  the arm robust on a loaded gate machine.
+- **n-2** `decision_watcher.py:1353-1356` — during the drain `tick_sleep()` polls
+  every 0.1 s and each pass re-globs transcripts for every running agent
+  (`agent_tokens`). Harmless at `DRAIN_SECS=3`, wasteful if someone raises it;
+  a cheap guard would be to skip the live-token block while `drain_until` is set.
+- **n-3** `research.workflow.js` `publishConfig()` writes `strategy: 'parallel'`
+  unconditionally (the attempt-2 mkdir-ordering nit is fixed). One task folder
+  hosts research *then* implement-plan, so this clobbers a `strategy` the driver
+  or the later phase set. `strategy: cfg.strategy ?? 'parallel'` would make the
+  merge as conservative as the helper's own comment claims (&quot;Merge, never
+  overwrite&quot;). Same shape in `implement.workflow.js`.
+- **n-4** `test_shell.py:442-533` is now ~25 string assertions over two template
+  files. Given M-1, consider labelling that block for what it is (a *contract*
+  guard, not a behavior guard) so a reader does not mistake its greenness for
+  evidence that the events are emitted.
+
+---
+
+## Checklist disposition
+
+| Item | Verdict |
+| --- | --- |
+| GD-21 / GD-22 / GD-24…GD-30 | N/A here and not violated — no pymongo, no Mongo I/O, no `_id`s, no `$`-ops, no deletes/TTL, no credentials |
+| GD-15 one file one owner | Held for the nine files this attempt touched; see m-1 for the item-scope breaches inside two of them |
+| GD-9 / GD-10 / GD-11 | Held — marker grammar, close predicate verbatim at all three sites, 1 KB cap at both writers |
+| R-07 / R-13 / R-39 | Met, with real behavioral coverage |
+| R-08 / R-58 | Met and proven against the frozen real streams; SD-4 read side held |
+| R-10 | Implementation + a real lock-contention guard (M-3 closed); `/health` freshness caveat → m-2 |
+| R-09 | **Not met at runtime** → M-1 (and this diff removed the agent-side fallback) |
+| R-40 | Watcher side met and now genuinely reachable (M-1/attempt-4 closed); **template/driver-epilogue side inert** → M-1 |
+| Tests assert real behavior | Yes for the watcher/server/lock arms (good controls); the template guards are string-presence only → M-1, n-4 |
+| Docs match implemented behavior | `monitoring.md`'s new lifecycle block describes the `closeRun` epilogue as live → M-1 |
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

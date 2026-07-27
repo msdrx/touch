@@ -1,0 +1,635 @@
+<title>sp-agents-reducer — cycle 1</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-agents-reducer — implement→test→critique, attempt 1/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Implemented sp-agents-reducer (R-28 base + R-48 + R-54) as one new module plus two new test files; nothing outside the three owned paths was touched, and no commit was made.
+
+**/home/laniakea/Projects/touch/aggregator/agents.py** (new, ~1030 lines, three hard-separated halves in the house style — reading / pure mapping / pure reducing; the driver package's name never appears, so `test_mirror.py`'s SD-1 purity grep stays green):
+
+- **Marker layer (GD-9, R-28)** — `marker_window` / `marker_records` / `parse_markers` / `touch_marker_misplaced` / `labels_from_prompt`, implementing the identical grammar to `decision_watcher.py` (4-line window with leading blanks tolerated, per-line matching, order-independent `key=value`, last-wins, unknown keys kept in `Labels.extra`, real-payload-only misplacement flag).
+- **Identity (GD-7)** — `node_ref`/`node_key`: `(runId,key,ordinal)` or full 17-hex `agentId`; 8-hex refused (legacy namespace). Harness facts create nodes; a markerless agent still gets a document plus `unconventional: true`.
+- **Fragments/spawn (R-48)** — `read_fragment` (consumes `ingest.read_transcript`; this module owns only `.meta.json` and the spawn pair), `order_fragments` (stitch chain `lastUuid → firstParentUuid`, unchained fragments kept + counted), `assemble` (agentId is the ONLY grouping key), `find_spawns` (`tool_use` record uuid + `toolUseResult.agentId`), `file_hint`/`check_file_hint` (validated against `(st_dev, st_ino, size)`, stale-marked, kept), `spawn_record_filter` (records.findOne, never a file re-read).
+- **`MIRROR_MAPPERS = {agent, agentSpawn}` + `MIRROR_SOURCES`** — `$addToSet` unions, `$min`/`$max` accumulators, per-leaf `$min` for meta/marker scalars so &quot;meta-bearing fragment wins&quot; is order-free, `$min` on the `unconventional` bool so a named observation wins. `_only_ours` wall keeps writes to `agents` only (`derived` explicitly excluded).
+- **Reducer (R-54)** — `liveness()` (three states `running|done|unknown`, `failed` structurally absent), `reduce()` (pure over `(state, now)`; freeze-to-stale migrated from `monitor.html`'s `freezePlan`; run close where `unknown` leaves the running set; `closed — no verdict` reused from `legacy.py`), `Topology`/`topology_index`/`attempt_label` (SD-9, absent-topology arm normal), `Reduction.documents()/operations()`, `apply_derived` (GD-23 drop-and-rebuild in the memory model) and `needs_rebuild`.
+
+**Two stated deviations, documented in the module docstring with reasons** (house convention, same voice as `ingest.map_usage`/`map_run`):
+1. `fragments[]` stores identity-only elements (`sessionId, path, firstUuid, firstParentUuid, firstTs`) with the mutable tip in `fragmentTips{&lt;firstUuid&gt;: {lastUuid, lastTs, lineCount, records}}`; `fragments_of(doc)` recombines them into exactly R-48's shape in chain order, so every reader sees the specified list. Without the split, a 250 ms poll tick adds a new `$addToSet` element on every append (unbounded array — GD-16). A test asserts one element after two observations of a growing file.
+2. `fileHint` also stores `stDev`, because R-48's own validation triple is `(st_dev, st_ino, size)` and the corpus spans two filesystems.
+
+**Tests** (stdlib-only, standalone, both green; `run_all.sh` picks them up by glob):
+- `tests/test_agents.py` — adversarial marker fixture, cross-check that this grammar and `decision_watcher.py`'s agree on a real corpus prompt, markerless node, parent edges, the `a2fc883c96ff7b837` pair in BOTH orders (one doc, two fragments in chain order, `firstTs 02:59:29.846Z`, identical fingerprints), missing-meta fragment, token rollup = disjoint union, GD-25 normal/shuffled/reversed/idempotent over all 8 corpus transcripts (7 agents), spawn locator with hint going stale while the uuid lookup still resolves, mapper purity + upsert-only + `_only_ours` walls.
+- `tests/test_reducer.py` — same fixture `running` inside the window / `unknown` at +10 min, five siblings one dead ⇒ run closes 4 done / 1 unknown / zero failed, failing verdict is a verdict not a state, freeze-at-run-close, API-answer-equals-page-render (the label is a field), derived docs validate and carry `reducerVersion`+`derivedFromSeq`, version bump ⇒ rebuild with identical content, drop touches nothing else, topology optional then present, reducer purity + single decision site.
+
+Note for the gate: `tests/test_mirror.py` has 3 pre-existing failures (sp-mirror-deploy's, verified identical with `agents.py` removed from the tree); `test_stdlib_only.py` passes and `mirror.discover_mappers()`/`iter_sources()` now resolve both new kinds.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites green: tests/test_agents.py (rc 0, 112 ok, 0 skips) and tests/test_reducer.py (rc 0, 68 ok). Full suite: 18 pass; the only 2 red files (tests/test_mirror.py 3 asserts, tests/test_sessions.py 1 assert) are pre-existing baseline failures of the RED sp-mirror-deploy / sp-sessions-arm loops — proven by re-running both suites on a scratchpad copy with agents.py/test_agents.py/test_reducer.py removed, which reproduced the identical failure sets. Mongo arms skip cleanly with TOUCH_MONGO_URI unset; test_stdlib_only green (GD-21 respected). R-28/R-48/R-54 plus SD-1/SD-9/SD-11 all present and asserted; four mutations on a scratchpad copy (idle-limit bypass, 17-hex relaxation, directory-order fragments, result_seen bypass) were each caught, so the assertions are not tautologies. Ownership verified via mtime ordering (the three newest source files are exactly the owned set); no commits, no edits outside the sub-plan.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">Rejected: 2 blockers, 2 majors, 8 minors/nits — all in the R-48 mapping half (the R-54 reducer survived every attack). BLOCKER 1: map_agent writes fragmentTips.*.lastUuid with $set (agents.py:1153-1158), outside GD-25's algebra; mirror keeps two ops per _id in one unordered bulk and _requeue reorders them, both justified by &quot;the algebra commutes&quot; — reproduced: reversed order stores lastUuid==firstUuid beside lineCount 2 and ms.fingerprint differs. BLOCKER 2: map_agent_spawn $set's the whole spawn subdoc (agents.py:1206) whose fileHint stats the parent session transcript, a file that grows every tick — reproduced: reversed order stores the older size, fingerprint differs. MAJOR 3: assemble() resolves meta/label conflicts chain-first while map_agent uses $min, so --rebuild and --backfill store different documents for one agent (reproduced: rebuild drops a stated name= and flags a named agent unconventional:True) — the invariant iter_agent_observations' own docstring claims. MAJOR 4: Fragment.identity() drops None members, so a file observed before its first record is readable (empty or torn first line, the normal live-tail case) adds a permanent second fragments[] element — reproduced, and it is exactly the defect the storage split was introduced to prevent. Minors: unreachable spawn_agent_conflict counter, 6 of 9 skip counters untested, raw runId vs refs.run_key mixed in reduce's run lookups, per-path source arms ignore R-25 scope so backfill ⊃ rebuild, and the fragments/fragmentTips deviation from GD-24's normative table is recorded only in a docstring (which is why mongo_store's $set fence was blind to Blocker 1). Test gate was right about what it measured — the frozen static corpus cannot express any of these; they need a file observed twice in different states, or two fragments that disagree.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 2/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Implemented sp-agents-reducer (R-28 base + R-48 + R-54) as one new module plus two new test files; nothing outside the three owned paths was touched, and no commit was made.
+
+**/home/laniakea/Projects/touch/aggregator/agents.py** (new, ~1030 lines, three hard-separated halves in the house style — reading / pure mapping / pure reducing; the driver package's name never appears, so `test_mirror.py`'s SD-1 purity grep stays green):
+
+- **Marker layer (GD-9, R-28)** — `marker_window` / `marker_records` / `parse_markers` / `touch_marker_misplaced` / `labels_from_prompt`, implementing the identical grammar to `decision_watcher.py` (4-line window with leading blanks tolerated, per-line matching, order-independent `key=value`, last-wins, unknown keys kept in `Labels.extra`, real-payload-only misplacement flag).
+- **Identity (GD-7)** — `node_ref`/`node_key`: `(runId,key,ordinal)` or full 17-hex `agentId`; 8-hex refused (legacy namespace). Harness facts create nodes; a markerless agent still gets a document plus `unconventional: true`.
+- **Fragments/spawn (R-48)** — `read_fragment` (consumes `ingest.read_transcript`; this module owns only `.meta.json` and the spawn pair), `order_fragments` (stitch chain `lastUuid → firstParentUuid`, unchained fragments kept + counted), `assemble` (agentId is the ONLY grouping key), `find_spawns` (`tool_use` record uuid + `toolUseResult.agentId`), `file_hint`/`check_file_hint` (validated against `(st_dev, st_ino, size)`, stale-marked, kept), `spawn_record_filter` (records.findOne, never a file re-read).
+- **`MIRROR_MAPPERS = {agent, agentSpawn}` + `MIRROR_SOURCES`** — `$addToSet` unions, `$min`/`$max` accumulators, per-leaf `$min` for meta/marker scalars so &quot;meta-bearing fragment wins&quot; is order-free, `$min` on the `unconventional` bool so a named observation wins. `_only_ours` wall keeps writes to `agents` only (`derived` explicitly excluded).
+- **Reducer (R-54)** — `liveness()` (three states `running|done|unknown`, `failed` structurally absent), `reduce()` (pure over `(state, now)`; freeze-to-stale migrated from `monitor.html`'s `freezePlan`; run close where `unknown` leaves the running set; `closed — no verdict` reused from `legacy.py`), `Topology`/`topology_index`/`attempt_label` (SD-9, absent-topology arm normal), `Reduction.documents()/operations()`, `apply_derived` (GD-23 drop-and-rebuild in the memory model) and `needs_rebuild`.
+
+**Two stated deviations, documented in the module docstring with reasons** (house convention, same voice as `ingest.map_usage`/`map_run`):
+1. `fragments[]` stores identity-only elements (`sessionId, path, firstUuid, firstParentUuid, firstTs`) with the mutable tip in `fragmentTips{&lt;firstUuid&gt;: {lastUuid, lastTs, lineCount, records}}`; `fragments_of(doc)` recombines them into exactly R-48's shape in chain order, so every reader sees the specified list. Without the split, a 250 ms poll tick adds a new `$addToSet` element on every append (unbounded array — GD-16). A test asserts one element after two observations of a growing file.
+2. `fileHint` also stores `stDev`, because R-48's own validation triple is `(st_dev, st_ino, size)` and the corpus spans two filesystems.
+
+**Tests** (stdlib-only, standalone, both green; `run_all.sh` picks them up by glob):
+- `tests/test_agents.py` — adversarial marker fixture, cross-check that this grammar and `decision_watcher.py`'s agree on a real corpus prompt, markerless node, parent edges, the `a2fc883c96ff7b837` pair in BOTH orders (one doc, two fragments in chain order, `firstTs 02:59:29.846Z`, identical fingerprints), missing-meta fragment, token rollup = disjoint union, GD-25 normal/shuffled/reversed/idempotent over all 8 corpus transcripts (7 agents), spawn locator with hint going stale while the uuid lookup still resolves, mapper purity + upsert-only + `_only_ours` walls.
+- `tests/test_reducer.py` — same fixture `running` inside the window / `unknown` at +10 min, five siblings one dead ⇒ run closes 4 done / 1 unknown / zero failed, failing verdict is a verdict not a state, freeze-at-run-close, API-answer-equals-page-render (the label is a field), derived docs validate and carry `reducerVersion`+`derivedFromSeq`, version bump ⇒ rebuild with identical content, drop touches nothing else, topology optional then present, reducer purity + single decision site.
+
+Note for the gate: `tests/test_mirror.py` has 3 pre-existing failures (sp-mirror-deploy's, verified identical with `agents.py` removed from the tree); `test_stdlib_only.py` passes and `mirror.discover_mappers()`/`iter_sources()` now resolve both new kinds.</li><li>Test gate PASSED: PASS. Owned suites green: tests/test_agents.py (rc 0, 112 ok, 0 skips) and tests/test_reducer.py (rc 0, 68 ok). Full suite: 18 pass; the only 2 red files (tests/test_mirror.py 3 asserts, tests/test_sessions.py 1 assert) are pre-existing baseline failures of the RED sp-mirror-deploy / sp-sessions-arm loops — proven by re-running both suites on a scratchpad copy with agents.py/test_agents.py/test_reducer.py removed, which reproduced the identical failure sets. Mongo arms skip cleanly with TOUCH_MONGO_URI unset; test_stdlib_only green (GD-21 respected). R-28/R-48/R-54 plus SD-1/SD-9/SD-11 all present and asserted; four mutations on a scratchpad copy (idle-limit bypass, 17-hex relaxation, directory-order fragments, result_seen bypass) were each caught, so the assertions are not tautologies. Ownership verified via mtime ordering (the three newest source files are exactly the owned set); no commits, no edits outside the sub-plan.</li><li>Critique REJECTED: Rejected: 2 blockers, 2 majors, 8 minors/nits — all in the R-48 mapping half (the R-54 reducer survived every attack). BLOCKER 1: map_agent writes fragmentTips.*.lastUuid with $set (agents.py:1153-1158), outside GD-25's algebra; mirror keeps two ops per _id in one unordered bulk and _requeue reorders them, both justified by &quot;the algebra commutes&quot; — reproduced: reversed order stores lastUuid==firstUuid beside lineCount 2 and ms.fingerprint differs. BLOCKER 2: map_agent_spawn $set's the whole spawn subdoc (agents.py:1206) whose fileHint stats the parent session transcript, a file that grows every tick — reproduced: reversed order stores the older size, fingerprint differs. MAJOR 3: assemble() resolves meta/label conflicts chain-first while map_agent uses $min, so --rebuild and --backfill store different documents for one agent (reproduced: rebuild drops a stated name= and flags a named agent unconventional:True) — the invariant iter_agent_observations' own docstring claims. MAJOR 4: Fragment.identity() drops None members, so a file observed before its first record is readable (empty or torn first line, the normal live-tail case) adds a permanent second fragments[] element — reproduced, and it is exactly the defect the storage split was introduced to prevent. Minors: unreachable spawn_agent_conflict counter, 6 of 9 skip counters untested, raw runId vs refs.run_key mixed in reduce's run lookups, per-path source arms ignore R-25 scope so backfill ⊃ rebuild, and the fragments/fragmentTips deviation from GD-24's normative table is recorded only in a docstring (which is why mongo_store's $set fence was blind to Blocker 1). Test gate was right about what it measured — the frozen static corpus cannot express any of these; they need a file observed twice in different states, or two fragments that disagree.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-agents-reducer-test-attempt-1.md</summary><pre># sp-agents-reducer — test gate, attempt 1
+
+**Verdict: PASS.** Owned suites 100% green; 0 NEW failures in the full suite;
+0 ownership violations; 0 commits.
+
+Environment: Python 3.13, stdlib only, `TOUCH_MONGO_URI` unset, no services
+running. Implementer's changed set (all three sub-plan-owned):
+`aggregator/agents.py`, `tests/test_agents.py`, `tests/test_reducer.py`.
+
+---
+
+## 1. Targeted suites (sp-10 owned) — GREEN
+
+Run standalone from the repo root:
+
+| suite | rc | `ok:` assertions | skips |
+|---|---|---|---|
+| `tests/test_agents.py` | **0** | 112 | 0 |
+| `tests/test_reducer.py` | **0** | 68 | 0 |
+
+`test_agents.py` closes with `all agents (R-28/R-48) tests passed`,
+`test_reducer.py` with `all reducer (R-54) tests passed`. Neither suite has a
+conditional/skipped arm — they run entirely off the frozen fixture corpus, so
+there is no hidden hole behind an absent service.
+
+## 2. Full-suite regression gate — no NEW failure
+
+`.claude/shared/monitoring/tests/*` (run from their own dir) + `tests/*` from
+the repo root:
+
+- PASS (18): monitoring `test_frontend`, `test_server`, `test_shell`,
+  `test_watcher`; repo `test_agents`, `test_bootstrap`, `test_fixtures`,
+  `test_ingest`, `test_legacy`, `test_mongo_deploy`, `test_mongo_store`,
+  `test_reducer`, `test_refs`, `test_stdlib_only`, `test_store`, `test_tailer`,
+  `test_usage`, `test_ws`.
+- FAIL (2) — **pre-existing, not attributable to this change**:
+  - `tests/test_mirror.py` (rc 1, 254 `ok:`), FAILED (3):
+    `…proven by the call count: the held ticks made no attempt`;
+    `the first generation lands`;
+    `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  - `tests/test_sessions.py` (rc 1), FAILED (1):
+    `wipe + --rebuild reproduces a byte-identical fingerprint`.
+
+Attribution proof (the interesting risk here was that `mirror.py` discovers
+`MIRROR_MAPPERS` lazily, so a brand-new `agents.py` could perturb generation
+counts and rebuild fingerprints). A clean copy of `aggregator/`, `tests/`,
+`docs/` was made in the scratchpad with `aggregator/agents.py`,
+`tests/test_agents.py`, `tests/test_reducer.py` **removed**, and both suites
+re-run there: **identical failure sets, same three + same one assertions**.
+The failures therefore exist with and without sp-10's files and belong to the
+two loops that closed RED (`sp-mirror-deploy`, `sp-sessions-arm`) — this gate
+does not touch their files. `TOUCH_MONGO_URI`-gated live arms in both suites
+skip cleanly, as GD-21/R-56 requires.
+
+Mongo-absence behaviour verified: `test_mongo_store`, `test_mongo_deploy`,
+`test_mirror`, `test_sessions` all reach their live arms and print
+`skip: … TOUCH_MONGO_URI is not set (R-42's loopback+auth recipe)`.
+`tests/test_stdlib_only.py` green ⇒ `agents.py` respects SD-2/GD-21 (its own
+suite additionally asserts no database driver is named in the file at all).
+
+## 3. Plan conformance (sp-10 / R-28, R-48, R-54; SD-1, SD-9, SD-11)
+
+Present in the tree and asserted non-tautologically:
+
+- **R-28** — nodes from harness facts: `node_ref/node_key` build
+  `(runId,key,ordinal)` or full 17-hex `agentId`; `is_agent_id` enforces
+  `^[0-9a-f]{17}$`. Marker labels are a *layer*: `test_a_node_exists_with_no_marker_at_all`,
+  `test_labels_are_a_layer_never_an_identity`, and `unconventional` defaults to
+  `True` (`Labels.unconventional`, `AgentObservation.unconventional`) with
+  `$min` accumulation so any named observation wins.
+- **R-48** — `order_fragments` orders by the `parentUuid → uuid` stitch chain
+  with directory order and mtime explicitly rejected
+  (`test_the_cross_session_pair_is_one_agent_in_chain_order`,
+  `test_an_unchained_fragment_is_kept_and_counted`);
+  `test_sessionid_is_never_a_grouping_key` pins the non-grouping rule;
+  `read_meta` optional + `test_the_meta_bearing_fragment_wins_without_seeing_the_other`;
+  union writes + `test_a_growing_fragment_adds_one_element_not_one_per_tick`;
+  `spawn{recordUuid,toolUseId,fileHint}` with `check_file_hint` validating
+  `(st_dev, st_ino, size)` and returning a `stale` (non-error) `HintStatus`;
+  `spawn_record_filter` gives &quot;jump to spawn&quot; as a `records.findOne`, no file
+  re-read; a spawn missing `recordUuid` is refused (&quot;an offset is not an identity&quot;).
+- **R-54 / GD-23** — `reduce(state, *, now=…)` is the single derivation site;
+  `REDUCER_VERSION`, `reducerVersion` on every derived doc,
+  `stale_derived`/`apply_derived` implement drop-and-rebuild (never migrate);
+  `liveness()` is the three-state predicate with `IDLE_LIMIT_SECONDS = 180`
+  (idle &gt; 180 s ⇒ `unknown`, never `running`, never `failed`); freeze-to-stale
+  lives inside the reducer (`test_freeze_to_stale_moved_into_the_reducer`); no
+  `state` field is stored — the suite proves the clock is an argument
+  (`test_the_reducer_is_pure_over_state_and_now`,
+  `test_the_same_fixture_is_running_or_unknown_depending_only_on_now`).
+- **SD-9** — `topology_index`/`attempt_label` read the `custom_state` topology
+  as a shape; `test_topology_is_optional_and_read_as_a_shape` covers the absent
+  arm (&quot;attempt N&quot;, no denominator, no next-stage arrow), the present arm
+  (&quot;attempt 1 of 5&quot;, `next stage: synthesis`), a per-stage cap override, and an
+  unparsable attempt rendered verbatim.
+- **SD-1** — `MIRROR_MAPPERS` + `MIRROR_SOURCES` exported; purity is asserted
+  by call-graph/attribute inspection (no clock, no filesystem, no pymongo),
+  `_only_ours` refuses any collection other than `agents` (including
+  `derived`), and no `$inc`/`$unset`/delete verb appears.
+- **SD-11** — `_id`s via `refs.agent_key`/`refs.run_key`; ops restricted to
+  `$max`/`$addToSet`/`$min`/`$setOnInsert`; `provenance` `harness` on mapped
+  docs and `derived` on reducer output (`test_gd25_algebra_over_the_frozen_corpus`,
+  `…is provenance:derived (GD-28) … checked across every document`).
+- **GD-15** — `test_the_sources_seam_matches_mirrors_contract`: every
+  registered kind has both a mapper and a source; the per-path arm returns
+  nothing (never raises) for a path it does not own; the spawn arm skips agent
+  transcripts because a spawn lives in the parent session.
+
+### Anti-tautology check (mutation probe, on a scratchpad copy only)
+
+Four mutations were applied to a *copy* of `aggregator/agents.py` outside the
+repo; every one was caught (rc 1):
+
+| mutation | caught by |
+|---|---|
+| `if idle &gt; idle_limit:` → `if False:` (never demote to `unknown`) | `test_reducer.py` |
+| `_AGENT_ID_RE` `{17}` → `+` (accept any hex length) | `test_agents.py` |
+| `order_fragments` → return path-sorted (directory order) | `test_agents.py` |
+| `if result_seen:` → `if False:` (result never ends a node) | `test_reducer.py` |
+
+The copy was restored and re-run green after each. The repo tree was never
+modified by this gate.
+
+## 4. Ownership / git
+
+`git status --short` shows `aggregator/`, `tests/`, `docs/` as untracked
+directories (bulk-untracked since sp-01's C1/C2 predate them), so per-file
+diffing is not available; mtime ordering was used instead. The three most
+recently written source files in the tree are exactly
+`aggregator/agents.py` (13:31:21), `tests/test_agents.py` and
+`tests/test_reducer.py` (both 13:33:49). Everything else — including
+`aggregator/ingest.py`, `aggregator/legacy.py`, `tests/test_ingest.py`,
+`tests/test_legacy.py` — predates them and matches the earlier sub-plans'
+timestamps. No file outside the sub-plan's ownership list was touched, and no
+commit was made.
+
+## 5. Failures attributable to this change
+
+**None.**
+</pre></details>
+<details><summary>Critique findings — sp-agents-reducer-critique-attempt-1.md</summary><pre># sp-agents-reducer — adversarial critique, attempt 1
+
+**Verdict: REJECTED.** 2 blockers, 2 majors, 6 minors/nits.
+Depth: **in-scope** (every finding is fixable by one more gated attempt on the
+three owned files). critical_defect: **false**.
+
+Reviewed (full content — the tree is bulk-untracked, no per-file diff exists):
+
+- `/home/laniakea/Projects/touch/aggregator/agents.py` (1820 lines)
+- `/home/laniakea/Projects/touch/tests/test_agents.py` (669 lines, rc 0, 112 ok)
+- `/home/laniakea/Projects/touch/tests/test_reducer.py` (424 lines, rc 0, 68 ok)
+
+Against `plan/touch-mongo-live-subplans.md` §sp-10, R-28/R-48/R-54 +
+GD-21…GD-30 (amendment), GD-7/GD-9/GD-10/GD-11/GD-15/GD-16 (base), SD-1/SD-9/SD-11.
+
+I re-ran both owned suites (green) and `tests/test_stdlib_only.py` (green), and
+I confirmed the test gate's attribution of the two red suites. **The test gate's
+verdict is not wrong about what it measured** — the reducer half (R-54) is, as
+far as I could attack it, correct, complete and non-tautological. Every finding
+below is in the R-48 *mapping* half, and every one of them is a case the frozen
+static corpus cannot express: the corpus is a set of files that never change,
+and the defects only appear when a file is observed twice in different states
+(the live path) or when two fragments disagree.
+
+Four of the findings were **reproduced with probe scripts** against the real
+module; the reproductions are inlined.
+
+---
+
+## BLOCKER 1 — `$set` on `fragmentTips.*.lastUuid` breaks GD-25's commuting algebra
+
+`aggregator/agents.py:1153-1158` (written), `:68-70` and `:1084-1087` (claimed)
+
+```python
+if &quot;lastUuid&quot; in tip:
+    tips_set[f&quot;fragmentTips.{item.first_uuid}.lastUuid&quot;] = tip[&quot;lastUuid&quot;]
+...
+if tips_set:
+    ops.append(ms.op_set(tips_set))
+```
+
+GD-25's vocabulary for `agents` is exactly `$max` / `$addToSet` / `$min` /
+`$setOnInsert` (&quot;scalars-first/last are `$min`/`$max`, immutables are
+`$setOnInsert`&quot;). `$set` is not in it, and the whole downstream machine is built
+on the assumption that these operations commute:
+
+- `mirror._take_batches` (`aggregator/mirror.py:2013-2016`) deliberately keeps
+  **two updates to one `_id` as two operations in one batch**, &quot;because the
+  algebra is `$max`/`$addToSet`&quot;;
+- that batch goes to `bulk_upsert(..., ordered=False)`
+  (`aggregator/mongo_store.py:1461`, `mirror.py:1420`) — mongod may apply the
+  two in either order;
+- `mirror._requeue` (`mirror.py:2048-2054`) appends unwritten operations **at
+  the tail**, explicitly justified by &quot;`$max`/`$addToSet`/`$min`/`$setOnInsert`
+  commute&quot;.
+
+`$set` does not commute, and `mongo_store`'s accumulable fence cannot catch it:
+`fragmentTips` is not declared in the `agents` spec's `accumulable` set
+(`mongo_store.py:365`, sp-05's file), so `validate_update`'s `$set` check at
+`mongo_store.py:1072` waves it through.
+
+**Reproduced** (two observations of one growing fragment — the exact fixture of
+`test_a_growing_fragment_adds_one_element_not_one_per_tick`, applied in both
+orders):
+
+```
+forward tip : {'lastUuid': '2222…', 'lineCount': 2, 'records': 2, 'lastTs': 03:00}
+reversed tip: {'lastUuid': '1111…', 'lineCount': 2, 'records': 2, 'lastTs': 03:00}
+fingerprint equal: False
+```
+
+The reversed order stores `lastUuid == firstUuid` next to `lineCount: 2` — an
+incoherent tip that `fragments_of()` hands straight to `/api/*` and the page —
+and `ms.fingerprint` differs, which is the property GD-25's acceptance test
+(R-44) exists to certify.
+
+`test_gd25_algebra_over_the_frozen_corpus` misses this because every fragment in
+the frozen corpus produces the *identical* `$set` value on every pass, so
+shuffling is a no-op for that operator.
+`test_a_growing_fragment_adds_one_element_not_one_per_tick` misses it because it
+applies the two observations in forward order only.
+
+**Fix.** Make the tip monotone, so the operator matches the claim in the
+docstring at `:69-70`. Concretely: write the tip as ONE `$max` value whose first
+element is the monotone counter —
+`ms.op_max({f&quot;fragmentTips.{uuid}&quot;: [line_count, records, last_uuid, last_ts]})`
+(BSON array comparison is element-wise, so the observation with the highest
+`lineCount` wins as a unit, and `fragments_of` unpacks it) — or drop `lastUuid`
+from storage entirely and let `fragments_of` report only the `$max`-safe leaves.
+Then add the missing test: apply two observations of a growing fragment in
+**both** orders and assert `ms.fingerprint` equality plus tip coherence
+(`lastUuid` belongs to the line `lineCount` counts).
+
+---
+
+## BLOCKER 2 — `$set` on the whole `spawn` sub-document is order-dependent on the live path
+
+`aggregator/agents.py:1206`, rationale at `:1181-1184`
+
+```python
+ops = [ms.op_set_on_insert({&quot;provenance&quot;: PROVENANCE}), ms.op_set({&quot;spawn&quot;: spawn})]
+```
+
+The docstring defends this with &quot;the sub-document's contents are a pure function
+of that pair plus the file's current `(stDev, ino, size)`, so two passes over
+unchanged bytes write the same value&quot;. The premise is false in the case that
+matters: `spawn.fileHint` is stat'd from the **parent session transcript**
+(`:970`), which grows continuously while the session is alive, so
+`fileHint.size` and `fileHint.ts` differ on essentially every re-observation.
+This file's own test proves it —
+`tests/test_agents.py:527-533` appends one line to the session transcript
+specifically to show the hint &quot;goes stale the moment the file changes&quot;.
+
+Combined with unordered bulk + `_requeue` (see Blocker 1), the stored spawn is
+whichever observation mongod happened to apply last.
+
+**Reproduced** (same spawn, two observations at size 1000 and 2000):
+
+```
+fwd size: 2000
+rev size: 1000
+fingerprint equal: False
+```
+
+**Fix.** Split `spawn` by mutability, the same way `fragments`/`fragmentTips`
+was split: the immutable leaves (`spawn.recordUuid`, `spawn.toolUseId`,
+`spawn.sessionId`) under `$setOnInsert`/`$min`, and the perishable hint under a
+monotone `$max` composite ordered by its own `ts` (e.g.
+`ms.op_max({&quot;spawn.fileHint&quot;: [ts, size, ino, st_dev, line]})`, unpacked by the
+&quot;jump to spawn&quot; reader). `merge_ops`'s `_conflicting_path` permits this — the
+paths are disjoint. Add a both-orders test with two different hint sizes.
+
+---
+
+## MAJOR 3 — the rebuild arm and the backfill arm store DIFFERENT documents for the same agent
+
+`aggregator/agents.py:777-787` (`assemble`) vs `:1120-1130` (`map_agent`);
+invariant claimed at `:1238-1240`
+
+`iter_agent_observations`'s docstring states the contract outright:
+
+&gt; With a concrete path (a `--backfill` …) the single fragment is emitted as an
+&gt; agent of its own — **which is precisely the case the `$min`/`$addToSet`/`$max`
+&gt; algebra above exists to make identical to the assembled one.**
+
+It is not identical, because the two arms use two different conflict-resolution
+rules:
+
+- `assemble()` resolves a meta/label disagreement **chain-first**
+  (`meta.setdefault(...)` at `:783`; `labels = marker_bearing[0].labels` at
+  `:787`; `unconventional = labels.unconventional` at `:804`);
+- `map_agent()` resolves it per-leaf with **`$min`** (`:1130`).
+
+**Reproduced (meta):** two fragments whose `.meta.json` disagree —
+
+```
+rebuild : {'agentType': 'workflow-subagent', 'model': 'opus'}
+backfill: {'agentType': 'general-purpose',   'model': 'haiku'}
+fingerprint equal: False
+```
+
+**Reproduced (labels — worse):** chain-first fragment carries a `[monitor]`
+marker with no `name=`, the continuation carries `[touch] name=critique` —
+
+```
+rebuild  {'name': None,       'unconventional': True } labels={'plan':'sp-x','stage':'impl'}
+backfill {'name': 'critique', 'unconventional': False} labels={'plan':'sp-x','stage':'critique'}
+```
+
+The rebuild arm **drops a name the harness actually stated** and flags a named
+agent `unconventional: True`, which is R-28's flag inverted: the UI renders that
+agent as a raw 17-hex id after a `--rebuild` and by its name after a
+`--backfill`. It also directly defeats the module docstring's own argument at
+`:90-93` (&quot;`unconventional` is written by every observation and merged with
+`$min` … so 'some observation found a name' wins&quot;) — on the rebuild path `$min`
+never sees two values, because `assemble` collapsed them first.
+
+This breaks R-56's &quot;wipe + rebuild equivalence&quot; arm and GD-25's fingerprint
+property across ingest modes. The frozen corpus hides it: `BIG` has meta and a
+marker, `SMALL` has neither, so there is nothing to disagree about
+(`test_the_meta_bearing_fragment_wins_without_seeing_the_other` tests only the
+absent-vs-present case, never present-vs-present-and-different).
+
+**Fix.** Make `assemble()` use the mapper's rule: per-field `min()` over every
+meta-bearing fragment, per-leaf `min()` over the label fields of every
+marker-bearing fragment, and `unconventional = min(...)` across all fragments
+(not chain-first's). Then add a fixture with two disagreeing metas AND two
+disagreeing markers and assert
+`fingerprint(rebuild_state) == fingerprint(backfill_state)`.
+
+---
+
+## MAJOR 4 — a fragment observed before its first record is readable leaves a permanent phantom `fragments[]` element
+
+`aggregator/agents.py:477-488` (`Fragment.identity`), `:643-659`, `:1139-1142`
+
+`identity()` filters out `None` members, so the sub-document's *field set*
+depends on what was readable at observation time:
+
+- file created, first line not yet flushed (or the first line torn mid-write —
+  `read_fragment`'s own docstring at `:621-624` says a torn tail is deferred):
+  identity is `{&quot;path&quot;: …}`;
+- one tick later: identity is `{&quot;sessionId&quot;, &quot;path&quot;, &quot;firstUuid&quot;,
+  &quot;firstParentUuid&quot;, &quot;firstTs&quot;}`.
+
+Those are two different BSON sub-documents, so `$addToSet` — which the module
+correctly notes dedupes on exact field-order-sensitive equality (`:481-483`) —
+adds a **second element for the same file**, permanently (GD-26: no deletes).
+
+**Reproduced**, both for an empty file and for a torn first line:
+
+```
+fragments: [ {&quot;path&quot;: &quot;…/agent-ccc….jsonl&quot;},
+             {&quot;path&quot;: &quot;…/agent-ccc….jsonl&quot;, &quot;firstUuid&quot;: &quot;1111…&quot;, &quot;firstTs&quot;: …} ]
+fragments_of -&gt; 2 elements
+```
+
+This is precisely the defect the whole storage split was introduced to prevent
+(&quot;a fragment list that shows the same file eleven times&quot;, `:59-60`), reappearing
+in the live-tail case rather than the per-tick one. It is reachable on every
+newly spawned agent: the tailer sees `agent-&lt;id&gt;.jsonl` the moment it is
+created, which is before the first record is complete.
+
+**Fix.** A fragment with no `first_uuid` has no identity yet — refuse to emit a
+`fragments[]` element (and the matching `files[]` entry) for it, count it in
+`_skips()` (`no_first_record`), and let the next tick add the real one. Add the
+test: observe empty ⇒ append a record ⇒ observe ⇒ assert exactly one
+`fragments[]` element and one `fragments_of()` row.
+
+---
+
+## MINOR 5 — the per-path source arms ignore R-25's scope, so `--backfill` mirrors agents `--rebuild` excludes
+
+`aggregator/agents.py:1244-1247`, `:1254-1257` vs `:1009-1011`
+
+The `path=None` arm goes through `scan()` → `ingest.iter_transcript_paths`,
+which is scoped to the cwd slug plus `.session-aliases` (R-25 as amended, and
+the module docstring at `:1002-1005` makes a point of it: &quot;the four foreign
+`/tmp` slug directories on this machine are not this project's agents&quot;). The
+per-path arm applies no scope check at all, and `mirror.iter_backfill_sources`
+(`mirror.py:2589-2617`) walks all of `projects/**` with only the GD-27 deny-list.
+So `--backfill` produces a strict superset of `--rebuild`, and R-56's
+wipe+rebuild-equivalence arm compares two different corpora.
+
+**Fix.** Either apply the same scope predicate in the per-path arms (return `[]`
+for a path outside `sessions.scoped_dirs`), or state the widening explicitly in
+the docstring and hand sp-14 the note that the two modes are not comparable
+without a scope filter. Flagging as minor because the resolution may legitimately
+belong to sp-06/sp-14 rather than here — but the current docstring implies the
+two arms agree, and they do not.
+
+---
+
+## MINOR 6 — `spawn_agent_conflict` is structurally unreachable
+
+`aggregator/agents.py:955-964`
+
+```python
+launch = pending.pop(tool_use_id, None) if tool_use_id else None
+if launch is None:
+    skipped[&quot;spawn_without_tool_use&quot;] += 1
+    continue                                   # &lt;- always taken on the 2nd result
+record, arguments = launch
+if seen.get(tool_use_id, agent_id) != agent_id and skipped is not None:
+    skipped[&quot;spawn_agent_conflict&quot;] += 1       # &lt;- unreachable
+```
+
+The conflict the counter describes (&quot;one toolUseId naming two agentIds&quot;, `:576`)
+requires a *second* result for a `tool_use_id` already consumed — but the launch
+was `pop`ped on the first, so the second takes the `continue` at `:960` and is
+miscounted as `spawn_without_tool_use`. The counter can only fire if a second
+`tool_use` block re-registers the same id, which the corpus never does.
+
+**Fix.** Consult `seen` before the `launch is None` early return (or don't pop
+until after the check), and add a doctored-fixture test that fires it — the same
+shape R-50 uses for its agentId-conflict counter.
+
+---
+
+## MINOR 7 — six of the nine declared skip counters are never asserted; one is unreachable from `scan()`
+
+`aggregator/agents.py:562-578`
+
+`_skips()`'s docstring argues the set is declared so that &quot;nothing was skipped&quot;
+is assertable. Only `spawn_without_result` and `unchained_fragment` are ever
+asserted (`tests/test_agents.py:552`, `:367`). `meta_conflict`,
+`marker_conflict`, `not_an_agent_file`, `spawn_without_tool_use`,
+`spawn_agent_conflict` and `unstattable_hint` have no test on either side, and
+`not_an_agent_file` (`:630`) is unreachable from `scan()` because `:1017` already
+guards on `ingest.agent_id_for_path(path)`. `meta_conflict` and `marker_conflict`
+are the two that Major 3's fixture would exercise for free.
+
+**Fix.** Assert each counter's firing case in the tests added for Majors 3/4, and
+either delete `not_an_agent_file` or keep it and note it is a `read_fragment`
+direct-call counter only.
+
+---
+
+## MINOR 8 — run lookups mix the raw `runId` with `refs.run_key(runId)`
+
+`aggregator/agents.py:1630`, `:1652`, `:1657`, `:1700`, `:1705`, `:1740`, `:1754`
+
+`terminal` and `run_docs`/`per_run` are keyed by the **raw** `doc[&quot;runId&quot;]`,
+while topology is looked up with `refs.run_key(run_id)` (`:1657`, `:1705`,
+`:1771`). They agree today only because `_build_run` is `escape_component`
+(`refs.py:497`) and `wf_&lt;hex&gt;` contains none of `% # | :`. A runId carrying any
+of those characters splits one run into two `Reduction.runs` entries — the
+escaped `run_docs` key with `nodeCount: 0`, and the raw `per_run` key with no
+`startedAt`/`endedAt` — and the freeze rule silently stops firing, because
+`terminal.get(run_id)` misses.
+
+**Fix.** Key every run lookup in `reduce` through `refs.run_key(run_id)` (one
+helper, applied at all five sites), and add a test with a runId containing a `%`.
+
+---
+
+## MINOR 9 — the `fragments`/`fragmentTips` deviation is recorded only in this module's docstring
+
+`aggregator/agents.py:52-73`; GD-24's normative table, amendment plan lines 199-230
+
+GD-24's collection table is declared &quot;the ONE normative collection table&quot; and
+gives `agents` a `fragments[]` whose elements carry `lastUuid`/`lineCount`.
+The implementation's split is well-argued (unbounded `$addToSet` growth on a
+GD-16 collection is a real defect) and the reader contract is preserved by
+`fragments_of()`, so I am not asking for it to be reverted — but:
+
+1. nothing in `.claude/local-orchestrators/touch-mongo-live/` records the
+   deviation, so sp-12/sp-13 have no plan-visible reason to call
+   `fragments_of()` instead of reading `doc[&quot;fragments&quot;]` directly;
+2. `mongo_store.COLLECTIONS[&quot;agents&quot;]` (`:353-367`) knows nothing about
+   `fragmentTips` — it is in neither `types` nor `accumulable` — which is
+   exactly why the `$set` fence was blind to Blocker 1.
+
+**Fix.** Write the deviation into a findings note under the task folder (CLAUDE.md
+makes the repo copy the durable record), and raise the one-line
+`accumulable=(… &quot;fragmentTips&quot;)` addition to sp-05's owner / sp-15's docs pass so
+the fence covers the field this sub-plan invented. Do not edit `mongo_store.py`
+here — it is sp-05's file.
+
+---
+
+## NIT 10 — docstring says the tip is `$max`; `lastUuid` is `$set`
+
+`aggregator/agents.py:68-70` and `:1085-1087` both describe `fragmentTips` as
+&quot;`$max` on the monotone counters&quot; with `lastUuid`/`lastTs` &quot;written beside them&quot;,
+which reads as if the whole tip were order-safe. It is not (Blocker 1). Obsolete
+once Blocker 1 is fixed; if the fix keeps a non-`$max` leaf, say so plainly.
+
+## NIT 11 — `unchained_fragment`'s comment is broader than what fires
+
+`aggregator/agents.py:572` says &quot;stitch chain does not reach this fragment&quot;, but
+`order_fragments` (`:726-728`) counts only *leftovers* — cycle members. A
+fragment whose parent was compacted away becomes its own chain head and is
+deliberately **not** counted (`tests/test_agents.py:353-355` pins that). Reword
+the comment to &quot;fragment reachable from no chain head (a cycle)&quot;.
+
+## NIT 12 — `PASSED` / `FAILED` / `CLOSED_NO_VERDICT` are module-level but not exported
+
+`aggregator/agents.py:1299-1306` — `NODE_STATES` is in `__all__`, the verdict
+vocabulary is not, yet sp-12's API and sp-13's page need the same three strings
+to render a node row. Add them to `__all__` rather than letting the next
+sub-plan re-spell them (the same argument the file already makes at `:1303-1305`
+for importing `legacy.CLOSED_NO_VERDICT`).
+
+---
+
+## What I attacked and could NOT break
+
+Recorded so the next attempt does not re-litigate settled ground:
+
+- **GD-21** — `pymongo` appears nowhere in `agents.py`; `mongo_store` is imported
+  for pure op-builders only; `tests/test_stdlib_only.py` green.
+- **GD-22** — no DB I/O, no client, no socket anywhere in the file; `reduce` is
+  pure over `(state, now)` and the AST guard at `test_reducer.py:373-397` is real
+  (it also pins &quot;only `liveness` and `reduce` construct a state&quot;).
+- **GD-24 `_id`s** — every key goes through `refs.agent_key`; the AST guard at
+  `test_agents.py:381-390` proves no other `*_key` builder is reachable from the
+  mappers; `derived_id` is legitimately reducer-owned (`derived`'s `id_kinds` is
+  empty by declaration, `mongo_store.py:467-473`, and `check_id` exempts it by
+  that declaration rather than by omission).
+- **GD-26** — no delete verb, no `$unset`, no TTL; `apply_derived`'s bucket
+  replacement is the one collection GD-23 declares droppable, and it is the
+  memory model only (the server-side drop is correctly handed to `mirror.py`).
+- **GD-28** — `harness` on every mapped document, `derived` on every reducer
+  document, asserted across all 11 docs in
+  `test_derived_documents_are_droppable_and_versioned`.
+- **R-54 in full** — the three-state predicate, the strict `&gt; 180 s` boundary,
+  the `session_active is None` three-valued conjunct, the freeze-to-stale
+  migration, the five-sibling run close with zero `failed`, `reducerVersion`
+  drop-and-rebuild producing the same conclusion, and &quot;API answer == page render&quot;
+  (the label *is* a field). I tried to find a path that produces `failed` as a
+  liveness state and there is none.
+- **SD-9** — topology is read as a shape with no import of `custom_state`; the
+  absent arm, the present arm, the per-stage cap override and the unparsable
+  attempt are all covered.
+- **GD-9 marker layer** — the window, two markers on one line, the
+  prose-vs-payload distinction for `markerMisplaced`, and cross-checking the
+  grammar against `decision_watcher.py` on real corpus text. Solid.
+- **Ownership** — nothing outside the three owned files was modified; no commit.
+
+---
+
+## Reproduction scripts
+
+Written to the session scratchpad, not the repo (they are throwaway probes, and
+`tests/` outside the three owned files is not this sub-plan's):
+`probe.py` (Blocker 1), `probe2.py` (Blocker 2), `probe3.py` (Major 4),
+`probe4.py`/`probe5.py` (Major 3), under
+`/tmp/claude-1000/-home-laniakea-Projects-touch/c96f1b66-d6a5-4322-adc6-ddb44f270ddb/scratchpad/`.
+Each is ~20 lines and re-derivable from the finding text above; the next
+implementer should turn 1, 2, 3 and 4 into permanent assertions in
+`tests/test_agents.py` rather than re-running the probes.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

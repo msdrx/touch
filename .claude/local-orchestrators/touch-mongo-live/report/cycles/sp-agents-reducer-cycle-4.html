@@ -1,0 +1,505 @@
+<title>sp-agents-reducer — cycle 4</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-agents-reducer — implement→test→critique, attempt 4/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 4 closes every finding of attempt 3's critique (2 major, 1 minor, 4 nits) inside sp-10's three owned files; both owned suites are green (test_agents 210 ok, test_reducer 118 ok, up from 179/86) and the full-suite baseline is unchanged.
+
+MAJOR 1 — the session conjunct now only PROMOTES. `_session_activity` returned `False` for any session it had observed without a fresh `lastTs`, and `False` is the one value that demotes; since `sessions.lastTs` is written only by `sessions.map_session`'s live-registry arm (the historical arm writes none, and `ingest.COLLECTIONS` has no `sessions`) and the registry heartbeat is measurably stale — `/home/agent/.claude/sessions/15934.json`, sessionId `c96f1b66-…`, i.e. this very running session, is 22,688 s / 6h18m old right now, independently confirming the critique's 21,601 s — every warm agent of every real session reduced to `unknown — session idle`. It now emits `{sessionId: True}` for positively fresh sessions only; a new `_session_conjunct` yields `True` or `None`, never `False`. `liveness()` keeps all three values (a caller with a real end-observation still demotes). New arm `test_a_session_may_promote_a_node_and_never_demote_it` builds the `sessions` bucket with `sessions.map_session` itself (a `hist:` doc plus a `live:` doc with the measured 6 h heartbeat), asserts the five warm siblings stay `running` and the run stays open, that a fresh heartbeat IS read (`{SESSION: True}` — distinguishing &quot;does not demote&quot; from &quot;ignores&quot;), and that promotion cannot revive a ten-minute-silent node.
+
+MAJOR 2 — `Reduction.operations()` is now a total per-`_id` overwrite. `reduce` emits `idleSeconds`, `frozen`, `attemptLabel` and `nextStage` on every agent and node payload (`None`/`False` included), so folding the operation list is byte-identical to `apply_derived`; previously a server document kept `frozen: true` beside a reason that was no longer the freeze (GD-26 forbids the `$unset` that would repair it, and `mirror.py` drops `derived` only on `--rebuild`). New arm `test_the_operation_list_is_a_total_overwrite_of_each_derived_document` — the method's first direct test — asserts the two-tick frozen case, the `idleSeconds`-beside-`done` case, `ms.fingerprint(wire) == ms.fingerprint(model)`, and one key set per derived kind across four reductions.
+
+MINOR 3 — `runState.runId` no longer null for a run with no nodes yet (`ingest.map_run` stores the runId as the `_id`, never as a field): new `_raw_run_id` falls back through `refs.parse_ref_key(&quot;run&quot;, …)`, guarded by `RefError`, asserted with a runId containing `%` and `#`.
+
+NIT 4 — `fragmentTips.&lt;firstUuid&gt;.…` goes through a new `_plain_field` guard (rejects `.`, leading `$`, NUL) as an `AgentsError`, parity with `ingest._launch_paths`. NIT 5 — `_labels_of`/`_as_observation` derive `unconventional` from the coerced labels when a replay dict is silent, so a replayed named agent is no longer stored `unconventional: true`. NIT 6 — both mappers key through the exported `node_key(agent_id=…)` (identical to `refs.agent_key`), asserted by AST and by behaviour. NIT 7 — `_corpus_scans`' explicit-paths arm goes through `ingest._cached_transcript`, so `scan(paths=[…])` shares ingest's memo.
+
+Anti-tautology: 9 mutation probes on a scratchpad copy (`…/scratchpad/probe4`), all 9 caught — MAJOR 1 reinstated two ways, MAJOR 2 two ways (agent and node payload key dropped), MINOR 3, NIT 4, NIT 5, NIT 6, NIT 7; the repo file was verified byte-identical to the probe baseline afterwards. Full suite: 14/16 green; `test_mirror.py` (3 FAILs) and `test_sessions.py` (1 FAIL) remain the pre-existing baseline of other sub-plans' RED loops, character-for-character the same strings attempts 1–3 recorded. `HEAD` is still `579446e` — no commit; the only file touched outside the three owned ones is the sp-10 deviation note, which gains D-7 (the `lastTs` finding, with the measured age) and a corrected D-3 whose old justification for `$set` the critique proved false.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suites 100% green: tests/test_agents.py rc 0, tests/test_reducer.py rc 0. Full suite 20 files: 18 pass, 2 fail (tests/test_mirror.py FAILED(3), tests/test_sessions.py FAILED(1)) — failure strings character-for-character identical to the attempts 1-3 baseline and owned by sp-mirror-deploy / sp-sessions-arm, so 0 NEW failures. Mongo-absent arms skip cleanly (TOUCH_MONGO_URI unset); agents.py has zero pymongo/bson references and test_stdlib_only is green. All attempt-3 critique findings are closed with non-tautological assertions: MAJOR 1 (_session_activity now promote-only, sessions bucket built via sessions.map_session, fresh-heartbeat counter-arm proves the field is still read), MAJOR 2 (reduce emits idleSeconds/frozen/attemptLabel/nextStage always; operations() folded twice is fingerprint- and document-identical to apply_derived), MINOR 3 (runId fallback via refs.parse_ref_key), NITs 4-7. Deviation file gained D-7. Ownership clean: the only files touched are aggregator/agents.py, tests/test_agents.py, tests/test_reducer.py and the sub-plan's own findings file; HEAD still 579446e, nothing committed.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 1 blocker, 1 major, 2 minor, 3 nits. BLOCKER: agents.py:2171 `_run_is_terminal` treats a non-null `runs.endedAt` as a terminal observation, but ingest derives `runs.endedAt` as max(node.endedAt) where a node's endedAt is its agent transcript's LAST RECORD timestamp (ingest.py:1683/1741-1750, per R-49's &quot;now() forbidden&quot; rule). Every run that has produced a single transcript line therefore reads terminal, so reduce()'s freeze rule (2307/2356) rewrites every warm RUNNING row to `unknown — frozen at run close` and closes the run. Proven on the repo's own live-run fixture (wf_b297177a-d11, the snapshot-less &quot;still running&quot; specimen): reduced 30s after last activity it yields run state=done/closed=True/'closed — no verdict' with the warm agent frozen; with the endedAt clause removed the same bytes and clock give run=running/closed=False with the node RUNNING. This is LIVEFLOW-5/R-54's fabricated-state defect re-created inside the one derivation site GD-23 forbids anyone downstream from second-guessing. MAJOR: every tests/test_reducer.py state is hand-built by fanout(), whose &quot;live run&quot; shape ingest cannot emit and whose &quot;terminal&quot; shape ingest emits for everything; the freeze test triggers on `ended=` and the fanout(run_status=) parameter is never used by any test — which is why this survived four attempts. Minors: module docstring claims `description` is the unconventional display fallback while reduce() falls back to the agentId; `counters[&quot;frozen&quot;]` mixes agent+node populations against the adjacent comment's own rule. Nits: `_max_seq` rescans both event collections per read; `_run_ref` leaks refs.RefError out of the read path; running Agent-tool agents get no spawn sub-document. Independently confirmed the gate's other claims — owned suites green, the 2 red files (test_mirror, test_sessions) are genuinely not this sub-plan's, GD-21/24/25/26/28/29 and the mapping half hold up under attack.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 5/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 4 closes every finding of attempt 3's critique (2 major, 1 minor, 4 nits) inside sp-10's three owned files; both owned suites are green (test_agents 210 ok, test_reducer 118 ok, up from 179/86) and the full-suite baseline is unchanged.
+
+MAJOR 1 — the session conjunct now only PROMOTES. `_session_activity` returned `False` for any session it had observed without a fresh `lastTs`, and `False` is the one value that demotes; since `sessions.lastTs` is written only by `sessions.map_session`'s live-registry arm (the historical arm writes none, and `ingest.COLLECTIONS` has no `sessions`) and the registry heartbeat is measurably stale — `/home/agent/.claude/sessions/15934.json`, sessionId `c96f1b66-…`, i.e. this very running session, is 22,688 s / 6h18m old right now, independently confirming the critique's 21,601 s — every warm agent of every real session reduced to `unknown — session idle`. It now emits `{sessionId: True}` for positively fresh sessions only; a new `_session_conjunct` yields `True` or `None`, never `False`. `liveness()` keeps all three values (a caller with a real end-observation still demotes). New arm `test_a_session_may_promote_a_node_and_never_demote_it` builds the `sessions` bucket with `sessions.map_session` itself (a `hist:` doc plus a `live:` doc with the measured 6 h heartbeat), asserts the five warm siblings stay `running` and the run stays open, that a fresh heartbeat IS read (`{SESSION: True}` — distinguishing &quot;does not demote&quot; from &quot;ignores&quot;), and that promotion cannot revive a ten-minute-silent node.
+
+MAJOR 2 — `Reduction.operations()` is now a total per-`_id` overwrite. `reduce` emits `idleSeconds`, `frozen`, `attemptLabel` and `nextStage` on every agent and node payload (`None`/`False` included), so folding the operation list is byte-identical to `apply_derived`; previously a server document kept `frozen: true` beside a reason that was no longer the freeze (GD-26 forbids the `$unset` that would repair it, and `mirror.py` drops `derived` only on `--rebuild`). New arm `test_the_operation_list_is_a_total_overwrite_of_each_derived_document` — the method's first direct test — asserts the two-tick frozen case, the `idleSeconds`-beside-`done` case, `ms.fingerprint(wire) == ms.fingerprint(model)`, and one key set per derived kind across four reductions.
+
+MINOR 3 — `runState.runId` no longer null for a run with no nodes yet (`ingest.map_run` stores the runId as the `_id`, never as a field): new `_raw_run_id` falls back through `refs.parse_ref_key(&quot;run&quot;, …)`, guarded by `RefError`, asserted with a runId containing `%` and `#`.
+
+NIT 4 — `fragmentTips.&lt;firstUuid&gt;.…` goes through a new `_plain_field` guard (rejects `.`, leading `$`, NUL) as an `AgentsError`, parity with `ingest._launch_paths`. NIT 5 — `_labels_of`/`_as_observation` derive `unconventional` from the coerced labels when a replay dict is silent, so a replayed named agent is no longer stored `unconventional: true`. NIT 6 — both mappers key through the exported `node_key(agent_id=…)` (identical to `refs.agent_key`), asserted by AST and by behaviour. NIT 7 — `_corpus_scans`' explicit-paths arm goes through `ingest._cached_transcript`, so `scan(paths=[…])` shares ingest's memo.
+
+Anti-tautology: 9 mutation probes on a scratchpad copy (`…/scratchpad/probe4`), all 9 caught — MAJOR 1 reinstated two ways, MAJOR 2 two ways (agent and node payload key dropped), MINOR 3, NIT 4, NIT 5, NIT 6, NIT 7; the repo file was verified byte-identical to the probe baseline afterwards. Full suite: 14/16 green; `test_mirror.py` (3 FAILs) and `test_sessions.py` (1 FAIL) remain the pre-existing baseline of other sub-plans' RED loops, character-for-character the same strings attempts 1–3 recorded. `HEAD` is still `579446e` — no commit; the only file touched outside the three owned ones is the sp-10 deviation note, which gains D-7 (the `lastTs` finding, with the measured age) and a corrected D-3 whose old justification for `$set` the critique proved false.</li><li>Test gate PASSED: PASS. Owned suites 100% green: tests/test_agents.py rc 0, tests/test_reducer.py rc 0. Full suite 20 files: 18 pass, 2 fail (tests/test_mirror.py FAILED(3), tests/test_sessions.py FAILED(1)) — failure strings character-for-character identical to the attempts 1-3 baseline and owned by sp-mirror-deploy / sp-sessions-arm, so 0 NEW failures. Mongo-absent arms skip cleanly (TOUCH_MONGO_URI unset); agents.py has zero pymongo/bson references and test_stdlib_only is green. All attempt-3 critique findings are closed with non-tautological assertions: MAJOR 1 (_session_activity now promote-only, sessions bucket built via sessions.map_session, fresh-heartbeat counter-arm proves the field is still read), MAJOR 2 (reduce emits idleSeconds/frozen/attemptLabel/nextStage always; operations() folded twice is fingerprint- and document-identical to apply_derived), MINOR 3 (runId fallback via refs.parse_ref_key), NITs 4-7. Deviation file gained D-7. Ownership clean: the only files touched are aggregator/agents.py, tests/test_agents.py, tests/test_reducer.py and the sub-plan's own findings file; HEAD still 579446e, nothing committed.</li><li>Critique REJECTED: REJECTED — 1 blocker, 1 major, 2 minor, 3 nits. BLOCKER: agents.py:2171 `_run_is_terminal` treats a non-null `runs.endedAt` as a terminal observation, but ingest derives `runs.endedAt` as max(node.endedAt) where a node's endedAt is its agent transcript's LAST RECORD timestamp (ingest.py:1683/1741-1750, per R-49's &quot;now() forbidden&quot; rule). Every run that has produced a single transcript line therefore reads terminal, so reduce()'s freeze rule (2307/2356) rewrites every warm RUNNING row to `unknown — frozen at run close` and closes the run. Proven on the repo's own live-run fixture (wf_b297177a-d11, the snapshot-less &quot;still running&quot; specimen): reduced 30s after last activity it yields run state=done/closed=True/'closed — no verdict' with the warm agent frozen; with the endedAt clause removed the same bytes and clock give run=running/closed=False with the node RUNNING. This is LIVEFLOW-5/R-54's fabricated-state defect re-created inside the one derivation site GD-23 forbids anyone downstream from second-guessing. MAJOR: every tests/test_reducer.py state is hand-built by fanout(), whose &quot;live run&quot; shape ingest cannot emit and whose &quot;terminal&quot; shape ingest emits for everything; the freeze test triggers on `ended=` and the fanout(run_status=) parameter is never used by any test — which is why this survived four attempts. Minors: module docstring claims `description` is the unconventional display fallback while reduce() falls back to the agentId; `counters[&quot;frozen&quot;]` mixes agent+node populations against the adjacent comment's own rule. Nits: `_max_seq` rescans both event collections per read; `_run_ref` leaks refs.RefError out of the read path; running Agent-tool agents get no spawn sub-document. Independently confirmed the gate's other claims — owned suites green, the 2 red files (test_mirror, test_sessions) are genuinely not this sub-plan's, GD-21/24/25/26/28/29 and the mapping half hold up under attack.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-agents-reducer-test-attempt-4.md</summary><pre># sp-agents-reducer — test gate, attempt 4
+
+**Verdict: PASS.** Both owned suites 100% green; 0 NEW failures in the full
+suite; the two red files are the same pre-existing baseline recorded in attempts
+1–3 and belong to other sub-plans.
+
+Gate run read-only: no source or test file was edited, nothing was committed,
+`HEAD` is still `579446e`.
+
+---
+
+## 1. Targeted suites (must be 100% green)
+
+Run from the repo root, stdlib only, standalone executables:
+
+| suite | rc | evidence |
+|---|---|---|
+| `python3 tests/test_agents.py` | **0** | `all agents (R-28/R-48) tests passed` |
+| `python3 tests/test_reducer.py` | **0** | `all reducer (R-54) tests passed` |
+
+No monitoring-module test file is owned by this sub-plan (owned files are
+`aggregator/agents.py`, `tests/test_agents.py`, `tests/test_reducer.py`), so the
+`.claude/shared/monitoring/tests/` set is covered only by the regression gate
+below.
+
+## 2. Full-suite regression gate — no NEW failure
+
+20 files: `.claude/shared/monitoring/tests/test_*.py` each from its own
+directory, then `tests/test_*.py` from the repo root.
+
+- **PASS (18):** monitoring `test_frontend`, `test_server`, `test_shell`,
+  `test_watcher`; repo `test_agents`, `test_bootstrap`, `test_fixtures`,
+  `test_ingest`, `test_legacy`, `test_mongo_deploy`, `test_mongo_store`,
+  `test_reducer`, `test_refs`, `test_stdlib_only`, `test_store`, `test_tailer`,
+  `test_usage`, `test_ws`.
+- **FAIL (2) — pre-existing baseline, failure strings character-for-character
+  identical to the sets recorded in attempts 1, 2 and 3:**
+  - `tests/test_mirror.py` (rc 1), `FAILED (3)`:
+    `…proven by the call count: the held ticks made no attempt`;
+    `the first generation lands`;
+    `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  - `tests/test_sessions.py` (rc 1), `FAILED (1)`:
+    `wipe + --rebuild reproduces a byte-identical fingerprint`.
+
+Attribution: both belong to loops that closed RED (`sp-mirror-deploy`,
+`sp-sessions-arm`); neither failure path names `agents.py` or an sp-10 symbol,
+and attempt 2 already proved the set by re-running those suites with sp-10's
+three files removed. Attempt 4 changed only `agents.py`, `test_agents.py`,
+`test_reducer.py` — none of which `test_mirror.py` or `test_sessions.py`
+imports. Baseline failures do not fail this gate.
+
+**Mongo-absence arm (GD-21 / R-56).** `TOUCH_MONGO_URI` is unset; every live arm
+skips cleanly and prints its skip line (`test_mongo_store`, `test_mongo_deploy`,
+`test_mirror`, `test_sessions` all reach `SKIP: … TOUCH_MONGO_URI is not set
+(R-42's loopback+auth recipe)`). `grep -c 'pymongo\|bson' aggregator/agents.py`
+= **0**; `tests/test_stdlib_only.py` rc 0.
+
+## 3. Attempt-3 critique findings — closed in the tree, each with a real assertion
+
+| finding | state in the tree | asserting test |
+|---|---|---|
+| **MAJOR 1** — `_session_activity` turned a missing/stale `sessions.lastTs` into positive evidence of idleness, demoting every warm agent of a real session to `unknown — session idle` | **fixed.** `agents.py::_session_activity` now `continue`s when `lastTs` is absent or older than the limit, so the map contains only `{sessionId: True}`; the sessionId stays **unobserved** (`None`) otherwise. Docstring records the evidence rule and points at D-7. | `test_reducer.py::test_a_session_may_promote_a_node_and_never_demote_it` — builds the `sessions` bucket through `sessions.map_session` itself (new `session_bucket()` helper), not by hand: (1) the historical doc (asserted to carry no `lastTs`) does not demote and the run stays open; (2) a six-hour-stale registry heartbeat does not demote, and the reason stays `active …`, on agents **and** nodes; (3) a 30 s-fresh heartbeat *is* read (`_session_activity(...) == {SESSION: True}`), which distinguishes &quot;does not demote&quot; from &quot;ignores the field&quot;; plus `_session_conjunct` is `True`/`None`, never `False`. Not a tautology — arm (3) fails if the field is simply dropped. |
+| **MAJOR 2** — `Reduction.operations()` emitted a non-total `$set`, so the server kept retracted conclusions (`frozen: true`, stale `idleSeconds`, retracted `attemptLabel`/`nextStage`); `apply_derived` hid it by clearing the bucket first | **fixed by widening the payload**, which keeps `$set` and needs no `$unset` (GD-26): `reduce` now always emits `idleSeconds`, `frozen`, `attemptLabel`, `nextStage` (explicit `None`/`False`) on both agent and node payloads. The docstring states totality as a property of the payload and hands sp-06/sp-12 the drop-only-on-rebuild precondition. | `test_reducer.py::test_the_operation_list_is_a_total_overwrite_of_each_derived_document` — the method's first direct test. Asserts the two-tick divergence is gone (`server[&quot;derived&quot;][…][&quot;frozen&quot;] is False`), that `ms.fingerprint(server) == ms.fingerprint(memory)` **and** document-for-document equality, the `idleSeconds`-beside-`done` instance, and totality as a *property*: one key set per `kind` across four different reductions. |
+| **MINOR 3** — a run with no nodes yet got `runState.runId: null` | **fixed.** last-resort fallback through `refs.parse_ref_key(&quot;run&quot;, …)`, guarded by `RefError`. | green line: `a run with no nodes yet still names itself, through the grammar's proven inverse: 'wf_a%b#c' (not None, not the escaped 'wf_a%25b%23c')`, plus `…and a key the run grammar cannot parse yields None rather than a guess` — the `%`/`#` id makes escaped and raw genuinely differ. |
+| **NIT 4** — unguarded `fragmentTips.&lt;firstUuid&gt;` dotted path | **fixed.** `_plain_field(item.first_uuid, &quot;a fragment's firstUuid&quot;)` at `agents.py:1611`, raising as `AgentsError` like `ingest._launch_paths`. |
+| **NIT 5** — dict-replay stored `unconventional: true` beside a `name` | **fixed.** `unconventional=not name` in `_as_observation` (`agents.py:528`); the `map_agent` replay path re-derives from the coerced labels. |
+| **NIT 6** — `node_key` exported but called by nothing | **fixed.** `map_agent`/the node writer now key through `node_key(agent_id=…)` (`agents.py:1565`, `:1682`); the docstring states it is identical to `refs.agent_key` and names sp-11/sp-12's `(runId, key, ordinal)` half. |
+| **NIT 7** — `scan(paths=[…])` bypassed ingest's memo | **fixed.** routed through `ingest._transcript_walk` (`agents.py:1366`). Asserted: `scan(paths=[…]) re-reads nothing ingest already has in hand: 17 reads, still 17` / `…and still answers with the agent`. |
+
+The deviation file gained **D-7** (`sessions.lastTs` is not a liveness clock;
+the conjunct may only PROMOTE) with the measured six-hour `updatedAt`, and the
+handoff section now tells sp-07, sp-12 and sp-13 that a &quot;session idle&quot; badge
+needs a positive end observation, not the age of that field.
+
+## 4. Sub-plan verification (sp-10, subplans.md:288-308)
+
+- **Owned files present and only those touched.** The three newest files under
+  `aggregator/`+`tests/` are exactly `aggregator/agents.py` (15:32),
+  `tests/test_agents.py` (15:29), `tests/test_reducer.py` (15:27); the next
+  newest, `tests/test_legacy.py` (12:51), predates this attempt by hours. Plus
+  the sub-plan's own `findings/sp-agents-reducer-storage-deviation.md`. No file
+  outside the ownership list was modified.
+- **R-28** — harness facts create nodes on the full 17-hex agentId; marker
+  layer only labels (`_labels_of` never creates); unnamed ⇒ `unconventional`.
+  Covered by `test_agents.py`'s label/precedence arms, all green.
+- **R-48** — `fragments[]` ordered by the `parentUuid → uuid` stitch chain
+  (`_chain_fields`, `first_parent_uuid`), never directory order; `sessionId`
+  never a grouping key; meta-bearing fragment wins; union writes; perishable
+  `spawn.fileHint` validated against `(st_dev, st_ino, size)` and stale-marked;
+  &quot;jump to spawn&quot; via `records.findOne`. Green in `test_agents.py`.
+- **R-54 / GD-23** — observations in, derived out; `reducerVersion` +
+  drop-and-rebuild (`needs_rebuild`, `apply_derived` clears the bucket, the
+  ghost-document arm asserts the drop); three-state liveness computed from the
+  `now` **argument** (`test_the_reducer_is_pure_over_state_and_now` proves the
+  reducer touches no file, no socket, and takes its clock as a parameter); no
+  `state` field written by either mapper; idle &gt; 180 s ⇒ `unknown`, which stays
+  in the running set and is never `failed` (`failed` is absent from
+  `NODE_STATES`); freeze-to-stale lives in the reducer; topology per SD-9 with
+  `attempt N of M` / `nextStage`.
+- **GD-25 / SD-1** — the AST guard
+  `test_sd1_the_mappers_are_pure_and_write_only_agents` still proves the mapping
+  half builds only commuting builders and writes only `agents`; `_only_ours`
+  keeps `derived` unreachable through `MIRROR_MAPPERS` (GD-23's single writer).
+- **GD-26** — no delete verb, no `$unset`/`$inc` literal; MAJOR 2 was fixed by
+  widening the payload precisely so no retraction verb is needed.
+- **Tests assert behavior, not tautologies.** Spot-checked the three new arms:
+  each one constructs the failing state from the *real* producing module
+  (`sessions.map_session`, `ms.apply_operations`, `refs`), reduces it, and
+  asserts an observable string/flag — and each carries a counter-arm that fails
+  if the fix were &quot;ignore the input&quot; rather than &quot;interpret it correctly&quot;.
+
+## 5. Commands run
+
+```
+python3 tests/test_agents.py                                  # rc 0
+python3 tests/test_reducer.py                                 # rc 0
+# full gate
+cd /home/laniakea/Projects/touch &amp;&amp; rc=0; \
+  for t in .claude/shared/monitoring/tests/test_*.py; do (cd &quot;$(dirname &quot;$t&quot;)&quot; &amp;&amp; python3 &quot;$(basename &quot;$t&quot;)&quot;) || rc=1; done; \
+  for t in tests/test_*.py; do [ -e &quot;$t&quot; ] || continue; python3 &quot;$t&quot; || rc=1; done; exit $rc
+# -&gt; 18 pass, 2 baseline fail (test_mirror, test_sessions), no NEW failure
+```
+</pre></details>
+<details><summary>Critique findings — sp-agents-reducer-critique-attempt-4.md</summary><pre># sp-agents-reducer — adversarial critique, attempt 4
+
+**Verdict: REJECTED.** 1 blocker, 1 major, 2 minor, 3 nits.
+depth: `in-scope` — every finding is fixable by one more gated attempt on
+`aggregator/agents.py` + `tests/test_reducer.py`.
+critical_defect: `false`.
+
+Reviewed: `aggregator/agents.py` (2486 lines, new/untracked),
+`tests/test_agents.py`, `tests/test_reducer.py`,
+`findings/sp-agents-reducer-storage-deviation.md`, against
+`plan/touch-mongo-live-subplans.md` §&quot;sp-10 — agents-reducer&quot;, items R-28
+(base), R-48 + R-54 (amendment), GD-7/GD-9/GD-10/GD-15/GD-21…GD-30, SD-1/SD-9/SD-11.
+
+Reproduced the test gate's numbers independently: `tests/test_agents.py` rc 0,
+`tests/test_reducer.py` rc 0, full suite 16 files → 14 pass, `test_mirror.py`
+FAILED(3) and `test_sessions.py` FAILED(1). I checked the two red files are not
+this sub-plan's: `test_sessions.py`'s failing arm rebuilds only
+`sessions.scan(...).observations()` through `mirror.Mirror`, and `test_mirror.py`'s
+three are lease/generation counters inside `mirror.py`. Neither touches
+`agents.py`. Ownership is clean (only the four listed files, HEAD still
+`579446e`, nothing committed), and GD-21 holds: `agents.py` contains no
+`pymongo`/`bson` token and imports on bare stdlib.
+
+The mapping half is, as far as I can attack it, correct: the `$min`/`$max`/
+`$addToSet`/`$setOnInsert` algebra is order-free, `_only_ours` is a real wall,
+`_plain_field` closes the dotted-path hazard on `fragmentTips.&lt;uuid&gt;`,
+`tip_mark` genuinely makes the (count, uuid) pair win as a unit, and the
+identity/tip split (D-1) is justified and read back into R-48's exact shape by
+`fragments_of`. The attempt-3 findings do look closed. **The reducer half is
+not**: the freeze trigger reads a field that does not mean what the reducer
+thinks it means, and the consequence is the exact defect R-54 exists to remove.
+
+---
+
+## BLOCKER 1 — `_run_is_terminal` treats `runs.endedAt` as &quot;the harness said this run ended&quot;, but `ingest` derives `endedAt` from transcript *activity*, so **every live run is terminal** and every warm row renders `unknown — frozen at run close`
+
+`aggregator/agents.py:2171-2178`
+
+```python
+def _run_is_terminal(doc) -&gt; bool:
+    if doc.get(&quot;endedAt&quot;) is not None:
+        return True
+    status = doc.get(&quot;status&quot;)
+    return isinstance(status, str) and status not in (&quot;running&quot;, &quot;started&quot;, &quot;async_launched&quot;)
+```
+
+`runs.endedAt` is not a terminal observation. `ingest._run_observation`
+(`aggregator/ingest.py:1741-1750`) computes it as
+
+```python
+for node in nodes:
+    if node.ended_at is not None and (ended is None or node.ended_at &gt; ended):
+        ended = node.ended_at
+```
+
+and `RunNodeObservation.ended_at` is `ended_at=last` (`aggregator/ingest.py:1683`)
+— the **last record timestamp of the node's agent transcript**, per R-49's own
+rule (&quot;node `startedAt/endedAt` derived from the agent transcript's first/last
+record timestamps, `now()` forbidden&quot;). A running agent has a last record too.
+So `runs.endedAt` is populated the moment *any* node of the run has *any*
+transcript record, and `_run_is_terminal` answers `True` for every run that has
+ever produced a line.
+
+The freeze then fires on both populations (`agents.py:2307-2310` and
+`:2356-2359`): a node/agent whose own transcript is warm and which `liveness()`
+correctly called `RUNNING` is overwritten with
+`Liveness(UNKNOWN, &quot;frozen at run close&quot;, &quot;unknown — frozen at run close&quot;)`.
+With `tally[RUNNING]` thereby forced to 0, `closed = not tally[RUNNING]`
+(`:2406`) closes the run as well, `reason = &quot;terminal observation&quot;`,
+`label = &quot;closed — no verdict&quot;`.
+
+**Demonstrated, not argued**, on the repo's own frozen live-run fixture —
+`tests/fixtures/mirror/live-run-shape/…/workflows/wf_b297177a-d11`, which
+`ingest.py:146` and `tests/test_ingest.py:1029` both describe as *the* specimen
+of a run that is still running (no `&lt;runId&gt;.json` snapshot at all). Building the
+state through the real `ingest`/`agents` mappers and reducing at
+`now = max(lastTs) + 30s` (i.e. squarely inside the 180 s window):
+
+```
+run doc: status=None  endedAt=2026-07-25 16:03:42.258+00:00
+_run_is_terminal -&gt; True
+agent states : {'done': 7, 'unknown': 2}
+agent reasons: {'result observed': 7, 'idle 8m': 1, 'frozen at run close': 1}
+run          : state=done closed=True reason='terminal observation'
+               label='closed — no verdict'
+```
+
+With the `endedAt` clause removed (status-only terminal), the same bytes and the
+same clock give the right answer:
+
+```
+agent states : {'done': 7, 'running': 1, 'unknown': 1}
+run          : state=running closed=False reason='1 node(s) active'
+```
+
+Severity is blocker, not major, for three reasons:
+
+1. It is **unconditional on the live path.** Not an edge case, not a rare
+   ordering — the first transcript line of the first node arms it for the rest
+   of the run, for every run, forever.
+2. It is **the defect this sub-plan was written to remove, inverted.**
+   R-54/LIVEFLOW-5/LIVEFLOW-6: &quot;a live agent renders running&quot;, &quot;no state is
+   fabricated&quot;. This fabricates a *run close* out of an activity timestamp and
+   then fabricates a per-row state from it. `&quot;frozen at run close&quot;` is worse
+   than the old `running`-forever bug, because it is a confident explanation:
+   the row looks accounted for.
+3. It **poisons the one thing sp-12/sp-13 are forbidden to second-guess.**
+   GD-23 makes this the only derivation site and binds `/api/*`, `/ws` and the
+   page to serve its output verbatim; a wrong conclusion here cannot be
+   corrected anywhere downstream by design.
+
+**Fix.** Base the freeze on a signal that only a finished run produces. The
+harness has exactly one: the run snapshot. `runs.status` is snapshot-only and
+snapshot-only-exists-when-finished — I surveyed every `workflows/*.json` on this
+machine and the value set is `{killed: 3, completed: 3, failed: 1}`, no live
+value at all — so the minimal, entirely local fix is to drop the `endedAt`
+clause and keep the `status` clause:
+
+```python
+def _run_is_terminal(doc) -&gt; bool:
+    &quot;&quot;&quot;Did the harness itself say this run ended? (the freeze trigger)
+
+    `endedAt` is deliberately NOT consulted: `ingest._run_observation` derives it
+    as max(node.endedAt) and a node's endedAt is its agent transcript's LAST
+    RECORD timestamp (R-49 — `now()` is forbidden there), which a *running*
+    agent has as well. Reading it as a terminal makes every live run closed and
+    freezes every warm row to &quot;unknown — frozen at run close&quot;, which is
+    LIVEFLOW-5's fabricated badge in a new spelling.
+    &quot;&quot;&quot;
+    status = doc.get(&quot;status&quot;) if isinstance(doc, dict) else None
+    return isinstance(status, str) and status not in (&quot;running&quot;, &quot;started&quot;, &quot;async_launched&quot;)
+```
+
+If a second trigger is wanted (a snapshot whose `status` the harness omitted),
+key it on a field only the snapshot writes — `harnessTotals`/`phases`/`summary`
+are all snapshot-sourced in `ingest.map_run` — or ask sp-05/sp-06 for an
+explicit `snapshotSeen` observation. What it may **not** be is `endedAt`.
+
+The docstrings that describe the trigger must move with it: `reduce`'s
+`:2241` (&quot;is there a terminal observation? (the freeze trigger)&quot;) and the
+module docstring's `freezePlan` paragraph (`:189-195`) both currently describe a
+rule that fires on activity.
+
+---
+
+## MAJOR 2 — the reducer suite has no fixture that ever passed through the real mappers, which is precisely why BLOCKER 1 survived four attempts
+
+`tests/test_reducer.py:92-124`, `:345-368`
+
+Every state in `tests/test_reducer.py` is hand-built by `fanout()`. That helper
+writes `runs[RUN] = {&quot;_id&quot;: RUN, &quot;startedAt&quot;: T0}` and adds `endedAt` **only**
+when the caller asks for it (`ended=`), and writes `run_nodes[…][&quot;endedAt&quot;]`
+**only** for nodes it has already decided are dead. Both are the opposite of
+what `ingest.map_run`/`map_run_node` actually produce, so the suite's model of a
+&quot;live run&quot; is a shape ingest cannot emit and its model of a &quot;terminal run&quot; is a
+shape ingest emits for everything.
+
+`test_freeze_to_stale_moved_into_the_reducer:350` then triggers the freeze with
+`fanout(dead=5, ended=T0+3m)` and asserts it fires — i.e. the one test of the
+freeze rule asserts the buggy trigger is the trigger. The `run_status=`
+parameter `fanout` accepts (`:92`, `:102-103`) is never passed by any test in
+the file, so the *correct* trigger is completely unexercised. `:366-368`
+(&quot;no clock-only freeze&quot;) looks like the guard against this and is not: it varies
+the clock while holding `endedAt` absent, which is the one combination ingest
+never produces.
+
+The gate's &quot;non-tautological assertions&quot; claim is right about attempt 3's
+findings and wrong about this: an assertion can be perfectly non-tautological
+and still be an assertion about a fixture the system cannot produce.
+
+**Fix.** Add one arm that reduces a state built by the real mappers, and make it
+the acceptance for BLOCKER 1. `tests/test_ingest.py:1029` already names the
+fixture and `ingest.read_run` already returns the observations:
+
+```python
+def test_a_live_run_from_the_real_mappers_is_not_frozen():
+    run_dir = FIX / &quot;mirror&quot; / &quot;live-run-shape&quot; / A8D4 / &quot;subagents&quot; / &quot;workflows&quot; / LIVE_RUN
+    state = {}
+    for kind, obs in ingest.read_run(str(run_dir)).observations():
+        mapper = ingest.MIRROR_MAPPERS.get(kind)
+        if mapper:
+            ms.apply_operations(state, mapper(obs))
+    for path in sorted(glob.glob(str(run_dir / &quot;agent-*.jsonl&quot;))):
+        ms.apply_operations(state, map_agent(assemble([read_fragment(path, root=str(LIVE))])))
+    run = state[&quot;runs&quot;][refs.run_key(LIVE_RUN)]
+    check(run.get(&quot;status&quot;) is None and run.get(&quot;endedAt&quot;) is not None,
+          &quot;the frozen LIVE-run fixture has no status and a non-null endedAt — &quot;
+          &quot;endedAt is max(node transcript last-record ts), not a terminal&quot;)
+    now = max(d[&quot;lastTs&quot;] for d in state[&quot;agents&quot;].values() if d.get(&quot;lastTs&quot;)) + 30s
+    reduction = reduce(state, now=now)
+    check(RUNNING in {d[&quot;state&quot;] for d in reduction.nodes.values()},
+          &quot;a run with no snapshot keeps its warm node running&quot;)
+    check(reduction.runs[refs.run_key(LIVE_RUN)][&quot;closed&quot;] is False, &quot;…and does not close&quot;)
+```
+
+and re-point `test_freeze_to_stale_moved_into_the_reducer` at
+`fanout(dead=5, run_status=&quot;killed&quot;)` (the value `wf_455b348c-e17`'s real
+snapshot carries), keeping one arm proving `ended=` alone does **not** freeze.
+
+---
+
+## MINOR 3 — the module docstring says `description` is the `unconventional` fallback render; the only renderer in the file falls back to the `_id`
+
+`aggregator/agents.py:368` and `:694-696` vs `:2322`
+
+`META_FIELDS`' comment states &quot;`description` is what R-28's `unconventional`
+fallback renders when no `[touch] name=` exists&quot;, and `AgentObservation`'s
+comment repeats it. The reducer — the single derivation site, and the only place
+in this module that produces a render string — does
+`&quot;display&quot;: doc.get(&quot;name&quot;) or key`, so an unnamed agent renders its 17-hex
+agentId and `description` is never consulted. The code matches R-28 (&quot;unnamed
+agents get `agentId` display + `unconventional` flag&quot;); the prose does not, and
+sp-13 reading this file will believe the prose.
+
+**Fix:** either change the comments to &quot;`description` is a stored column sp-13
+may render beside the agentId; the reducer's own `display` fallback is the
+agentId per R-28&quot;, or make `display` `doc.get(&quot;name&quot;) or doc.get(&quot;description&quot;)
+or key` and say so in `reduce`'s docstring. Do not leave the two disagreeing.
+
+---
+
+## MINOR 4 — `counters[&quot;frozen&quot;]` mixes the agent and node populations, which the adjacent comment gives as the reason no other counter does
+
+`aggregator/agents.py:2273-2277`, `:2335-2336`, `:2380-2381`
+
+The counter block's own comment says the state counters are population-prefixed
+because &quot;one `done` counter over agents AND nodes reads as a total and is not
+one (an agent and its node are the same fact seen twice), so a reader comparing
+it against `nodeCount` would find a discrepancy that is not there&quot;. `frozen` is
+incremented in both loops and carries no prefix, so it is exactly that counter —
+`tests/test_reducer.py:359` pins the value at 10 for a five-node/five-agent
+fixture and explains it in the assertion message, which is a test compensating
+for a name.
+
+**Fix:** `agent_frozen` / `node_frozen` beside the existing prefixed states (and
+update the two assertions), or keep `frozen` and add the population note to the
+comment block so a `/health` consumer cannot read it as a row count.
+
+---
+
+## NIT 5 — `_max_seq` rescans two whole collections on every read for a value its own docstring calls informational
+
+`aggregator/agents.py:2151-2168`, called unconditionally at `:2263` when
+`derived_from_seq` is None (which sp-12's read path will be).
+
+`reduce`'s cost is otherwise O(agents + nodes + runs); this one call makes it
+O(|events| + |custom_state_events|), collections that grow for the life of the
+installation. GD-30 budgets &quot;aggregator reduce + WS push ≤ 50 ms&quot; at a 250 ms
+tick. Cheap fix: have the caller (sp-12/sp-06) carry the watermark forward — the
+parameter already exists — or have the mirror maintain a running max, and say in
+the docstring that omitting it is the rebuild path only.
+
+## NIT 6 — `reduce` propagates `refs.RefError` out of the read path
+
+`aggregator/agents.py:2196` (`_run_ref`) calls `refs.run_key` unguarded, unlike
+its sibling `_raw_run_id` (`:2214-2220`), which funnels `RefError` to `None`
+&quot;rather than a guess&quot;. Verified:
+`reduce({&quot;agents&quot;: {…: {&quot;runId&quot;: &quot;x&quot;*600}}}, now=…)` raises
+`RefError: ref.runId is over the 512-char cap` and takes the whole reduction —
+i.e. the whole live view — down for one bad document. `mongo_store` type-pins
+`runId` as a string but puts no length pin on it (it is not an `_id`), so the
+cap case is reachable. GD-22 wants the live view functional under adverse
+storage; one unkeyable run should degrade to &quot;no run join&quot;, counted, not to a
+500.
+
+## NIT 7 — `find_spawns` never emits a `SpawnObservation` for a running agent, so &quot;jump to spawn&quot; is unavailable for exactly the agents a user is looking at
+
+`aggregator/agents.py:1320-1321`. A `tool_use` with no matching result is
+counted `spawn_without_result` and dropped, which is correct and unavoidable
+today (the agentId only appears on the result, and the document is keyed by it).
+Worth one sentence in the deviation file's handoff so sp-12 does not plan a UI
+affordance on a sub-document that is absent for every live Agent-tool agent —
+the `agents` row does exist by then, via its own transcript fragment.
+
+---
+
+## What I checked and could not break
+
+- GD-21: no `pymongo`/`bson` token anywhere in `agents.py`; `import aggregator.agents`
+  succeeds on bare stdlib; `tests/test_stdlib_only.py` green.
+- GD-22: no I/O in `reduce` (`test_the_reducer_is_pure_over_state_and_now`'s AST
+  guard is real, and I re-derived it by hand); the reading half's `os.stat` calls
+  are confined to `file_hint`/`check_file_hint`, neither reachable from `reduce`.
+- GD-24: every `_id` on this module's write path comes from `node_key` →
+  `refs.ref_key`; `_plain_field` refuses a dotted/`$`/NUL `fragmentTips` head;
+  `Fragment.identity()` has fixed key order and every member is a property of the
+  first record, so `$addToSet` cannot double an element under append (I re-ran
+  the backdated-append case).
+- GD-25: `merge_ops(collection=&quot;agents&quot;)` on both mappers; no `$inc`, no `$set`
+  in the mapping half at all; the `$set` in `Reduction.operations` targets
+  `derived`, which `mongo_store.SPECS` declares with no accumulables and
+  `check_id` exempts by declaration — the legal case, and total-payload emission
+  makes the wire and the memory model fingerprint-equal (verified).
+- GD-26: no delete verb; the one bucket clear is `apply_derived`'s, confined to
+  `DERIVED_COLLECTION`, which GD-23 declares droppable.
+- GD-28: `PROVENANCE = &quot;harness&quot;` on the mapping half, `&quot;derived&quot;` on the
+  reducer; both inside `SPECS[...].provenance`.
+- GD-29: no client, no lease, no driver reference.
+- GD-7/GD-9: markers label and never create; window is 4 physical lines with
+  leading blanks skipped; `touch_marker_misplaced` requires a `key=value` payload
+  so prose cannot trip it. I checked the empirical premise the marker layer rests
+  on: of 156 agent transcripts under `~/.claude`, 12 begin with an `assistant`
+  record (so `read_fragment`'s &quot;first record, if `user`&quot; rule sees no prompt), but
+  **every one of the 142 distinct agentIds has at least one `user`-first
+  fragment**, and `assemble`/`map_agent` merge labels across fragments — so the
+  narrower-than-GD-9 rule is safe on today's corpus. Worth keeping in mind if a
+  compaction ever removes an agent's opening record.
+- SD-9: topology is read as a shape, no import of `custom_state`; absent arm is
+  &quot;attempt N&quot;, null `nextStage`, counted once per run.
+- SD-11: `_run_ref`/`_raw_run_id` keep one key space (the escaping test with
+  `wf_a%b#c` is a real test); `derived`'s `refId` is a `refs` key and is stored
+  as a field.
+- GD-15: `_only_ours` restricts to `agents`; the cross-module reach is to
+  `ingest._transcript_walk`/`_cached_transcript`/`_in_scope`, which is reuse of
+  one memo rather than a second path grammar — defensible and documented.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

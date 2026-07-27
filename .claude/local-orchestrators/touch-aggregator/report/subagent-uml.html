@@ -1,0 +1,533 @@
+<title>Touch — Subagent UML</title>
+<style>
+  :root {
+    --bg: #F6F7F9;
+    --surface: #FFFFFF;
+    --ink: #202730;
+    --muted: #5B6673;
+    --border: #DEE3E9;
+    --harness: #0E7B86;
+    --harness-soft: #E3F1F2;
+    --touch: #A85E12;
+    --touch-soft: #F6ECDF;
+    --code-bg: #EDF0F3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161B;
+      --surface: #1A2027;
+      --ink: #D7DDE4;
+      --muted: #8A94A1;
+      --border: #2A323C;
+      --harness: #45B5BF;
+      --harness-soft: #14343A;
+      --touch: #D99C55;
+      --touch-soft: #3A2C18;
+      --code-bg: #232B34;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12161B;
+    --surface: #1A2027;
+    --ink: #D7DDE4;
+    --muted: #8A94A1;
+    --border: #2A323C;
+    --harness: #45B5BF;
+    --harness-soft: #14343A;
+    --touch: #D99C55;
+    --touch-soft: #3A2C18;
+    --code-bg: #232B34;
+  }
+  :root[data-theme="light"] {
+    --bg: #F6F7F9;
+    --surface: #FFFFFF;
+    --ink: #202730;
+    --muted: #5B6673;
+    --border: #DEE3E9;
+    --harness: #0E7B86;
+    --harness-soft: #E3F1F2;
+    --touch: #A85E12;
+    --touch-soft: #F6ECDF;
+    --code-bg: #EDF0F3;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.55;
+    margin: 0;
+    padding: 0 1.25rem 5rem;
+  }
+  .page { max-width: 60rem; margin: 0 auto; }
+
+  .mono, h1, h2, .chip, .keytable, code {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, Menlo, monospace;
+  }
+
+  header { padding: 3rem 0 1.5rem; border-bottom: 1px solid var(--border); }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-size: 1.85rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.75rem;
+    text-wrap: balance;
+  }
+  .lede { color: var(--muted); max-width: 42rem; margin: 0; }
+  .lede code { font-size: 0.85em; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+
+  .legend { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1.25rem; }
+  .chip {
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    padding: 0.28em 0.7em;
+    border-radius: 999px;
+    border: 1px solid;
+  }
+  .chip.harness { color: var(--harness); border-color: var(--harness); background: var(--harness-soft); }
+  .chip.touch   { color: var(--touch);   border-color: var(--touch);   background: var(--touch-soft); }
+
+  section { margin-top: 3rem; }
+  h2 {
+    font-size: 1.05rem;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+    margin: 0 0 0.35rem;
+  }
+  h2 .num { color: var(--muted); font-weight: 400; margin-right: 0.5em; }
+  .section-note { color: var(--muted); font-size: 0.92rem; margin: 0 0 1.1rem; max-width: 44rem; }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  .panel .mermaid { min-width: 640px; }
+
+  .caveats {
+    list-style: none;
+    padding: 0;
+    margin: 1.1rem 0 0;
+    display: grid;
+    gap: 0.55rem;
+    font-size: 0.9rem;
+  }
+  .caveats li { padding-left: 1.1rem; position: relative; color: var(--muted); }
+  .caveats li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0.52em;
+    width: 0.45rem; height: 0.45rem;
+    border-radius: 1px;
+  }
+  .caveats li.h::before { background: var(--harness); }
+  .caveats li.t::before { background: var(--touch); }
+  .caveats strong { color: var(--ink); font-weight: 600; }
+  .caveats code { font-size: 0.85em; background: var(--code-bg); padding: 0.08em 0.3em; border-radius: 3px; }
+
+  .keytable-wrap { overflow-x: auto; margin-top: 1.1rem; }
+  .keytable {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .keytable th, .keytable td {
+    text-align: left;
+    padding: 0.5em 0.9em;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .keytable th {
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .keytable td:first-child { color: var(--ink); }
+  .keytable td { color: var(--muted); }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  footer code { font-size: 0.9em; background: var(--code-bg); padding: 0.08em 0.3em; border-radius: 3px; }
+
+  a { color: var(--harness); }
+  :focus-visible { outline: 2px solid var(--harness); outline-offset: 2px; }
+</style>
+
+<div class="page">
+<header>
+  <p class="eyebrow">touch / domain model / cli 2.1.220</p>
+  <h1>Subagent UML</h1>
+  <p class="lede">The entities Touch renders and drives, exactly as they exist on disk and in
+  the verified control paths. Everything here comes from the research findings and the
+  synthesized plan — nothing speculative.</p>
+  <div class="legend">
+    <span class="chip harness">harness-owned · read-only</span>
+    <span class="chip touch">touch-owned · writable</span>
+  </div>
+</header>
+
+<section>
+  <h2><span class="num">1</span>Structure — class diagram</h2>
+  <p class="section-note">What exists per session, per subagent, and per workflow run, plus the
+  Touch overlay that joins onto it. Ownership colors below: teal facts come from the harness
+  and cannot be changed; amber ones are minted and written by Touch.</p>
+  <div class="panel">
+<pre class="mermaid">
+classDiagram
+    direction LR
+
+    class Session {
+      pid : int
+      procStart : stat field 22
+      sessionId : MUTABLE, rotates on clear
+      status : advisory only
+      cwd, name, kind
+    }
+    class Transcript {
+      path : projects slug, sessionId.jsonl
+      NOT append-only
+      flush : 100ms per completed block
+    }
+    class Record {
+      uuid : global PK
+      type : user, assistant, system, attachment
+      message.id : token dedup key
+      bucket : transcript, boundary-cleared, accumulate, last-wins
+    }
+    class Subagent {
+      agentId : 17-hex, harness-generated
+      transcript : agent-id.jsonl
+      liveness : running, finished, unknown
+    }
+    class AgentMeta {
+      agentType
+      description : name channel, Agent tool only
+      toolUseId : edge to parent record
+      spawnDepth : always 1
+      model
+    }
+    class WorkflowRun {
+      runId : wf_prefix
+      journal : no timestamps, order unreliable
+      runId.json : post-hoc, completion only
+    }
+    class JournalEntry {
+      type : started or result
+      key : content hash, can collide
+      agentId
+    }
+    class GraphNode {
+      identity : runId + key + ordinal
+      superseded on watchdog respawn
+    }
+    class TouchName {
+      id : minted BEFORE spawn
+      carried in prompt marker + description
+    }
+    class TouchEventV2 {
+      v, seq, ts, source, kind
+      ref : uuid or toolUseId or agentId or node or session
+    }
+    class ControlIntent {
+      verb : start, terminate, stop, restart, pause
+      state : requested, sent, confirmed, failed, expired
+    }
+
+    Session "1" --> "1..*" Transcript : rotates on clear
+    Transcript "1" --> "*" Record : contains
+    Session "1" --> "*" Subagent : spawns
+    Subagent "1" --> "1" AgentMeta : stub if workflow-spawned
+    Record "1" --> "0..1" Subagent : tool_use id = toolUseId
+    WorkflowRun "1" --> "*" JournalEntry : appends
+    JournalEntry --> Subagent : agentId
+    WorkflowRun "1" --> "*" GraphNode : derives
+    TouchName --> Subagent : joined at spawn
+    TouchEventV2 --> Record : ref
+    TouchEventV2 --> Subagent : ref
+    ControlIntent --> Subagent : TaskStop target
+</pre>
+  </div>
+  <ul class="caveats">
+    <li class="h"><strong>agentId is never choosable.</strong> It is the primary key every control
+      path uses; Touch discovers it at spawn from <code>.meta.json</code> and binds it to the minted name.</li>
+    <li class="t"><strong>TouchName is the only pre-spawn identity.</strong> Agent-tool spawns carry it in
+      <code>description</code> + prompt marker; workflow spawns get a stub meta file, so the
+      prompt marker is the sole channel there.</li>
+    <li class="h"><strong>Transcripts are not append-only</strong> — compaction rewrites the file,
+      message removal truncates the tail. Tail checkpoints carry inode + size and re-ingest
+      idempotently by <code>uuid</code>.</li>
+    <li class="h"><strong>Token accounting dedupes by <code>message.id</code></strong> — usage is copied onto
+      every split record of one API response (2.09× over-count if summed naively).</li>
+  </ul>
+
+  <div class="keytable-wrap">
+    <table class="keytable">
+      <tr><th>Entity</th><th>Key</th><th>Rule</th></tr>
+      <tr><td>Session</td><td>(pid, procStart)</td><td>sessionId is mutable — re-resolved every poll</td></tr>
+      <tr><td>Transcript record</td><td>uuid</td><td>upsert; re-ingest is a no-op</td></tr>
+      <tr><td>API response</td><td>message.id</td><td>usage summed per distinct id, never per record</td></tr>
+      <tr><td>Tool invocation</td><td>tool_use_id</td><td>joins hooks, transcript, meta.json</td></tr>
+      <tr><td>Agent</td><td>agentId (17-hex)</td><td>never truncated, never choosable</td></tr>
+      <tr><td>Workflow run</td><td>runId (wf_…)</td><td>from the Workflow toolUseResult</td></tr>
+      <tr><td>Graph node</td><td>(runId, key, ordinal)</td><td>each extra "started" for a key = new ordinal</td></tr>
+      <tr><td>Touch name</td><td>minted id</td><td>writable; joined to agentId at spawn</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span>Orchestration layout — orchestrator, task, plan, loop</h2>
+  <p class="section-note">The object model behind the skills pair: <code>execute-research</code>
+  produces ONE plan, a divider partitions it by file ownership, and each sub-plan runs a gated
+  loop. The pipeline first, then the objects and who owns what.</p>
+  <div class="panel">
+<pre class="mermaid">
+flowchart LR
+    REQ([user request]) --> RS
+    subgraph ER[execute-research]
+      RS[researchers x N<br>parallel, read-only, opus] --> BAR[barrier] --> SY[synthesizer<br>fable, single]
+    end
+    SY --> PL[(ONE plan file)]
+    PL --> DV[divider<br>fable, file ownership]
+    subgraph IP[implement-plan]
+      DV --> LP[gated loop per sub-plan<br>serial by default]
+      LP --> AGG[aggregate gate<br>merged change-set]
+    end
+    AGG --> DONE([green])
+</pre>
+  </div>
+  <div class="panel" style="margin-top:1rem">
+<pre class="mermaid">
+classDiagram
+    direction TB
+
+    class Orchestrator {
+      the main Claude session
+      ONE OS process - all loops inside it
+      launches Workflow tool calls
+    }
+    class WorkflowRun {
+      runId : wf_prefix
+      deterministic script in vm context
+      resumable at agent boundaries only
+    }
+    class Task {
+      folder : local-orchestrators name
+      events.jsonl + orch-config.json
+      orch-scripts, findings, plan, report
+    }
+    class Plan {
+      ONE file : name-plan.md
+      global decisions + ordered items
+      written by the synthesizer
+    }
+    class SubPlan {
+      derived by divider agent
+      one file = exactly one owner
+      isolated, disjoint edits
+    }
+    class Loop {
+      JS closure - NO disk existence
+      attempt counter lives in V8 heap
+      observable via journal + findings only
+    }
+    class Attempt {
+      N of MAX_ATTEMPTS
+      brand-new implementer every time
+      receives findings PATHS, not text
+    }
+    class Gate {
+      read-only judge
+      kind : test, critique, aggregate
+      verdict : green or red
+    }
+    class FindingsFile {
+      findings plan-gate-attempt-N.md
+      the ONLY handoff between attempts
+    }
+    class AgentRole {
+      researcher, synthesizer, divider
+      implementer, tester, critic
+      each spawn is a fresh Subagent
+    }
+
+    Orchestrator "1" --> "*" WorkflowRun : launches
+    Orchestrator "1" --> "1..*" Task : works in
+    WorkflowRun "1" --> "*" Loop : hosts
+    Task "1" --> "0..1" Plan : plan folder
+    Plan "1" --> "*" SubPlan : divider partitions
+    SubPlan "1" --> "1" Loop : implemented by
+    Loop "1" --> "1..*" Attempt : retries
+    Attempt "1" --> "*" Gate : judged by
+    Gate "1" --> "0..1" FindingsFile : writes on red
+    FindingsFile --> Attempt : handoff to N+1
+    Attempt --> AgentRole : spawned as
+</pre>
+  </div>
+  <ul class="caveats">
+    <li class="h"><strong>A Loop has no OS identity.</strong> It is a <code>while</code> closure inside the one
+      CLI process (verified: one pid while six agents ran) — nothing to signal, nothing on disk.
+      Its only observable trace is the journal, the findings files, and the monitoring events.</li>
+    <li class="t"><strong>The findings file is the loop's real state.</strong> Attempt N+1 receives file
+      paths, never inlined text — which is exactly why stop-and-restart-fresh works: the next
+      attempt reconstructs everything it needs from disk.</li>
+    <li class="h"><strong>Restart = journal replay.</strong> <code>resumeFromRunId</code> re-runs the script and
+      serves completed agent calls from cache — replayed nodes are rendered "replayed, not
+      re-executed", and cached agents' file edits are NOT re-applied to a dirty tree.</li>
+    <li class="t"><strong>Never resume an agent.</strong> Both skills mandate a fresh subagent per attempt;
+      the loop advances by spawning, never by continuing.</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">3</span>Loop cycle — attempts and gates</h2>
+  <p class="section-note">One sub-plan's gated loop, as <code>implement-plan</code> defines it. Gates
+  are read-only; only the implementer edits source, and only within its sub-plan's owned files.</p>
+  <div class="panel">
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Implement : attempt N, fresh implementer
+    Implement --> TestGate : change-set ready
+    TestGate --> Critique : green
+    TestGate --> NextAttempt : red - findings file written
+    Critique --> SubPlanDone : clean
+    Critique --> NextAttempt : findings file written
+    NextAttempt --> Implement : N+1, findings paths handed off
+    NextAttempt --> Failed : N = MAX_ATTEMPTS
+    SubPlanDone --> AggregateGate : all sub-plans green
+    AggregateGate --> [*] : merged change-set green
+    AggregateGate --> Implement : aggregate red - targeted fix loop
+    Failed --> [*]
+</pre>
+  </div>
+  <ul class="caveats">
+    <li class="h"><strong>Stop lands between states.</strong> TaskStop aborts whichever agent is in flight;
+      the loop's closure dies with the run. Restarting re-enters at Implement with the last
+      findings files — never mid-attempt.</li>
+    <li class="t"><strong>Touch renders the cycle from convention.</strong> Attempt numbers, roles, and gate
+      names come from the <code>[monitor]</code> marker and findings filenames — dashed in the graph;
+      spawn/finish times and tokens come from the harness — solid.</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">4</span>Behavior — spawn, name join, stop</h2>
+  <p class="section-note">The two flows the orchestrator-skill discussion settled: naming works
+  <em>before</em> creation via writable channels, and stop works only as a pull — the owned
+  session acts on Touch's recorded intent; Touch never pushes into a running process.</p>
+  <div class="panel">
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant UI as Touch UI
+    participant AG as Touch aggregator
+    participant CC as Claude Code (owned session)
+    participant FS as harness files (.claude)
+
+    rect rgba(128,128,128,0.06)
+    note over UI,FS: spawn + name join
+    CC->>CC: orchestrator skill mints name "Some_Name"
+    CC->>FS: Agent tool spawn - description + marker carry the name
+    FS-->>FS: agent-id.meta.json written at spawn instant
+    AG->>FS: poll 250ms, stat-first
+    AG->>AG: join Some_Name = agentId = toolUseId
+    AG-->>UI: node "Some_Name" appears (running)
+    end
+
+    rect rgba(128,128,128,0.06)
+    note over UI,FS: stop (model-mediated verb)
+    UI->>AG: click Stop on Some_Name
+    AG->>AG: append control.jsonl - state requested
+    AG->>CC: type TaskStop instruction into PTY, gated on idle - state sent
+    CC->>CC: TaskStop on Some_Name's task
+    CC->>FS: task update / tool_result lands
+    AG->>FS: observes the effect
+    AG-->>UI: state confirmed - derived, never assumed
+    end
+</pre>
+  </div>
+  <ul class="caveats">
+    <li class="h"><strong>No push channel exists.</strong> A running interactive session has no socket, no
+      port, no injectable TTY — the PTY Touch itself holds is the only input path, which is why
+      controls exist only for owned sessions.</li>
+    <li class="t"><strong>The control log is the only record of a stop.</strong> The harness writes nothing
+      when a task is stopped, so a Touch-stopped agent is indistinguishable from a crash without
+      <code>control.jsonl</code> — the audit wins over quiet-timeout inference.</li>
+    <li class="t"><strong>requested → sent → confirmed are distinct UI states.</strong> Stop and restart are
+      model-mediated; requested-but-unconfirmed is the normal failure mode, and the UI says so.</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">5</span>Lifecycle — agent states</h2>
+  <p class="section-note">What the graph page may honestly assert about a node at each moment.
+  There is no completion marker inside a transcript, so liveness is three-state, derived from
+  idle time and the journal / parent tool_result.</p>
+  <div class="panel">
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> Declared : plan / script names it
+    Declared --> Queued : fan-out over concurrency cap
+    Declared --> Running : spawn - meta.json written
+    Queued --> Running : slot frees
+    Running --> Finished : journal result / parent tool_result
+    Running --> Unknown : idle 180s or more
+    Unknown --> Running : activity resumes
+    Unknown --> Superseded : watchdog respawn, new ordinal
+    Running --> Stopped : TaskStop - Touch audit only
+    Running --> Paused : hook gate holds at tool boundary
+    Paused --> Running : gate released
+    Finished --> [*]
+    Stopped --> [*]
+    Superseded --> [*]
+</pre>
+  </div>
+  <ul class="caveats">
+    <li class="h"><strong>Declared and Queued have zero disk footprint</strong> — they are rendered as
+      declarations, visually distinct from observed states; declared ≠ started is normal
+      (cap is min(16, cpus−2)).</li>
+    <li class="h"><strong>Pause is a hook gate, not a suspend.</strong> A PreToolUse/SubagentStart hook holds
+      its response, so pause takes effect at the next tool boundary; an agent mid-reasoning
+      cannot be paused. Deterministic on owned sessions with the Touch hook pack (v1.5).</li>
+    <li class="h"><strong>Superseded nodes come from the 180s stall watchdog</strong>, which respawns a
+      logical node under a fresh agentId — same journal key, next ordinal; the prior node is
+      closed as superseded, never left "running forever".</li>
+  </ul>
+</section>
+
+<footer>
+  Sources: <code>plan/touch-aggregator-plan.md</code> (Parts B–C, decisions D1–D14) and the six
+  research findings under <code>touch-aggregator/findings/</code>, verified against Claude Code
+  CLI 2.1.220. Solid facts are harness-derived; amber items are Touch conventions.
+</footer>
+</div>
+<script type="module">
+  // Local-copy shim: the claude.ai artifact runtime renders mermaid natively
+  // (and its CSP blocks this import, making it a no-op there). Served from the
+  // local monitor's /file endpoint instead, we load mermaid from a CDN; if the
+  // viewer is offline the diagram source stays readable as text.
+  try {
+    const m = await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs");
+    m.default.initialize({ startOnLoad: false,
+      theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "neutral" });
+    await m.default.run({ querySelector: ".mermaid" });
+  } catch (e) {}
+</script>

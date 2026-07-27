@@ -1,0 +1,499 @@
+<title>sp-custom-state — cycle 4</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-custom-state — implement→test→critique, attempt 4/5</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">Attempt 4 closes every open item of critique-3 (M1, m1, m2, m3, n1, n2); each fix is mutation-verified (mutate the shipped source, a named assertion fails, source restored + md5 checked).
+
+M1 — head order was per-stream, so two streams sharing (refId, stateKey, seq) let arrival order pick the stored head. `head_write` now `$max`es and guards a total order: `HEAD_ORDER_FIELD = &quot;order&quot;` = `head_order(stream, seq)` = `&quot;&lt;seq zero-padded to refs.PADDED_INTS['seq']&gt;|&lt;refs.escape_stream(stream)&gt;&quot;`, `require={&quot;order&quot;: {&quot;$lt&quot;: order}}`. Its primary component is the same padded seq the event `_id` uses, so within one stream it is exactly R-52's `{seq:{$lt:newSeq}}` (seq/fromSeq still on the document); across streams the stream id breaks the tie deterministically. The critique's reproduction (two control files + the WAL, all seq 1, one slot) now converges. The two contradicted docstring claims are rewritten.
+
+Fixing M1 surfaced two more order dependencies of the same family, both fixed and both pinned by behavioural tests: (1) `$set` only overwrites the keys it carries and GD-26 leaves no field-removing operator, so optional fields (`sessionKey`, `attemptSource`, clock) left behind by a losing event survived under the winner's payload — every varying field now lives in `HEAD_EVENT_FIELD = &quot;event&quot;`, one sub-document `$set` replaces whole, and the head's top-level key set is fixed; (2) a top-level `$max` clock would only ever see guard-winners, so a higher-seq/earlier-ts event changed the head by arrival order — the head carries no top-level clock, `event.ts` is the winning event's own.
+
+m1 — new `validate_author` is the single door: `_event_document` and `head_write` route through it (Writer._append too), so a foreign WAL line (GD-29 contemplates agent-side appends) is refused as `CustomStateError` → `mirror.MapperError` → counted in `stats['rejected']`, never stored; missing is normalised to `local`. m2 — the resolved branch's `sessionKeySource` is now pinned for `ledger` and `path`, not just `slots`. m3 — `resolution_of` reads conflict from the evidence (`conflictAgentIds`/`conflictWith`, fields only a conflict path writes), so a crash between the unguarded evidence write and the guarded state write no longer reads as `pending` and no longer gets swept to `orphaned`; `agentIds` (the mapper's field) is asserted NOT to be that signal. n1 — `SESSION_PATH_PARENTS` is pinned as a whole tuple plus four negative path cases. n2 — `SlotTable.bind` registers the holder whenever the document names it, so a table seeded from stored docs still catches the next cross-slot claim.
+
+Recorded one new handoff (`findings/sp-custom-state-head-order-deviation.md`): `custom_state`'s `accumulable=(&quot;seq&quot;,)` wants `(&quot;seq&quot;, &quot;order&quot;)` — sp-05 owns `mongo_store.py`, so the rule is held meanwhile by `test_every_head_write_carries_one_fixed_key_set`, and the module docstring names it.
+
+Verification: both owned suites green — 239 + 172 ok assertions with a live mongod, 0 failures; they also skip cleanly with `TOUCH_MONGO_URI` unset. I ran the live arms for real against a fresh `mongo:7` on the R-42 loopback+auth recipe (own container `touch-mongo-sp11` on 127.0.0.1:27317, own named volume, both removed afterwards; other sub-plans' containers untouched, credentials only ever in the scratchpad and now deleted) — mongod's string `$lt` guard agrees with the in-memory model and resolves the cross-stream tie identically in both directions. Full-suite regression is unchanged from the recorded baseline: only `test_mirror.py` (3) and `test_sessions.py` (1) fail, character-for-character the sp-mirror-deploy / sp-sessions-arm strings; all four monitoring suites and the other 16 repo suites are green. `agents.topology_index` reads only `kind`/`refId`/`data.custom` from the head, so the shape change touches no other sub-plan's file. Ownership respected: only the three owned files carry today's late mtimes; `touch-orchestrate/SKILL.md` keeps the prior attempt's +13/−1 ledger-line slice and was not touched again; nothing committed.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Both owned suites green: tests/test_custom_state.py rc 0 (234 assertions, 27 tests, 1 clean no-mongod skip) and tests/test_slots.py rc 0 (158 assertions, 21 tests, 1 clean skip). Full suite: 20 pass, 2 fail — tests/test_mirror.py (3) and tests/test_sessions.py (1), both character-for-character identical to the baseline set already recorded in sp-agents-reducer-test-attempt-4, deterministic across re-runs, and reproduced in a scratchpad tree with aggregator/custom_state.py deleted, so not attributable to this sub-plan. Critique-3's M1 is genuinely closed: the new cross-stream corpus (three streams sharing seq 1 on one head _id) yields one fingerprint over every arrival order and over a rebuild, and reverting the head guard to {&quot;seq&quot;:{&quot;$lt&quot;:n}} or stripping the stream component from the order key both fail the suite. Mutation probes also caught the author-validation, sessionKeySource and SESSION_PATH_PARENTS fixes. One non-blocking coverage gap for the critique gate: the new `or doc.get(&quot;conflictWith&quot;)` clause in resolution_of can be deleted with both suites still green — no test drives the crash-between-writes conflict shape. Ownership clean (only the three owned files touched; SKILL.md slice +13/-1); no commits.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">critique</div><div class="verdict" style="color:var(--bad)">✗ REJECTED</div><div class="sum">REJECTED — 2 major, 2 minor, 4 nits. Attempt-3's M1 (cross-stream head order) is genuinely closed and survived mutation, as did m1/m2/m3/n1/n2. Two new majors: (M1) every `topology` head `head_write` produces stores `data.custom` `_raw`-wrapped (custom_state's spec declares it a raw path and `prepare_document` wraps declared paths unconditionally), while `agents._topology_from` reads it as a plain dict — so `topology_index` returns an empty Topology, `attempt_label` never gets a denominator, and every run sits on SD-9's absent-topology arm forever, which is the exact failure the module's own `REF_KINDS_BY_KIND` widening claims to prevent and that sp-10's storage-deviation §2 handed to this sub-plan; reproduced end-to-end through `replay` + `agents.topology_index`. sp-10's reducer test builds its topology head by hand, unwrapped, so neither side caught it. (M2) `head_write` skips `ms.guard_oversize` while `map_custom_state` applies it, so above 8 MB the event is stubbed (losing refId/stateKey/stream) and the head is not; `rebuild_heads` then raises an uncaught `RefRejected` on a document this module itself wrote — R-52's &quot;drop the head, rebuild, document-for-document equal&quot; recovery path dies on its own input, and the docstring claims &quot;byte-identical&quot; and &quot;nothing else can make this untrue&quot; are false. Minors: the bind paths (`SlotTable.bind`, `bind_slot`) still branch on the raw stored `resolution` instead of the hardened `resolution_of`, so a half-written conflict accepts a third bind and stores `resolution:&quot;bound&quot;` + `agentId` on a slot read-time calls `conflict` (attempt-3's m3 half-closed); and `iter_custom_state_observations` never threads `counters` into the WAL arm, so the one unrebuildable dataset reports all-zero counters and an unreadable WAL looks identical to an empty one. Ownership clean (three owned files + the confined SKILL.md :52-56 slice), no commits, both owned suites green and restored byte-identical after mutation.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--bad)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--bad)">✗ FAILED</div><div class="sum">next: attempt 5/5</div></div>
+</div>
+
+<h2>Why this cycle failed</h2>
+<div class="why fail"><ul><li>Implementer: Attempt 4 closes every open item of critique-3 (M1, m1, m2, m3, n1, n2); each fix is mutation-verified (mutate the shipped source, a named assertion fails, source restored + md5 checked).
+
+M1 — head order was per-stream, so two streams sharing (refId, stateKey, seq) let arrival order pick the stored head. `head_write` now `$max`es and guards a total order: `HEAD_ORDER_FIELD = &quot;order&quot;` = `head_order(stream, seq)` = `&quot;&lt;seq zero-padded to refs.PADDED_INTS['seq']&gt;|&lt;refs.escape_stream(stream)&gt;&quot;`, `require={&quot;order&quot;: {&quot;$lt&quot;: order}}`. Its primary component is the same padded seq the event `_id` uses, so within one stream it is exactly R-52's `{seq:{$lt:newSeq}}` (seq/fromSeq still on the document); across streams the stream id breaks the tie deterministically. The critique's reproduction (two control files + the WAL, all seq 1, one slot) now converges. The two contradicted docstring claims are rewritten.
+
+Fixing M1 surfaced two more order dependencies of the same family, both fixed and both pinned by behavioural tests: (1) `$set` only overwrites the keys it carries and GD-26 leaves no field-removing operator, so optional fields (`sessionKey`, `attemptSource`, clock) left behind by a losing event survived under the winner's payload — every varying field now lives in `HEAD_EVENT_FIELD = &quot;event&quot;`, one sub-document `$set` replaces whole, and the head's top-level key set is fixed; (2) a top-level `$max` clock would only ever see guard-winners, so a higher-seq/earlier-ts event changed the head by arrival order — the head carries no top-level clock, `event.ts` is the winning event's own.
+
+m1 — new `validate_author` is the single door: `_event_document` and `head_write` route through it (Writer._append too), so a foreign WAL line (GD-29 contemplates agent-side appends) is refused as `CustomStateError` → `mirror.MapperError` → counted in `stats['rejected']`, never stored; missing is normalised to `local`. m2 — the resolved branch's `sessionKeySource` is now pinned for `ledger` and `path`, not just `slots`. m3 — `resolution_of` reads conflict from the evidence (`conflictAgentIds`/`conflictWith`, fields only a conflict path writes), so a crash between the unguarded evidence write and the guarded state write no longer reads as `pending` and no longer gets swept to `orphaned`; `agentIds` (the mapper's field) is asserted NOT to be that signal. n1 — `SESSION_PATH_PARENTS` is pinned as a whole tuple plus four negative path cases. n2 — `SlotTable.bind` registers the holder whenever the document names it, so a table seeded from stored docs still catches the next cross-slot claim.
+
+Recorded one new handoff (`findings/sp-custom-state-head-order-deviation.md`): `custom_state`'s `accumulable=(&quot;seq&quot;,)` wants `(&quot;seq&quot;, &quot;order&quot;)` — sp-05 owns `mongo_store.py`, so the rule is held meanwhile by `test_every_head_write_carries_one_fixed_key_set`, and the module docstring names it.
+
+Verification: both owned suites green — 239 + 172 ok assertions with a live mongod, 0 failures; they also skip cleanly with `TOUCH_MONGO_URI` unset. I ran the live arms for real against a fresh `mongo:7` on the R-42 loopback+auth recipe (own container `touch-mongo-sp11` on 127.0.0.1:27317, own named volume, both removed afterwards; other sub-plans' containers untouched, credentials only ever in the scratchpad and now deleted) — mongod's string `$lt` guard agrees with the in-memory model and resolves the cross-stream tie identically in both directions. Full-suite regression is unchanged from the recorded baseline: only `test_mirror.py` (3) and `test_sessions.py` (1) fail, character-for-character the sp-mirror-deploy / sp-sessions-arm strings; all four monitoring suites and the other 16 repo suites are green. `agents.topology_index` reads only `kind`/`refId`/`data.custom` from the head, so the shape change touches no other sub-plan's file. Ownership respected: only the three owned files carry today's late mtimes; `touch-orchestrate/SKILL.md` keeps the prior attempt's +13/−1 ledger-line slice and was not touched again; nothing committed.</li><li>Test gate PASSED: PASS. Both owned suites green: tests/test_custom_state.py rc 0 (234 assertions, 27 tests, 1 clean no-mongod skip) and tests/test_slots.py rc 0 (158 assertions, 21 tests, 1 clean skip). Full suite: 20 pass, 2 fail — tests/test_mirror.py (3) and tests/test_sessions.py (1), both character-for-character identical to the baseline set already recorded in sp-agents-reducer-test-attempt-4, deterministic across re-runs, and reproduced in a scratchpad tree with aggregator/custom_state.py deleted, so not attributable to this sub-plan. Critique-3's M1 is genuinely closed: the new cross-stream corpus (three streams sharing seq 1 on one head _id) yields one fingerprint over every arrival order and over a rebuild, and reverting the head guard to {&quot;seq&quot;:{&quot;$lt&quot;:n}} or stripping the stream component from the order key both fail the suite. Mutation probes also caught the author-validation, sessionKeySource and SESSION_PATH_PARENTS fixes. One non-blocking coverage gap for the critique gate: the new `or doc.get(&quot;conflictWith&quot;)` clause in resolution_of can be deleted with both suites still green — no test drives the crash-between-writes conflict shape. Ownership clean (only the three owned files touched; SKILL.md slice +13/-1); no commits.</li><li>Critique REJECTED: REJECTED — 2 major, 2 minor, 4 nits. Attempt-3's M1 (cross-stream head order) is genuinely closed and survived mutation, as did m1/m2/m3/n1/n2. Two new majors: (M1) every `topology` head `head_write` produces stores `data.custom` `_raw`-wrapped (custom_state's spec declares it a raw path and `prepare_document` wraps declared paths unconditionally), while `agents._topology_from` reads it as a plain dict — so `topology_index` returns an empty Topology, `attempt_label` never gets a denominator, and every run sits on SD-9's absent-topology arm forever, which is the exact failure the module's own `REF_KINDS_BY_KIND` widening claims to prevent and that sp-10's storage-deviation §2 handed to this sub-plan; reproduced end-to-end through `replay` + `agents.topology_index`. sp-10's reducer test builds its topology head by hand, unwrapped, so neither side caught it. (M2) `head_write` skips `ms.guard_oversize` while `map_custom_state` applies it, so above 8 MB the event is stubbed (losing refId/stateKey/stream) and the head is not; `rebuild_heads` then raises an uncaught `RefRejected` on a document this module itself wrote — R-52's &quot;drop the head, rebuild, document-for-document equal&quot; recovery path dies on its own input, and the docstring claims &quot;byte-identical&quot; and &quot;nothing else can make this untrue&quot; are false. Minors: the bind paths (`SlotTable.bind`, `bind_slot`) still branch on the raw stored `resolution` instead of the hardened `resolution_of`, so a half-written conflict accepts a third bind and stores `resolution:&quot;bound&quot;` + `agentId` on a slot read-time calls `conflict` (attempt-3's m3 half-closed); and `iter_custom_state_observations` never threads `counters` into the WAL arm, so the one unrebuildable dataset reports all-zero counters and an unreadable WAL looks identical to an empty one. Ownership clean (three owned files + the confined SKILL.md :52-56 slice), no commits, both owned suites green and restored byte-identical after mutation.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-custom-state-test-attempt-4.md</summary><pre># sp-custom-state — test gate, attempt 4
+
+**Gate result: PASS.**
+
+Both owned suites green (392 assertions: 234 + 158 across 27 + 21 test
+functions, 2 designed skips). Full-suite regression clean: the only two failing
+files are the pre-existing baseline pair, proved not attributable to this
+sub-plan. Ownership boundary clean. Nothing committed (`git log -1` is still
+`579446e orchestration history`).
+
+## 1. Targeted suites (owned) — GREEN
+
+| suite | rc | assertions | skips |
+|---|---|---|---|
+| `python3 tests/test_custom_state.py` (repo root) | 0 | 234 `ok:` / 27 tests | `test_live_head_guard_matches_the_model` — `TOUCH_MONGO_URI` unset |
+| `python3 tests/test_slots.py` (repo root) | 0 | 158 `ok:` / 21 tests | `test_live_duplicate_key_is_tolerated_not_raised` — `TOUCH_MONGO_URI` unset |
+
+Both skips print the R-42 loopback+auth recipe line, so the GD-21/R-56
+no-mongod arm is honest rather than silent.
+
+## 2. Full suite regression gate
+
+`for t in .claude/shared/monitoring/tests/test_*.py … ; for t in tests/test_*.py …`
+
+- **PASS (20):** monitoring `test_frontend`, `test_server`, `test_shell`,
+  `test_watcher`; repo `test_agents`, `test_bootstrap`, `test_custom_state`,
+  `test_fixtures`, `test_ingest`, `test_legacy`, `test_mongo_deploy`,
+  `test_mongo_store`, `test_reducer`, `test_refs`, `test_slots`,
+  `test_stdlib_only`, `test_store`, `test_tailer`, `test_usage`, `test_ws`.
+- **FAIL (2) — pre-existing baseline, NOT attributable to this sub-plan:**
+  - `tests/test_mirror.py` rc 1, `FAILED (3)`:
+    `…proven by the call count: the held ticks made no attempt`;
+    `the first generation lands`;
+    `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`.
+  - `tests/test_sessions.py` rc 1, `FAILED (1)`:
+    `wipe + --rebuild reproduces a byte-identical fingerprint`.
+
+### Attribution evidence (three independent legs)
+
+1. **Character-for-character identical** to the baseline set already recorded in
+   `sp-agents-reducer-test-attempt-4.md` §2 (and in that sub-plan's attempts 1–3),
+   which predates this attempt. Those failures belong to loops that closed RED
+   (`sp-mirror-deploy`, `sp-sessions-arm`).
+2. **Removal probe.** `aggregator/`, `tests/`, `docs/` copied to the scratchpad
+   with `aggregator/custom_state.py` **deleted** (so `mirror.discover_mappers`
+   never registers this sub-plan's `customState`/`slot` kinds or its
+   `MIRROR_SOURCES`): `tests/test_mirror.py` still rc 1 with the same 3 failures,
+   `tests/test_sessions.py` still rc 1 with the same 1 failure. The regression
+   survives this sub-plan's total absence.
+3. **Determinism.** `test_mirror.py` re-run ×3 and `test_sessions.py` ×2 — the
+   same failure sets every time, so this is not flake noise masking a new break.
+   Neither failure path names `custom_state`, a slot, or a custom-state kind;
+   the failing assertions are about the mirror's breaker call count, its
+   generation sweep, and a `writers` (lease) document in a rebuild count.
+
+Baseline failures do not fail this gate.
+
+## 3. Plan conformance (sp-11 / R-52 / R-53)
+
+Owned files all present and non-empty: `aggregator/custom_state.py`,
+`tests/test_custom_state.py`, `tests/test_slots.py`, plus the
+`touch-orchestrate/SKILL.md` :52-56 ledger amendment (`git diff --stat`:
++13/−1, that file only).
+
+Verified in this run's suite output:
+
+- R-52 head/log split: `custom_state_events` insert-only (`$setOnInsert` only),
+  `custom_state` head guarded; three out-of-order writes leave the head at the
+  highest `seq`; **and** the new cross-stream case
+  (`test_two_streams_that_share_a_seq_still_leave_one_head`) — three streams at
+  `seq` 1 on one head `_id` now yield ONE fingerprint over every arrival order
+  and over a rebuild, with the stored payload selected by the order key rather
+  than by arrival. This is critique-3's M1, closed.
+- The order field is reached by `$max` and never by `$set`, guarded by a strict
+  `$lt`, and sorts identically to `seq` within a stream (zero-padded);
+  `seq`/`fromSeq` stay on the document with their R-52 meaning. The
+  `mongo_store.accumulable` fence for `order` is correctly handed off in
+  `sp-custom-state-head-order-deviation.md` (sp-05's one-line paste) rather than
+  edited across ownership.
+- Unknown refId rejected (with the documented `topology` widening), 16 KB
+  annotation cap **rejects** with 413 (never truncates), tombstone deletes with
+  no delete verb anywhere, provenance pinned `{asserted,touch}` with no writer
+  path to `harness`, wipe+replay and drop+rebuild both document-for-document
+  equal, one installation-wide events+head pair, kind-discriminated.
+- R-53 slots: `pending|bound|orphaned|conflict` + `pendingSince`, both ids on
+  conflict, unique **sparse** `{agentId:1}` index, duplicate key tolerated and
+  counted, ledger/control readers count every dropped line by reason,
+  `sessionKeySource` ∈ `{ledger, marker, path, slots}`.
+- GD-21: `grep -c 'pymongo\|bson' aggregator/custom_state.py` = **0**;
+  `tests/test_stdlib_only.py` rc 0.
+
+## 4. Anti-tautology probes (mutations applied to a scratchpad copy only; the
+repo tree was never modified)
+
+| mutation | result |
+|---|---|
+| head guard reverted to `{&quot;seq&quot;: {&quot;$lt&quot;: obs.seq}}` | **CAUGHT** (`test_custom_state` rc 1) |
+| order value drops its stream component (`order.split(&quot;\|&quot;)[0]`) | **CAUGHT** |
+| `_event_document` author → `obs.author or AUTHOR` (unvalidated) | **CAUGHT** |
+| head payload author → `obs.author or AUTHOR` | **CAUGHT** |
+| resolved-branch `key_source` → constant `&quot;slots&quot;` | **CAUGHT** |
+| `SESSION_PATH_PARENTS` widened with `&quot;state&quot;` | **CAUGHT** |
+| `resolution_of`'s new `or doc.get(&quot;conflictWith&quot;)` clause removed | **SURVIVED** — see below |
+
+Critique-3's M1, m1, m2 and n1 are therefore each held by a real assertion, not
+by a restatement of the implementation.
+
+## 5. Non-blocking observation for the critique gate
+
+**critique-3 m3 is fixed in the code but not held by a test.**
+`aggregator/custom_state.py:1954-1955` now reads
+`… or doc.get(&quot;conflictAgentIds&quot;) or doc.get(&quot;conflictWith&quot;)`, which is exactly
+what the critique asked for — but deleting the `conflictWith` disjunct leaves
+both owned suites green. Nothing exercises the crash-between-writes shape
+(unguarded `conflict_evidence_op` applied, guarded state write lost ⇒
+`conflictWith` present, `conflictAgentIds` length 1, `resolution:&quot;pending&quot;`),
+so the clause that stops `sweep` from promoting a contested stop to `orphaned`
+is currently unasserted.
+
+Suggested fix (test-only, inside ownership): in `tests/test_slots.py`, apply
+`conflict_evidence_op(..., conflict_with=[holder])` alone to a `pending` slot
+and assert `resolution_of(doc) == &quot;conflict&quot;` and that `SlotTable.sweep` leaves
+it alone. This is a coverage gap on a MINOR hardening, not a behavioural
+failure of a plan item, so it does not fail this gate.
+
+## 6. Ownership
+
+`find . -newermt &quot;2026-07-26 17:50&quot;` over the repo, excluding `.git`,
+`__pycache__` and `.claude/`, lists exactly three files — all owned:
+`aggregator/custom_state.py` (18:08), `tests/test_custom_state.py` (18:06),
+`tests/test_slots.py` (17:59). Every other `aggregator/*.py` and `tests/*.py`
+carries an mtime from an earlier sub-plan's loop. Under `.claude/`, the only
+files written in that window are this sub-plan's own deviation note
+(`sp-custom-state-head-order-deviation.md`) and the concurrent monitoring /
+cycle-reporter daemons' state and `report/cycles/*.html` — not implementer edits.
+
+`git status --porcelain` shows `aggregator/`, `tests/`, `docs/` still whole-
+directory untracked from the prior pass; the one tracked file this sub-plan
+owns a slice of, `.claude/skills/touch-orchestrate/SKILL.md`, is +13/−1 and
+confined to the ledger-line bullet. **No commits made.**
+
+## Failures
+
+None attributable to sp-custom-state.
+</pre></details>
+<details><summary>Critique findings — sp-custom-state-critique-attempt-4.md</summary><pre># sp-custom-state — adversarial critique, attempt 4
+
+**Verdict: REJECTED** (2 major, 2 minor, 4 nits; 0 blockers).
+Depth: **in-scope** — both majors are fixable inside `aggregator/custom_state.py`
+plus its two owned suites (one of them by adding the deviation handoff this
+sub-plan has already used three times), in one more gated attempt.
+critical_defect: **false**.
+
+Reviewed (untracked-new tree ⇒ full file content):
+`aggregator/custom_state.py` (2537 lines), `tests/test_custom_state.py` (1347),
+`tests/test_slots.py` (1038),
+`findings/sp-custom-state-head-order-deviation.md` (56), plus the granted
+`.claude/skills/touch-orchestrate/SKILL.md` :52-56 slice (`git diff` confirms
++13/−1, confined to the ledger-line bullet; nothing else in that file moved).
+
+Against: `touch-mongo-live-subplans.md` §`sp-11 — custom-state`, amendment
+R-52/R-53 + GD-21…GD-30, base plan GD-1…GD-20, SD-1/SD-8/SD-9/SD-11, and
+`sp-agents-reducer-storage-deviation.md` §2 (sp-10's explicit handoff to this
+sub-plan).
+
+Both owned suites reproduce green here (`tests/test_custom_state.py` rc 0,
+`tests/test_slots.py` rc 0, one clean `TOUCH_MONGO_URI`-unset skip each).
+Nothing committed; HEAD unchanged at `579446e`. `md5sum` re-verified identical
+to the pre-review copy after every mutation below.
+
+## Attempt-3 dispositions — verified by mutation, not by reading
+
+| id | claim | mutation applied | result |
+|---|---|---|---|
+| M1 (cross-stream head order) | closed by `HEAD_ORDER_FIELD` | `head_order` → `seq` alone; head guard → `{&quot;seq&quot;:{&quot;$lt&quot;:n}}` | **closed** — `test_two_streams_that_share_a_seq_still_leave_one_head:210` builds three real streams (two control files + the WAL) on one `(refId, stateKey)` at `seq` 1 through the module's own sources, asserts ONE fingerprint over 8 arrangements *and* after `rebuild_heads`, and proves the naive guard would have accepted both |
+| m1 (`author` on the read door) | closed by `validate_author` | — | **closed**, `:624-648`, asserted at `:373` by call and by AST walk |
+| m2 (resolved branch `sessionKeySource`) | closed | — | **closed**, both extra branches asserted |
+| m3 (`conflictWith` read) | closed | `resolution_of` clause → `len(conflictAgentIds or ()) &gt; 1` (the pre-fix form) | **caught** (`test_slots.py` rc 1) |
+| n1 (`SESSION_PATH_PARENTS` widening) | closed | tuple widened with `&quot;state&quot;` | **caught** (`test_custom_state.py` rc 1) |
+| n2 (`_by_agent` registration) | closed | — | **closed**, `:2057-2065` registers on `doc[&quot;agentId&quot;] == agent_id`, guard or no guard |
+
+Also re-confirmed directly: no `pymongo` token in the module (GD-21 — it imports
+and every test runs on bare stdlib); no `deleteOne`/`deleteMany`/`drop(`/
+`$unset`/`expireAfterSeconds` (GD-26); every `_id` is a `refs` product
+(`custom_state_event_key` / `custom_state_key` / `slot_key`); no credential
+literal and no `TOUCH_MONGO_URI` read in any of the three files (GD-27);
+`MIRROR_SOURCES` is the rebuild/backfill seam only, so the whole-file
+`_read_lines` stays off GD-30's O(delta) tick; the SKILL.md slice matches R-53's
+amendment text exactly.
+
+---
+
+## MAJOR
+
+### M1 — every `topology` head this module writes is unreadable by the ONLY consumer SD-9 names
+`aggregator/custom_state.py:1634` (`ms.prepare_document(&quot;custom_state&quot;, …)` in
+`head_write`), against `:94-105` and `:427-430` (the `REF_KINDS_BY_KIND`
+widening whose stated purpose this defeats); consumer:
+`aggregator/agents.py:1950-1962` (`_topology_from`), `:1965-1987`
+(`topology_index`).
+
+`custom_state`'s spec declares `raw_paths=(&quot;data.custom&quot;,)`
+(`mongo_store.py:452`), and `prepare_document` wraps **declared paths
+unconditionally** (&quot;so a field's stored shape does not depend on whether *this*
+instance happened to contain a dotted key&quot;, `mongo_store.py:676-678`). So the
+head `head_write` produces stores:
+
+```
+data.custom = {&quot;_raw&quot;: &quot;{\&quot;stages\&quot;:[…],\&quot;maxAttempts\&quot;:4}&quot;,
+               &quot;_rawEncoding&quot;: &quot;json&quot;, &quot;_rawKeys&quot;: 2}
+```
+
+`agents._topology_from` reads `doc[&quot;data&quot;][&quot;custom&quot;].get(&quot;stages&quot;)` /
+`.get(&quot;maxAttempts&quot;)` directly — no `unwrap_raw`. Reproduced end to end through
+this module's own `replay`, no test helpers:
+
+```
+stored data.custom: {&quot;_raw&quot;: &quot;{\&quot;stages\&quot;: …, \&quot;maxAttempts\&quot;: 4}&quot;, &quot;_rawEncoding&quot;: &quot;json&quot;, &quot;_rawKeys&quot;: 2}
+topology_index:     {'wf_1a3ffcdd-c60': Topology(ref_id='wf_1a3ffcdd-c60',
+                                                 max_attempts=None, stages=(), stage_attempts=None)}
+denominator:        None
+attempt_label(2):   'attempt 2'          # SD-9's ABSENT-topology arm
+```
+
+The ref *key* half of sp-10's handoff is satisfied (`refId = refs.run_key(runId)`,
+which is exactly why `:427-430` widens `REF_KINDS` for this one kind), and the
+module docstring justifies that widening with: &quot;Refusing a `runs` refId for
+`topology` would leave every run silently on the 'absent topology' arm forever,
+which is the failure that handoff exists to prevent&quot; (`:98-105`). As shipped the
+run lands on that arm anyway — the key joins, the payload is empty — so the
+stated reason for the one documented widening is **not delivered**, and the
+failure mode is the silent one D13 forbids: no counter moves,
+`topology_missing` stays 0, and the UI shows &quot;attempt 2&quot; forever instead of
+&quot;attempt 2 of 4&quot;.
+
+Why neither side caught it: `tests/test_reducer.py:564` builds its topology head
+**by hand** (&quot;GD-24's shape, written by hand&quot;) with a plain, unwrapped
+`data.custom`, so sp-10 asserted a shape no producer emits; and
+`tests/test_custom_state.py` never hands a `topology` head to
+`agents.topology_index`, even though the module docstring names
+`agents.topology_index` as the contract. This module already knows the wrapping
+happens — `CustomStateObservation.from_document:1039-1040` calls
+`ms.is_raw_wrapper`/`ms.unwrap_raw` on its *own* read door — it simply never
+checked the one foreign reader it widened the grammar for.
+
+**Fix (inside ownership).** Two lines of work, both in this sub-plan's files:
+
+1. Add `tests/test_custom_state.py::test_a_topology_head_is_readable_by_the_reducer`
+   — build the head through `head_write`/`replay`, call
+   `agents.topology_index(state)` and `agents.attempt_label(2, index[run_key])`,
+   and assert the denominator actually appears (`&quot;attempt 2 of 4&quot;`). That single
+   assertion is the whole defect.
+2. Record the one-line fix as a deviation handoff, the way this sub-plan already
+   records three others: `agents._topology_from` must unwrap —
+   `custom = ms.unwrap_raw(custom) if ms.is_raw_wrapper(custom) else custom` —
+   in `findings/sp-custom-state-topology-raw-deviation.md`, naming sp-10's file
+   as the owner and quoting `sp-agents-reducer-storage-deviation.md` §2 as the
+   contract it completes. Do **not** edit `agents.py` here (GD-15).
+
+If instead the intended answer is that a topology head must store an unwrapped
+payload, that is a change to `mongo_store.COLLECTIONS[&quot;custom_state&quot;].raw_paths`
+— sp-05's file, and a plan question about GD-24's raw-wrapping rule, not an
+implementation choice to make silently. Either way the round-trip assertion in
+(1) is the thing that must land here.
+
+### M2 — `rebuild_heads` raises on a document this module itself stores, and the head skips `guard_oversize`
+`aggregator/custom_state.py:1449-1450` (`map_custom_state` stubs the event) vs
+`:1610-1639` (`head_write` does not stub anything), reached from `:1909-1925`
+(`rebuild_heads`) and `:1890-1906` (`replay`).
+
+`map_custom_state` runs `ms.guard_oversize(&quot;custom_state_events&quot;, prepared, …)`;
+`head_write` does not. Above `mongo_store.OVERSIZE_LIMIT` (8 MB) the two halves
+of one event diverge, and the divergence is not cosmetic — `guard_oversize`
+keeps only `(&quot;_id&quot;,&quot;provenance&quot;,&quot;ts&quot;,&quot;tsRaw&quot;,&quot;gen&quot;) + spec.required`, and
+`custom_state_events.required` is `(&quot;kind&quot;,&quot;seq&quot;,&quot;provenance&quot;)`, so the stub
+**loses `refId`, `stateKey` and `stream`**. Reproduced:
+
+```
+event doc keys : ['_id', 'bytes', 'kind', 'oversize', 'provenance', 'seq']
+head size      : 9 437 527 bytes,  oversize marker: None      # never stubbed
+rebuild_heads(state)
+  -&gt; aggregator.custom_state.RefRejected: a custom-state write needs a ref or a refId
+     (custom_state.py:714, via head_write:1613)
+```
+
+Three separate things are wrong there, all in owned code:
+
+* **`rebuild_heads` crashes.** R-52's own acceptance clause is &quot;drop
+  `custom_state`, rebuild, document-for-document equal&quot;, and the docstring calls
+  it &quot;the recovery procedure the derived head exists to make possible&quot;
+  (`:1910-1914`). A single stored document the module itself wrote aborts the
+  whole rebuild with an uncaught exception — and `rebuild_heads` has no error
+  containment at all, so the same happens for any stored event missing `stream`
+  (`head_order` → `CustomStateError`). A recovery path that dies on its own
+  input is worse than one that counts and skips.
+* **The head is never stubbed.** R-44's rule is that an oversize mirror document
+  is *marked*, never carried whole; the head carries 9.4 MB where its event
+  carries a 6-key stub. `custom_state` and `custom_state_events` then disagree
+  about the same event, which is precisely what the &quot;wipe + WAL replay
+  reproduces both collections exactly&quot; claim (`:1891-1899`) denies can happen.
+* **&quot;Nothing else writes the head, so nothing else can make this untrue&quot;**
+  (`:1913-1914`) is false as written — the head is made untrue by
+  `map_custom_state`, one function above.
+
+Reachability: `store.MAX_RECORD_BYTES` is 1 MB, so the `Writer`/WAL arm cannot
+get there. The **foreign** arms can: `_read_lines` reads whole lines with no
+cap, `read_control_file` stores the entire parsed line as `custom`
+(`:2426`), and touch-orchestrate's ack shape carries a `result` field. It is
+not the common case, but it is the case this module explicitly wired
+`guard_oversize` up for on one side and forgot on the other.
+
+**Fix (inside ownership).** Make the two halves agree and make the rebuild
+survivable: run `ms.guard_oversize(&quot;custom_state&quot;, prepared, source_path=…)` in
+`head_write` on the same payload and threshold; and in `rebuild_heads`, skip a
+document `CustomStateObservation.from_document` + `head_write` refuse, counting
+it (`{&quot;rebuilt&quot;: n, &quot;skipped&quot;: n}`) rather than propagating — a stub has no
+`refId` by construction and there is no head it could belong to. Assert both: an
+over-limit observation ⇒ event stub *and* head stub, and `rebuild_heads` over a
+log containing one stub returns a count instead of raising.
+
+---
+
+## MINOR
+
+### m1 — the bind paths still read the raw `resolution`, so attempt-3's m3 is only half closed
+`aggregator/custom_state.py:2043-2071` (`SlotTable.bind`), `:2148`
+(`bind_slot`'s `current.get(&quot;resolution&quot;) == &quot;conflict&quot;`), against `:1931-1965`
+(`resolution_of`, which attempt 4 correctly taught to read the evidence).
+
+`resolution_of` now answers `conflict` from `conflictAgentIds`/`conflictWith`;
+the two *writers* still branch on the stored word. On the crash-between-writes
+shape m3 named (evidence landed, guarded state did not), a **third** agentId
+binds cleanly:
+
+```
+stored resolution: pending  conflictAgentIds: ['a2fc…'] conflictWith: ['slot:otherkey']
+resolution_of      -&gt; conflict
+t.bind(key, 'b1de…', by='marker')  -&gt; BindResult('bound', acquired=True)
+after bind: agentId='b1de…'  resolution='bound'  rank=2
+resolution_of      -&gt; conflict
+```
+
+The document now stores `resolution: &quot;bound&quot;` with an `agentId` while read-time
+says `conflict` — the mirror image of the state `bind_slot`'s own docstring
+calls &quot;the one shape D13 forbids&quot; (`:2129-2133`), and exactly what
+`conflict_write` says must never happen (&quot;Deliberately does **not** write
+`agentId`: … a slot with two claims has no single answer to 'which agent is
+this'&quot;, `:1779-1782`). Worse, `_by_agent[b1de…] = key` is then registered
+(`:2065`), so the in-memory unique index now believes a contested slot holds
+that agentId and the *next* legitimate bind of it elsewhere is answered with a
+fabricated conflict.
+
+**Fix:** branch both writers on `resolution_of(current)` rather than on
+`current.get(&quot;resolution&quot;)` (`SlotTable.bind` before the `current`/`holder`
+comparison, `bind_slot` at `:2148`), and assert the shape directly: seed a slot
+with `conflict_evidence_op` alone, bind a different agentId, and check the call
+returns `conflict` with no `agentId` written and `_by_agent` untouched.
+
+### m2 — the WAL arm of `iter_custom_state_observations` is invisible to the counters
+`aggregator/custom_state.py:2483-2518` — `read_control_file(…, counters=counters)`
+is threaded, `_wal_observations(store)` takes no `counters` at all and swallows
+`OSError` into `[]` (`:2512-2518`).
+
+`new_counters`' docstring is explicit about why the counters exist: &quot;an operator
+who cannot tell 'nothing happened yet' from 'everything I wrote was rejected' is
+looking at the quiet drop GD-26 and D13 both forbid&quot; (`:1203-1209`). With a
+readable WAL and no control paths configured — today's shipped configuration —
+the counter dict comes back all zeros while records were in fact ingested, and
+an **unreadable** WAL (a `chmod`'d `.touch/custom-state.jsonl`, the exact case
+`_read_lines` counts as `unreadable` for foreign files) is indistinguishable
+from an empty one. This is the one dataset a rebuild from `~/.claude` cannot
+reconstruct; silence is the wrong answer for it specifically.
+
+**Fix:** give `_wal_observations` the `counters` argument, bump `read`/`parsed`
+per record and `unreadable` on the `OSError`, and assert that a WAL with three
+records reports `parsed == 3` and that an unopenable WAL reports
+`unreadable == 1`.
+
+---
+
+## NITS
+
+- **n1** — `resolution_of:1954-1955`'s `or doc.get(&quot;conflictWith&quot;)` clause is
+  redundant: every path that writes `conflictWith` (`_conflict_ids:1764-1772`)
+  writes `conflictAgentIds` in the same operator, so the preceding clause
+  already fires. The test gate observed it can be deleted with both suites
+  green. Either drop it, or add the shape that needs it (a document carrying
+  `conflictWith` alone) so the clause is held by an assertion rather than by a
+  comment.
+- **n2** — `read_control_file:2425` builds the `stateKey` as
+  `f&quot;{kind}:{payload.get('action') or payload.get('ack')}&quot;` with no type check
+  on the verb, so `{&quot;action&quot;: {&quot;a&quot;: 1}, &quot;name&quot;: &quot;x&quot;}` produces the stateKey
+  `control_intent:{'a': 1}` — a Python `repr` inside a head `_id`.
+  `refs.custom_state_key` escapes it safely, so nothing breaks; it is still an
+  un-normalised foreign value in an identity. Require `isinstance(verb, str)`
+  and count a non-string verb as `skipped_malformed`, beside the `attempt` type
+  check two lines up that already does exactly this.
+- **n3** — `head_order:777-801` widens past `PADDED_INTS[&quot;seq&quot;]` (12) rather
+  than truncating, which the docstring acknowledges — but a widened value sorts
+  *below* a padded one (`&quot;1000000000000|s&quot; &lt; &quot;999999999999|s&quot;`), so order
+  inverts across the width boundary rather than merely degrading. Harmless at
+  10^12 events per stream; worth one sentence saying &quot;inverts&quot;, not &quot;holds
+  within a width class&quot;.
+- **n4** — `_SLOT_INDEX_MEMO:2438` is module-global and its two fields are
+  written non-atomically (`:2477-2479`). If a backfill ever runs off the mirror's
+  worker thread while a rebuild runs on the main one, a reader can observe the
+  new signature with the old index and be served a stale hop. One tuple
+  assignment (`_SLOT_INDEX_MEMO[&quot;entry&quot;] = (signature, index)`) removes the
+  window.
+
+---
+
+## Checklist disposition
+
+| item | verdict |
+|---|---|
+| GD-21 pymongo lazy, only `mongo_store`/`mirror`; module imports on bare stdlib | PASS |
+| GD-22 Mongo off the liveness path; live view works with Mongo down | PASS (sources are the rebuild seam; every owned test runs with no DB) |
+| GD-24 string `_id`s via `ref_key` only; no subdocument `_id`/equality key | PASS |
+| GD-25 `$max/$addToSet/$min/$setOnInsert`; no `$inc`; shuffled/reversed identical | PASS for the in-memory corpora (M1 of attempt 3 genuinely closed); **the head/event pair diverges above 8 MB** (M2) |
+| GD-26 no delete verbs / `$unset` / TTL; tombstones only | PASS |
+| GD-27 loopback+auth recipe, no credential in repo/events/health/API/prompts | PASS |
+| GD-28 `{asserted,touch}` pinned three ways; no `harness` code path; `author` literal on both doors | PASS |
+| GD-29 no Mongo client held; dup-key tolerated and counted via `claim_op` | PASS |
+| GD-30 bounded / O(delta) on the tick | PASS |
+| GD-15 one file one owner; SKILL.md slice only; three deviations recorded | PASS (a fourth handoff is missing — M1) |
+| SD-1 registry + unique kinds / SD-8 `TOUCH_CONTROL_PATHS` + `pathSource`, no restated path / SD-11 | PASS |
+| **SD-9 topology consumed from `custom_state` kind `topology`** | **FAIL** (M1 — the payload the reducer reads is `_raw`-wrapped) |
+| R-52 (3 out-of-order ⇒ highest, unknown refId rejected, wipe+replay, drop+rebuild equal, 16 KB 413, tombstones, one installation-wide pair, no `provenance:&quot;harness&quot;`) | PASS except **drop+rebuild raises on a stored stub** (M2) |
+| R-53 (pending/bound/orphaned/conflict, `pendingSince`, both ids on conflict, never raises, ledger amendment, `sessionKeySource:&quot;path&quot;`) | PASS, with m1's storage/read-time disagreement |
+| tests assert real behaviour; skip cleanly without mongod | PASS on the mutations tried; blind to M1 (no reducer round-trip), M2 (no oversize corpus) and m2 |
+| docs match implemented behaviour | **FAIL** — `:98-105` (&quot;would leave every run on the absent-topology arm forever&quot; — it does), `:1891-1899` (&quot;byte-identical&quot;), `:1913-1914` (&quot;nothing else can make this untrue&quot;) |
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>

@@ -26,8 +26,17 @@ Two components: **aggregator** and **touch-visual**.
 
 ## 2. Repo state
 
-No application source yet. The repo holds `README.md` (product intent),
-`CLAUDE.md`, `.gitignore`, and `.claude/`:
+*(Updated 2026-07-26, docs truth pass R-05/R-57.)* The repo now holds real
+application source: `aggregator/` (the Python package — tailer, store, ws,
+sessions, ingest, legacy, agents, custom_state, refs, mongo_store, mirror,
+server), `touch-visual/` (`index.html`, `app.js`, `style.css`), `tests/` (one
+stdlib-only executable file per module plus `run_all.sh` and `fixtures/`), and
+`docs/` (`mongo.md`, `control-semantics.md`), alongside `README.md` (product
+intent), `CLAUDE.md`, `inception.md`, `.gitignore`, and `.claude/`. `CLAUDE.md`
+carries the current inventory; this file is the design summary and is not the
+place to track file counts.
+
+`.claude/` holds the machinery this project was built with:
 
 - `.claude/skills/execute-research/` + `implement-plan/` — the orchestration
   skill pair. Research fans out read-only perspective agents (opus) behind a
@@ -51,9 +60,18 @@ No application source yet. The repo holds `README.md` (product intent),
   replace, message-id token dedup, session-rotation glob union, realpath
   containment, escape-first rendering) but not its one-process-per-run,
   one-way-transport architecture.
-- `.claude/local-orchestrators/` — per-task run history (mostly carried-over
-  `omnigent` examples). `touch-aggregator/` is this project's research run:
-  findings, driver context, and the completed plan.
+- `.claude/local-orchestrators/` — per-task run history: five folders, **all
+  five produced by this repo's own runs** (`touch-repo-recon`,
+  `touch-aggregator`, `touch-monitor-spawn`, `touch-full-recon`,
+  `touch-mongo-live`). The earlier claim that these were carried-over
+  `omnigent` examples was **false** and is retracted (PRODUCT-5 ≡ RUNSTATE-1):
+  every `orch-config.json` on disk names a `wf_dir` under
+  `~/.claude/projects/-home-laniakea-Projects-touch/…/subagents/workflows/`,
+  i.e. this project's own harness journals — which is exactly what makes
+  `wf_dir` the join key from a task folder to its harness run. When a `wf_dir`
+  no longer exists the honest label is "archived — source transcripts
+  unavailable" (GD-14), never "wrong repo". `CLAUDE.md` carries the per-folder
+  inventory.
 
 ## 3. Verified facts about the substrate (CLI 2.1.220, primary-source)
 
@@ -73,9 +91,18 @@ byte-offset tailing silently freezes; checkpoints must carry
 `(st_dev, st_ino, size, offset)` and re-ingest idempotently from 0 on inode
 change or shrink. Records classify into the CLI's own four buckets:
 `transcript` (user/assistant/system/attachment — carry globally unique `uuid`),
-`boundary-cleared`, `accumulate`, and `last-wins` metadata. `usage` is copied
-onto every split record of one API response — naive summing over-counts output
-tokens 2.09x; dedupe by `message.id`. Large tool results can spill to a
+`boundary-cleared`, `accumulate`, and `last-wins` metadata. `usage` is a
+**running counter**, re-emitted on every split record of one API response with
+**growing** values — *not* copied unchanged (measured: 571 of 901 corpus
+`message.id`s carry differing `output_tokens` across their records —
+MONGOSCHEMA-2 ≡ SESSIONJSONL-9 ≡ LIVEFLOW-4; the earlier "copied onto every
+split record" wording was false and is corrected here per R-38). Two
+consequences, both binding: summing every record over-counts output tokens
+~2.09×, and taking the *first* record per `message.id` under-reports 2.8×. The
+only correct fold is **`$max` per field, keyed by `message.id`** — never
+`$set` (write-order dependent), never `$inc`/running sums (re-ingest after a
+`performRemoveByUuid` doubles them). Verified byte-identical across randomly
+shuffled ingest passes (GD-25). Large tool results can spill to a
 `tool-results/` dir with a pointer record (confirmed in the binary; readers
 must handle it). Lazy creation: a session may exist with no `.jsonl` yet.
 There is no session-end record.
@@ -91,7 +118,14 @@ batches, 46 KB lines observed) — cut at last `\n`, defer the remainder.
 For **Agent-tool spawns**, `.meta.json` carries
 `agentType, description, toolUseId, spawnDepth, model` at spawn instant —
 `toolUseId` joins to the parent's `tool_use` block, a harness-written
-parent→child edge. For **Workflow spawns**, `.meta.json` is a 63-byte stub
+parent→child edge — but every field is optional: a **background**
+(`run_in_background:true`) spawn's `.meta.json` omits `model` entirely, and its
+launch `toolUseResult` is the richer join
+(`{status:"async_launched", agentId, description, resolvedModel, outputFile}`),
+with the pollable task id equal to the 17-hex `agentId` (R-04 probe 5,
+2026-07-26). Background spawns write to the same
+`<sid>/subagents/agent-<agentId>.jsonl` path as foreground ones.
+For **Workflow spawns**, `.meta.json` is a 63-byte stub
 with no description or toolUseId — node naming comes only from the `[monitor]`
 prompt marker. `agentId` (17-hex) is harness-generated, never choosable.
 `spawnDepth` is 1 for both direct and workflow subagents (does not encode
@@ -145,7 +179,14 @@ response (verified: held a tool call 20 s, then released; payloads carry
 `agent_id`/`agent_type`) — per-agent, effective at the next tool boundary,
 deterministic on owned sessions. Hooks are strictly blocking (a slow hook
 delays the session), so Touch hooks only append-a-line-and-exit or gate
-intentionally.
+intentionally. **Delivery is settled (R-04 probe 1, 2026-07-26):** a hook
+written into a session's settings *after* it started fires on the very next
+tool call, with no restart, from the project `.claude/settings.json` **and**
+from the `--settings` file — and it fires under an interactive PTY too
+(probe 2). So the gate is installable into sessions Touch did not spawn; see
+`.claude/local-orchestrators/touch-full-recon/report/probes.md`. Until it
+ships, `pause` is not offered — GD-4 forbids rendering a verb that cannot be
+honest.
 
 **Working control channels, honestly classified** (plan D7):
 - *Start* (v1, deterministic): Touch spawns the owned session.
@@ -155,12 +196,21 @@ intentionally.
   into the owned session, gated on registry idle; confirmed only by observed
   effect. The harness records nothing about stops — Touch's own
   `control.jsonl` audit is the only record, and wins over quiet-timeout
-  inference.
-- *Restart loop* (v1, model-mediated): typed
-  `Workflow({scriptPath, resumeFromRunId})`; same-session-only; replayed
-  agents don't re-execute (rendered "replayed, not re-executed"); Touch
-  records a `git stash create` checkpoint first because resume onto a dirty
-  tree is unguarded.
+  inference. **Two granularities, never conflated** (GD-8 as amended):
+  *run-level* stop exists in the Workflow profile via the launch
+  `toolUseResult.taskId` (verified `w4hiywrt6` / `www4dk54h`), and stops the
+  whole loop; *agent-level* stop exists only in the Agent-tool profile, where
+  the task id **is** the 17-hex `agentId` (R-04 probe 5). A Workflow agent has
+  no per-agent stop and renders disabled with that reason.
+- *Restart loop* (v1, model-mediated): **`Workflow({resumeFromRunId})` is
+  rejected as the meaning of "restart"** — it replays agents without
+  re-executing them (SKILLS-6), which is a transcript, not a rerun. GD-4 fixes
+  ONE meaning: **re-invoke the workflow script with the stored partition
+  (`subplans_file`) and `only:[ids]` — fresh agents, attempt numbering
+  continues (`from_attempt`), the Divide/derivation step skipped.** Touch
+  records a checkpoint first (`git stash create`, three-state per R-35:
+  `sha | none | unavailable(reason)`) because a rerun onto a dirty tree is
+  unguarded, and never blocks the verb on the checkpoint.
 - *Pause* (v1.5, deterministic on owned sessions): the hook gate above.
 - Also real: `--input-format stream-json` accepts
   `initialize/interrupt/set_model/set_permission_mode` (interrupt verified
@@ -176,26 +226,35 @@ UI; requested-but-unconfirmed is the *normal* failure mode.
 ## 5. Environment constraints (corrected)
 
 - **The firewall does NOT block package installs** (npm/pip through the proxy
-  verified — earlier assumption overturned). The real rule (plan D8):
-  stdlib-only at runtime, zero network fetches from the page; npm allowed only
-  build-time to vendor pinned, committed assets (`touch-visual/vendor/`,
-  sha256 manifest). Vendored xterm.js is required — captured PTY bytes include
-  alt-screen, mouse protocols, bracketed paste, 24-bit color.
+  verified — earlier assumption overturned). The real rule (plan **D8.1**, as
+  amended by GD-21): stdlib-only on the ingest and serve critical path, with
+  `pymongo==4.17.0` as the single named exception in two named modules; zero
+  network fetches from the page; npm allowed only build-time to vendor pinned,
+  committed assets (`touch-visual/vendor/`, sha256 manifest). Vendored xterm.js
+  is required — captured PTY bytes include alt-screen, mouse protocols,
+  bracketed paste, 24-bit color.
 - **No g++ in the image** — node-pty cannot build; the PTY tier is Python
   stdlib `pty.openpty()` + `Popen(start_new_session=True)` + asyncio
   `add_reader` (never `pty.fork()`).
-- Sandbox: bind `0.0.0.0`, publish via
+- Sandbox: the Touch server binds **`127.0.0.1` by default** (GD-13); a wider
+  bind is an explicit `--open` opt-in, published from the host with
   `sbx ports $SANDBOX_VM_ID --publish 8932:8932/tcp` (8931 is the live
   monitor). Because transcripts hold unredacted secrets and controls are
-  command execution, the 0.0.0.0 bind is compensated by a **per-boot 256-bit
-  token on every route** + Origin/Host allowlist at WS upgrade (the existing
-  monitor accepted a cross-origin handshake — that class of bug is a
+  command execution, any non-loopback bind is compensated by a **per-boot
+  256-bit token on every route** + Origin/Host allowlist at WS upgrade (the
+  existing monitor accepted a cross-origin handshake — that class of bug is a
   non-negotiable fix in Touch). Typed endpoints only; hard denylist on
   credentials/history/settings.
 - **Spawn hygiene**: child env built from an allowlist —
   `CLAUDE_CODE_CHILD_SESSION=1`, if inherited, silently disables transcript
-  persistence and would starve the whole read side. Always
-  `--session-id <uuid>`.
+  persistence and would starve the whole read side (**re-confirmed 2026-07-26**:
+  a PTY-spawned child that inherited it printed
+  `⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker`
+  and wrote no transcript — R-04 probe 2). Always `--session-id <uuid>`.
+- **The Mongo mirror is never published.** The database binds
+  `127.0.0.1:27017` inside the sandbox and `sbx ports` must **not** publish
+  27017 — it holds the same unredacted transcripts the token posture exists to
+  protect. Use `docker exec touch-mongo mongosh …` (`docs/mongo.md`).
 - Never delete finished task folders; tests stay stdlib-only, directly
   executable, plus socket-level integration tests for the network layer.
 
@@ -223,35 +282,52 @@ The formerly open questions are decided in the plan; headlines:
 6. **Identity (D3)**: session `(pid, procStart)`; record `uuid` (upsert);
    tokens by `message.id`; tool joins by `tool_use_id`; agent by full 17-hex
    id; graph node `(runId, key, ordinal)`.
-7. **Stack (D8)**: Python 3.11+ stdlib, one asyncio process, one port (8932),
+7. **Stack (D8.1)**: Python 3.11+ stdlib, one asyncio process, one port (8932),
    vendored xterm.js, hand-rolled layered SVG graph (no dagre/elk/cytoscape/
    mermaid), no bundler, 250 ms stat-first polling + opt-in hook push channel.
+   **Amended by GD-21**: stdlib-only now means *stdlib-only on the ingest and
+   serve critical path*. `pymongo` (pinned `==4.17.0`, with `dnspython`) is the
+   ONE permitted runtime dependency and may be imported **only** from
+   `aggregator/mongo_store.py` and `aggregator/mirror.py`, lazily. Its absence
+   degrades the mirror to `mirror:"absent"` in `/health`; it never fails
+   startup, never breaks an agent, never blocks a test. (Cite **D8.1** for this
+   decision and **D8.2** for the superseded journal-`result` clause — a bare
+   "D8" means neither.)
 8. **Honesty rules (D13)**: harness-derived graph facts render solid,
    convention-derived (marker) dashed, declared-not-observed as declarations;
    quiet runs show "no activity", never fabricated verdicts.
 
 ## 7. Where things stand
 
-The `execute-research` run for Touch is **complete** (7 agents, ~1.09M tokens,
-finished 2026-07-25 ~03:26Z): six read-only researchers (sessiondata,
-agentgraph, liveio, control, priorart, stack — 110 findings, files under
-`touch-aggregator/findings/`) and the fable synthesizer, which reconciled them
-against the driver context (6 conflicts resolved against primary sources) and
-wrote **`plan/touch-aggregator-plan.md`**: 14 binding global decisions,
-**23 ordered implementation items** (T1 scaffolding → T23 docs, spanning
-vendoring, WS codec, server core, `.touch/` store, ingestion, graph model,
-PTY host, hook pack, APIs, control plane, pause gate, frontend, tests), a
-discarded-findings register, and 10 UNVERIFIED items each with its cheapest
-settling experiment. Next step: hand the plan to `implement-plan` for
-division and gated implementation.
+*(Rewritten 2026-07-26 in the R-05 docs truth pass. Five run folders exist;
+here is what each one actually is, and which artifact is authoritative.)*
 
-**Scoped v0 plan** (2026-07-25): a monitoring + spawning slice was planned
-from conversation at
-`.claude/local-orchestrators/touch-monitor-spawn/plan/touch-monitor-spawn-plan.md`
-— 12 items (P1–P12: store, discovery, tailing, ingestion, name join, control
-intents, server, API/WS, monitoring page with stop buttons, hook pack, e2e
-simulation), inheriting D1–D14, deferring PTY/terminal, pause gate, SVG
-graph, and Mongo. Ready for `implement-plan`.
+| task folder | what it was | state | authoritative artifact |
+|---|---|---|---|
+| `touch-repo-recon` | first research pass over the repo/skills | complete | `findings/` (51 findings; its plan is history) |
+| `touch-aggregator` | 6-perspective research → the design law | complete | `plan/touch-aggregator-plan.md` — **D1–D14 design law**, superseded as the *implementable* plan |
+| `touch-monitor-spawn` | a scoped v0 slice planned from conversation | **plan only, never run** — the folder holds `plan/` and nothing else | `plan/touch-monitor-spawn-plan.md` (P1–P12, G1–G9; historical) |
+| `touch-full-recon` | 6-perspective re-recon | complete | **`plan/touch-full-recon-plan.md` — the normative plan** (GD-1…GD-20, R-01…R-37) |
+| `touch-mongo-live` | 5-perspective Mongo/live-flow research, then this implementation pass | research complete; implementation in progress | **`plan/touch-mongo-live-plan.md` — the amendment** (GD-21…GD-30, R-38…R-58) |
+
+Authority ladder (GD-3), highest first: **`touch-mongo-live-plan.md`
+(amendment)** → **`touch-full-recon-plan.md` (normative)** →
+`touch-aggregator-plan.md` (design law D1–D14, as amended) → this file
+(summary) → `README.md` (intent) → `CLAUDE.md` (session guide). A plan-only
+folder is a legitimate kind, not a broken run (RUNSTATE-13), and empty `plan/`
+or `report/` directories are normal.
+
+**The `touch-aggregator` research run's token cost, corrected:** the 7-agent
+run (`wf_829e6f58-b2f`, finished 2026-07-25 ~03:26Z) cost ≈ **29.5 M input /
+316 k output** — the per-`message.id`-deduped rollup measured by **AUDIT-13**
+(`touch-full-recon/findings/research-audit-attempt-1.md`). This file used to
+say "~1.09M tokens", which was not merely wrong: `1089990` is the literal value
+of `workflows/wf_829e6f58-b2f.json → totalTokens`, i.e. **the one field the
+plan forbids reading** (last-API-call only, a 27× under-report here, 14×
+per-agent elsewhere). Run-level tokens are always Σ over the run's nodes of the
+per-node deduped total; `totalTokens`/`totalToolCalls` stay display-only
+"harness reported" values, rendered beside the computed one and never
+substituted for it (GD-11, GD-24's `harnessTotals`).
 
 **Drafted since the plan** (not yet in it — companion to plan items T10/T14):
 `.claude/skills/touch-orchestrate/SKILL.md`, the orchestrator skill that

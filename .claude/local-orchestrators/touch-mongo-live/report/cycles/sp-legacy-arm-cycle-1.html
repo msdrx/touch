@@ -1,0 +1,513 @@
+<title>sp-legacy-arm — cycle 1</title><style>
+  :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
+          --good:#0ca30c; --bad:#d03b3b; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#ececea; --muted:#9c9c98; --surface:#1a1a19; --card:#242422; --line:#3a3a37;
+            --warn:#fab219; } }
+  body { font: 14px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--surface);
+         margin: 0 auto; max-width: 60rem; padding: 1.5rem; }
+  h1 { font-size: 1.15rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .flow { display: flex; align-items: stretch; gap: .4rem; flex-wrap: wrap; margin: 1rem 0; }
+  .node { flex: 1 1 11rem; border: 2px solid var(--line); border-radius: .5rem;
+          padding: .6rem .7rem; background: var(--card); min-width: 11rem; }
+  .node .role { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .node .verdict { font-weight: 700; margin: .15rem 0; }
+  .node .sum { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); font-size: 1.2rem; }
+  .why { border-left: 4px solid var(--line); padding: .4rem .9rem; background: var(--card);
+         border-radius: 0 .5rem .5rem 0; }
+  .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
+  .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
+          font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  details { margin: .6rem 0; } summary { cursor: pointer; }
+  pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+  a { color: inherit; }
+  .foot { color: var(--muted); font-size: .8rem; margin-top: 1.5rem; }
+</style>
+<h1>sp-legacy-arm — implement→test→critique, attempt 1/4</h1>
+<div class="flow">
+<div class="node" style="border-color:var(--good)"><div class="role">implement</div><div class="verdict" style="color:var(--good)">✓ DONE</div><div class="sum">sp-legacy-arm is complete and green: `tests/test_legacy.py` runs 38 test functions / 237 assertions with 0 failures, exit 0.
+
+TREE FINDING (important for the driver): an interrupted PRIOR attempt at THIS sub-plan had already written both owned files essentially in full — `aggregator/legacy.py` (1902 lines) and `tests/test_legacy.py` (1048 lines), both untracked (`??` in git status). The prompt only warned about partial sp-mirror-deploy edits; sp-legacy-arm's own files were also mid-flight. I verified them against both plans and finished the work rather than rewriting. The suite was RED on arrival (2 failures, the second aborting the run); all three fixes were test-side, no production-code change was needed.
+
+Fixes applied (all in `tests/test_legacy.py`):
+
+1. `test_the_positional_id_is_the_gd24_grammar` — the round-trip assertion compared `refs.parse_ref_key(&quot;legacyEvent&quot;, key)` against `{&quot;task&quot;: ..., &quot;lineNo&quot;: ...}`, but `refs.parse_ref_key` sets `parsed[&quot;kind&quot;] = kind` before returning `canonical_ref(parsed)`, so it yields `{&quot;kind&quot;: &quot;legacyEvent&quot;, &quot;task&quot;: ..., &quot;lineNo&quot;: ...}`. Added the `kind` member to the expectation.
+
+2. `test_the_artifact_registry_lists_the_folder_with_correct_digests` — indexed the in-memory state as `state[(&quot;custom_state_events&quot;, ops[0][1])]`, but `mongo_store.apply_operations` builds `{collection: {_id: doc}}` (nested), not a flat tuple-keyed map. That raised `KeyError: ('custom_state_events', 'artifact:demo#281134410564')` and aborted the whole run before the last 6 tests ever executed. Changed to `state[&quot;custom_state_events&quot;][ops[0][1]]`, and removed a dead no-op statement (`check(...) if body in blob else None`) in the never-store-bodies loop, leaving the single real `not any(body in blob ...)` assertion.
+
+3. `test_the_mapping_half_is_pure` — the &quot;module has no clock&quot; guard was a raw substring search, `&quot;time.time&quot; not in source`. It is a **false positive by construction**: `datetime.timezone` literally contains the substring `time.time` (`date`**`time.time`**`zone`), and `legacy.py:1533` legitimately uses `datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)` to stamp an artifact's own mtime. Replaced with an AST-based guard that resolves dotted call chains against an explicit clock set (`time.time`, `time.time_ns`, `time.monotonic`, `time.monotonic_ns`, `time.perf_counter`, `datetime.datetime.now/today/utcnow`, `datetime.date.today`) and additionally asserts the `time` module is never imported, so no alias can smuggle a clock in. Stricter than the string check it replaces, and it no longer fires on correct code.
+
+Spec conformance re-verified directly against the module source, not just via test names:
+- GD-21/SD-2: no `pymongo` reference anywhere in `legacy.py`.
+- SD-11: no `$inc` and no literal `$set` key; ops are built only through `mongo_store`'s builders (`op_set_on_insert` / `op_set` via `_split_ops`, merged by `ms.merge_ops`), and every `_id` comes from `refs.ref_key` (`mongo_store.check_id` agrees). Idempotency is proven under normal/shuffled/reversed/doubled ingest by identical fingerprint AND identical counts.
+- R-51 `_id = legacy:&lt;task&gt;#&lt;line:08d&gt;` with GD-14 percent-escaping of `% # | :`, round-tripping a task name of `touch#recon|v2:stage%1`; 320 lines ⇒ 320 distinct documents (identity is position, never content or ts — up to 27 duplicate timestamps per file measured).
+- GD-14/R-27: `.watcher-state.json` is never read and is excluded from the artifact registry by name (`NEVER_REGISTERED`, enforced at both `iter_artifacts` and `iter_artifact_observations`).
+- R-58/SD-4: zero fabricated `failed` badges on all three affected streams (touch-aggregator, touch-full-recon, touch-mongo-live) via both the event path and the folder-scan path, while touch-repo-recon's genuine failures keep their badge.
+- SD-1: `MIRROR_MAPPERS` (`legacyEvent`, `legacyArtifact`) plus a `MIRROR_SOURCES` rebuild seam; `mirror.discover_mappers` finds and validates both with no change on its side.
+
+Both files pass `python3 -m py_compile`. Nothing outside the two owned files was touched, and nothing was committed (SD-6).</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">test gate</div><div class="verdict" style="color:var(--good)">✓ PASS</div><div class="sum">PASS. Owned suite green: tests/test_legacy.py exits 0 with 38 test functions covering R-27 (line-positional parsing, synthesized runId/ordinals, two-writer dedup, lossless token folding, plan-only folders, derived archive label, never reading .watcher-state.json), R-51 (literal _id grammar legacy:touch-mongo-live#00000275 with refs.parse_ref_key round-trip and mongo_store.check_id cross-check, byte-identical duplicates staying distinct, GD-28 no-guess provenance, artifact registry as custom_state_events kind legacyArtifact with paths+sha256 only and .watcher-state.json excluded, _only_ours refusing foreign collections) and R-58/SD-4 read-time re-labels with genuine-failure and unresulted-sibling negative controls. SD-1 purity is AST-asserted over all six pure functions; the arm plugs into the real mirror.discover_mappers unchanged; GD-14 percent-escaping proven by round-trip on the task name touch#recon|v2:stage%1. Non-tautology confirmed by mutation probe on a scratchpad copy (flipping derived_from_legacy turned the suite red). Degraded arm confirmed: legacy.py is stdlib-only and test_legacy.py exits 0 with pymongo import forced to fail, and test_stdlib_only.py is green. Full suite: 16 of 18 files green including all four monitoring tests. The two reds — tests/test_mirror.py (3 assertions) and tests/test_sessions.py (1 assertion) — are pre-existing baseline failures of sp-mirror-deploy and sp-sessions-arm, proven not attributable by re-running both in a scratchpad copy with aggregator/legacy.py and tests/test_legacy.py deleted, where they reproduce with identical failure sets. Ownership clean: only the two owned files carry mtimes in this attempt's window and no tracked file was newly modified.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">critique</div><div class="verdict" style="color:var(--good)">✓ APPROVED</div><div class="sum">APPROVED — 0 blocker, 0 major, 4 minor, 5 nit. aggregator/legacy.py + tests/test_legacy.py implement R-27/R-51/R-58's read-time half correctly and honestly. Verified independently, not taken from the test gate: GD-21 (no pymongo string; whole suite green with pymongo imports forced to fail; test_stdlib_only green), GD-24 (string _ids only; check_id + parse_ref_key round-trip on `legacy:touch-mongo-live#00000275` and on the hostile task name `touch#recon|v2:stage%1`), GD-25 (merge_ops(collection=) runs validate_update; no $inc/$unset; $setOnInsert = {provenance,task,lineNo}, all functions of an immutable line; I re-ran the shuffled/reversed/doubled fingerprint pass myself), GD-26 (no delete verb, no TTL), GD-28 (mongo_store pins legacy_events to derived|asserted|unknown and there is no code path to `harness`; shape-rule order matches the plan verbatim), GD-29/GD-22/GD-30 (no client, no socket, no clock — AST-proven by call AND by import), GD-15/SD-1 (`_only_ours` structurally refuses harness collections; mirror.discover_mappers finds both kinds unchanged; sources decide ownership from the path alone). SD-4 checked against the frozen bytes directly: full-recon failed@255→done@276 and mongo-live failed@275→done@286 render `done` with the beaten terminal retained, divide failed@319 relabels to &quot;closed — no verdict&quot;, and touch-repo-recon's genuine user-kill failures survive. The oracle is not self-authored (anchors.json belongs to sp-fixtures-freeze, mtime predates this attempt). Ownership clean: only the two owned files carry mtimes in the attempt window. The four minors are a docstring that names `data.custom.path` where the mapper deliberately stores `artifact.path`; `artifact_stream()` minting a stream id `refs.escape_stream` later rejects for a `..` task name (escaping as RefError, degrading a whole mirror rebuild); the artifact scan reading every byte of every task-folder file with no deny-list/symlink guard/size cap where mirror's own walk says &quot;never read&quot;; and mtime riding in the content-addressed `$setOnInsert` payload (reproduced: same slot, different payload after a touch), plus map_artifact being the one mapper that skips the merge_ops fence.</div></div>
+<div class="arrow">→</div>
+<div class="node" style="border-color:var(--good)"><div class="role">cycle verdict</div><div class="verdict" style="color:var(--good)">✓ GREEN</div><div class="sum">loop closes green</div></div>
+</div>
+
+<h2>Why this cycle succeeded</h2>
+<div class="why pass"><ul><li>Implementer: sp-legacy-arm is complete and green: `tests/test_legacy.py` runs 38 test functions / 237 assertions with 0 failures, exit 0.
+
+TREE FINDING (important for the driver): an interrupted PRIOR attempt at THIS sub-plan had already written both owned files essentially in full — `aggregator/legacy.py` (1902 lines) and `tests/test_legacy.py` (1048 lines), both untracked (`??` in git status). The prompt only warned about partial sp-mirror-deploy edits; sp-legacy-arm's own files were also mid-flight. I verified them against both plans and finished the work rather than rewriting. The suite was RED on arrival (2 failures, the second aborting the run); all three fixes were test-side, no production-code change was needed.
+
+Fixes applied (all in `tests/test_legacy.py`):
+
+1. `test_the_positional_id_is_the_gd24_grammar` — the round-trip assertion compared `refs.parse_ref_key(&quot;legacyEvent&quot;, key)` against `{&quot;task&quot;: ..., &quot;lineNo&quot;: ...}`, but `refs.parse_ref_key` sets `parsed[&quot;kind&quot;] = kind` before returning `canonical_ref(parsed)`, so it yields `{&quot;kind&quot;: &quot;legacyEvent&quot;, &quot;task&quot;: ..., &quot;lineNo&quot;: ...}`. Added the `kind` member to the expectation.
+
+2. `test_the_artifact_registry_lists_the_folder_with_correct_digests` — indexed the in-memory state as `state[(&quot;custom_state_events&quot;, ops[0][1])]`, but `mongo_store.apply_operations` builds `{collection: {_id: doc}}` (nested), not a flat tuple-keyed map. That raised `KeyError: ('custom_state_events', 'artifact:demo#281134410564')` and aborted the whole run before the last 6 tests ever executed. Changed to `state[&quot;custom_state_events&quot;][ops[0][1]]`, and removed a dead no-op statement (`check(...) if body in blob else None`) in the never-store-bodies loop, leaving the single real `not any(body in blob ...)` assertion.
+
+3. `test_the_mapping_half_is_pure` — the &quot;module has no clock&quot; guard was a raw substring search, `&quot;time.time&quot; not in source`. It is a **false positive by construction**: `datetime.timezone` literally contains the substring `time.time` (`date`**`time.time`**`zone`), and `legacy.py:1533` legitimately uses `datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)` to stamp an artifact's own mtime. Replaced with an AST-based guard that resolves dotted call chains against an explicit clock set (`time.time`, `time.time_ns`, `time.monotonic`, `time.monotonic_ns`, `time.perf_counter`, `datetime.datetime.now/today/utcnow`, `datetime.date.today`) and additionally asserts the `time` module is never imported, so no alias can smuggle a clock in. Stricter than the string check it replaces, and it no longer fires on correct code.
+
+Spec conformance re-verified directly against the module source, not just via test names:
+- GD-21/SD-2: no `pymongo` reference anywhere in `legacy.py`.
+- SD-11: no `$inc` and no literal `$set` key; ops are built only through `mongo_store`'s builders (`op_set_on_insert` / `op_set` via `_split_ops`, merged by `ms.merge_ops`), and every `_id` comes from `refs.ref_key` (`mongo_store.check_id` agrees). Idempotency is proven under normal/shuffled/reversed/doubled ingest by identical fingerprint AND identical counts.
+- R-51 `_id = legacy:&lt;task&gt;#&lt;line:08d&gt;` with GD-14 percent-escaping of `% # | :`, round-tripping a task name of `touch#recon|v2:stage%1`; 320 lines ⇒ 320 distinct documents (identity is position, never content or ts — up to 27 duplicate timestamps per file measured).
+- GD-14/R-27: `.watcher-state.json` is never read and is excluded from the artifact registry by name (`NEVER_REGISTERED`, enforced at both `iter_artifacts` and `iter_artifact_observations`).
+- R-58/SD-4: zero fabricated `failed` badges on all three affected streams (touch-aggregator, touch-full-recon, touch-mongo-live) via both the event path and the folder-scan path, while touch-repo-recon's genuine failures keep their badge.
+- SD-1: `MIRROR_MAPPERS` (`legacyEvent`, `legacyArtifact`) plus a `MIRROR_SOURCES` rebuild seam; `mirror.discover_mappers` finds and validates both with no change on its side.
+
+Both files pass `python3 -m py_compile`. Nothing outside the two owned files was touched, and nothing was committed (SD-6).</li><li>Test gate PASSED: PASS. Owned suite green: tests/test_legacy.py exits 0 with 38 test functions covering R-27 (line-positional parsing, synthesized runId/ordinals, two-writer dedup, lossless token folding, plan-only folders, derived archive label, never reading .watcher-state.json), R-51 (literal _id grammar legacy:touch-mongo-live#00000275 with refs.parse_ref_key round-trip and mongo_store.check_id cross-check, byte-identical duplicates staying distinct, GD-28 no-guess provenance, artifact registry as custom_state_events kind legacyArtifact with paths+sha256 only and .watcher-state.json excluded, _only_ours refusing foreign collections) and R-58/SD-4 read-time re-labels with genuine-failure and unresulted-sibling negative controls. SD-1 purity is AST-asserted over all six pure functions; the arm plugs into the real mirror.discover_mappers unchanged; GD-14 percent-escaping proven by round-trip on the task name touch#recon|v2:stage%1. Non-tautology confirmed by mutation probe on a scratchpad copy (flipping derived_from_legacy turned the suite red). Degraded arm confirmed: legacy.py is stdlib-only and test_legacy.py exits 0 with pymongo import forced to fail, and test_stdlib_only.py is green. Full suite: 16 of 18 files green including all four monitoring tests. The two reds — tests/test_mirror.py (3 assertions) and tests/test_sessions.py (1 assertion) — are pre-existing baseline failures of sp-mirror-deploy and sp-sessions-arm, proven not attributable by re-running both in a scratchpad copy with aggregator/legacy.py and tests/test_legacy.py deleted, where they reproduce with identical failure sets. Ownership clean: only the two owned files carry mtimes in this attempt's window and no tracked file was newly modified.</li><li>Critique APPROVED: APPROVED — 0 blocker, 0 major, 4 minor, 5 nit. aggregator/legacy.py + tests/test_legacy.py implement R-27/R-51/R-58's read-time half correctly and honestly. Verified independently, not taken from the test gate: GD-21 (no pymongo string; whole suite green with pymongo imports forced to fail; test_stdlib_only green), GD-24 (string _ids only; check_id + parse_ref_key round-trip on `legacy:touch-mongo-live#00000275` and on the hostile task name `touch#recon|v2:stage%1`), GD-25 (merge_ops(collection=) runs validate_update; no $inc/$unset; $setOnInsert = {provenance,task,lineNo}, all functions of an immutable line; I re-ran the shuffled/reversed/doubled fingerprint pass myself), GD-26 (no delete verb, no TTL), GD-28 (mongo_store pins legacy_events to derived|asserted|unknown and there is no code path to `harness`; shape-rule order matches the plan verbatim), GD-29/GD-22/GD-30 (no client, no socket, no clock — AST-proven by call AND by import), GD-15/SD-1 (`_only_ours` structurally refuses harness collections; mirror.discover_mappers finds both kinds unchanged; sources decide ownership from the path alone). SD-4 checked against the frozen bytes directly: full-recon failed@255→done@276 and mongo-live failed@275→done@286 render `done` with the beaten terminal retained, divide failed@319 relabels to &quot;closed — no verdict&quot;, and touch-repo-recon's genuine user-kill failures survive. The oracle is not self-authored (anchors.json belongs to sp-fixtures-freeze, mtime predates this attempt). Ownership clean: only the two owned files carry mtimes in the attempt window. The four minors are a docstring that names `data.custom.path` where the mapper deliberately stores `artifact.path`; `artifact_stream()` minting a stream id `refs.escape_stream` later rejects for a `..` task name (escaping as RefError, degrading a whole mirror rebuild); the artifact scan reading every byte of every task-folder file with no deny-list/symlink guard/size cap where mirror's own walk says &quot;never read&quot;; and mtime riding in the content-addressed `$setOnInsert` payload (reproduced: same slot, different payload after a touch), plus map_artifact being the one mapper that skips the merge_ops fence.</li></ul>
+</div>
+<h2>Full findings (the evidence)</h2>
+<details><summary>Test gate findings — sp-legacy-arm-test-attempt-1.md</summary><pre># sp-legacy-arm — test gate, attempt 1 — **PASS**
+
+Read-only gate. No source or test file was edited. All probes ran against
+copies under the session scratchpad, never the live tree.
+
+Implementer's changed set: `aggregator/legacy.py`, `tests/test_legacy.py`.
+
+## 1. Targeted suite (owned) — GREEN
+
+```
+cd /home/laniakea/Projects/touch &amp;&amp; python3 tests/test_legacy.py
+→ exit 0 — &quot;all legacy (R-27 / R-51 / R-58 read-time) tests passed&quot;
+```
+
+38 `test_*` functions, several hundred individual `ok:` assertions. Coverage
+maps onto the sub-plan's items:
+
+- **R-27 / GD-14**: line-position parsing and retention (`test_every_frozen_line_parses_and_keeps_its_position`,
+  `test_a_broken_line_is_kept_and_a_torn_tail_is_not`, `test_an_unparseable_ts_does_not_lose_the_line`,
+  `test_out_of_enum_states_map_to_info_and_are_never_dropped`), synthesized
+  runId (`test_a_run_id_is_synthesized_when_the_config_does_not_name_one`),
+  in-memory ordinals across a two-wave respawn
+  (`test_the_two_wave_respawn_becomes_distinct_ordinals`), two-writer dedup
+  (`test_duplicate_stage_terminals_dedupe_and_keep_the_agents_words`,
+  `test_watcher_wins_is_only_for_same_state_duplicates`), lossless token folding
+  (`test_the_token_fold_is_lossless_and_bounded`,
+  `test_a_token_line_that_cannot_fold_losslessly_is_kept_whole`),
+  plan-only folders (`test_a_plan_only_folder_is_its_own_kind_with_no_controls`),
+  derived archive label (`test_the_archive_label_is_derived_not_constant`),
+  8-hex/17-hex join (`test_agent_ids_are_namespaced_and_both_widths_join`),
+  and the never-read checkpoint (`test_the_watcher_checkpoint_is_never_read`).
+- **R-51**: positional `_id` grammar asserted literally —
+  `legacy:touch-mongo-live#00000275` — plus a `refs.parse_ref_key` round-trip
+  and a `mongo_store.check_id` cross-check (`test_the_positional_id_is_the_gd24_grammar`);
+  byte-identical duplicate lines stay distinct
+  (`test_n_documents_for_n_lines_including_the_identical_ones`); GD-28 no-guess
+  provenance (`test_provenance_follows_the_no_guess_rule_and_the_anchored_counts`,
+  `test_the_w_field_wins_over_the_shape_rules`); artifact registry as
+  `custom_state_events` with paths + sha256 + size only and
+  `.watcher-state.json` excluded by name
+  (`test_the_artifact_registry_lists_the_folder_with_correct_digests`,
+  `test_an_artifact_id_is_stable_content_addressed_and_insert_only`);
+  collection containment (`test_the_mapper_writes_only_its_own_two_collections`
+  — `_only_ours` structurally refuses an `agents` write).
+- **R-58 / SD-4 read-time half**: `test_the_fabricated_failed_badge_becomes_closed_no_verdict`,
+  `test_sd4_last_event_wins_on_conflicting_plan_terminals`,
+  `test_r58_zero_failed_badges_on_the_three_affected_streams`,
+  and the negative controls `test_a_genuine_failure_keeps_its_badge` /
+  `test_an_unresulted_sibling_blocks_the_relabel` (which are what stop the rule
+  from degenerating into &quot;relabel everything&quot;).
+- **SD-1 purity**: `test_the_mapping_half_is_pure` walks the AST of all six pure
+  functions and asserts no filesystem, no clock, no I/O; `test_the_reduction_is_a_pure_function_of_the_lines`
+  asserts determinism node-for-node.
+- **SD-11 / mirror contract**: `test_the_registry_matches_the_mirror_contract`
+  and `test_the_sources_own_their_paths_and_nothing_else` drive the real
+  `mirror.discover_mappers`, confirming the arm plugs in with no change on
+  mirror's side and that the observation kind is `legacyArtifact` (not the
+  already-taken `artifact`).
+- **GD-14 percent-escaping**: exercised with the adversarial task name
+  `touch#recon|v2:stage%1`, asserted by round-trip rather than by string shape.
+
+### Non-tautology check (mutation probe)
+
+A scratchpad copy of `aggregator/legacy.py` was mutated
+(`node.derived_from_legacy = True` → `False`). `tests/test_legacy.py` went red
+on the copy:
+
+```
+FAILED (1):
+  - …every one of them marked derived_from_legacy, never `failed` (D13)
+```
+
+A second mutation (`:08d` → `:07d`) was a no-op, correctly: the id is formatted
+by `refs.ref_key` (sp-refs-mongostore's property); the only `:08d` literals in
+`legacy.py` are docstrings. The test asserts the grammar through `refs`, which
+is the right seam.
+
+### Degraded-environment arm (GD-21 / R-56)
+
+`tests/test_legacy.py` imports only stdlib + `aggregator.{legacy,mongo_store,refs}`
+(and `mirror` lazily, inside one test). With `pymongo` import forced to fail via
+a shadowing stub on `PYTHONPATH`, the file still exits 0:
+
+```
+PYTHONPATH=&lt;stub-with-raising-pymongo&gt; python3 tests/test_legacy.py → RC=0
+```
+
+`aggregator/legacy.py` itself imports nothing third-party. `tests/test_stdlib_only.py`
+is green, so the policy guard also accepts the new module.
+
+## 2. Full-suite regression gate — no NEW failures
+
+18 files run (4 monitoring from their own dir, 14 repo tests from the root).
+
+Green (16): all four monitoring tests (`test_frontend`, `test_server`,
+`test_shell`, `test_watcher`), plus `test_bootstrap`, `test_fixtures`,
+`test_ingest`, `test_legacy`, `test_mongo_deploy`, `test_mongo_store`,
+`test_refs`, `test_stdlib_only`, `test_store`, `test_tailer`, `test_usage`,
+`test_ws`. The Mongo arms skipped cleanly (`TOUCH_MONGO_URI` unset).
+
+Red (2 files, 4 assertions) — **pre-existing, not attributable to this change**:
+
+- `tests/test_mirror.py` (sp-mirror-deploy, closed RED):
+  - `…proven by the call count: the held ticks made no attempt`
+  - `the first generation lands`
+  - `…and identical counts: {'records': 8} == {'records': 8, 'writers': 1}`
+- `tests/test_sessions.py` (sp-sessions-arm, closed RED):
+  - `wipe + --rebuild reproduces a byte-identical fingerprint`
+
+Attribution was established, not assumed. Because `legacy.py` registers new
+mappers that `mirror.discover_mappers` picks up automatically, a plausible
+mechanism for a *new* cross-sub-plan break existed, so it was tested directly:
+`aggregator/` + `tests/` were copied to the scratchpad, `aggregator/legacy.py`
+and `tests/test_legacy.py` deleted, and the two files re-run. Both reproduced
+the **identical** failure sets:
+
+```
+tests/test_mirror.py   → FAILED (3)  [same three assertions]
+tests/test_sessions.py → FAILED (1)  [same assertion]
+```
+
+So neither failure count nor identity changes with the sub-plan's files
+removed — these are baseline reds owned by sp-mirror-deploy and sp-sessions-arm.
+Per the gate's baseline clause they do not fail this gate, and per the tree
+rules they were not touched.
+
+## 3. Ownership
+
+`aggregator/legacy.py` (mtime 12:45:44) and `tests/test_legacy.py` (12:51:50)
+are the only two files in `aggregator/`, `tests/`, `docs/` with a mtime in this
+attempt's window; the next most recent are `tests/test_ingest.py` (11:48) and
+`aggregator/mirror.py` (11:29), both from earlier loops. `git status` shows no
+newly modified tracked file (the whole `aggregator/`/`tests/`/`docs/` trees are
+still untracked as a unit, consistent with the prior pass). Nothing under
+`.claude/` was written apart from this findings file and the two `status.sh`
+event lines.
+
+## Verdict
+
+**PASS** — owned suite 100% green, no new regressions, every owned item present
+in the tree and asserted behaviourally rather than tautologically.
+</pre></details>
+<details><summary>Critique findings — sp-legacy-arm-critique-attempt-1.md</summary><pre># sp-legacy-arm — adversarial critique, attempt 1
+
+**Verdict: APPROVED** (0 blocker, 0 major, 4 minor, 5 nit) · depth: in-scope · critical_defect: false
+
+Reviewed files (both new in an untracked tree, so full content reviewed, not a diff):
+
+- `/home/laniakea/Projects/touch/aggregator/legacy.py` (1902 lines)
+- `/home/laniakea/Projects/touch/tests/test_legacy.py` (1081 lines)
+
+Against `plan/touch-mongo-live-subplans.md` §sp-09, amendment items R-51 / R-58 +
+GD-14/GD-21…GD-30/SD-1/SD-4/SD-11, base-plan item R-27 + GD-14/GD-15.
+
+---
+
+## What I tried to break, and could not
+
+I went after this arm on eleven fronts before settling on the findings below.
+Recording the negatives because they are the load-bearing part of an approval:
+
+1. **GD-21 dependency policy.** `legacy.py` imports only `datetime, hashlib,
+   json, os, re, dataclasses` + `mongo_store, refs, sessions, store`. The string
+   `pymongo` does not occur in the file. Re-ran the whole owned suite with
+   `builtins.__import__` patched to raise `ImportError` for `pymongo*`:
+   **green**. `tests/test_stdlib_only.py`: **green**.
+2. **GD-24 identity.** `_id`s are strings only. `legacy_events._id` is
+   `refs.legacy_event_key` ⇒ `legacy:&lt;task&gt;#&lt;line:08d&gt;`; I confirmed
+   `ms.check_id(&quot;legacy_events&quot;, key) == key` and a `refs.parse_ref_key`
+   round-trip on the hostile task name `touch#recon|v2:stage%1`. No BSON
+   sub-document is ever used as `_id` or an equality key.
+3. **GD-25 algebra.** `map_legacy_event` routes through
+   `ms.merge_ops(..., collection=&quot;legacy_events&quot;)`, so `validate_update` runs:
+   no `$inc`, no `$unset`, and the `$set` fence is satisfied because
+   `legacy_events` declares no accumulable fields. `$setOnInsert` carries
+   exactly `{provenance, task, lineNo}`, all functions of the (immutable) source
+   line, so the payload cannot vary between two observations of one `_id`. I
+   independently re-ran the shuffled / reversed / doubled fingerprint pass on
+   `touch-full-recon`: identical.
+4. **GD-26.** No delete verb, no `$unset`, no TTL anywhere in the module.
+5. **GD-28 provenance.** The pin in `mongo_store` is `(&quot;derived&quot;,&quot;asserted&quot;,
+   &quot;unknown&quot;)` for `legacy_events` and `(&quot;asserted&quot;,&quot;touch&quot;)` for
+   `custom_state_events`; `provenance_of` can emit only the first three and
+   `map_artifact` only `&quot;touch&quot;`. There is no code path to `&quot;harness&quot;`. The
+   ordering (`agent|tokens` before `title`) matches GD-28 verbatim, and the
+   `w`-wins arm is a superset that never invents a fifth value — I checked
+   `w:&quot;future&quot;` falls back to the shape rules.
+6. **GD-29 / GD-22 / GD-30.** No client, no socket, no clock, no poll-loop
+   participation. The AST guard in the test proves the &quot;no clock at all&quot; claim
+   both by call and by import, which is the right pair of assertions.
+7. **SD-4 read-time half.** Verified directly against the frozen bytes:
+   `touch-full-recon` research `failed@255 → done@276`, `touch-mongo-live`
+   research `failed@275 → done@286` both render `done` with the beaten terminal
+   retained in `plan.conflicting`; `touch-mongo-live` divide `failed@319` with no
+   correction relabels to `closed — no verdict`; and `touch-repo-recon`'s
+   *genuine* `failed@101/102` (&quot;stopped by user before completion&quot;) survive —
+   honesty in both directions, which is the half that is easy to get wrong.
+   The symmetry test (early `done`, later `failed` ⇒ `failed`) proves the rule is
+   file order and not &quot;done beats failed&quot;.
+8. **`.watcher-state.json`.** Never read: the literal occurs exactly once (the
+   exclusion constant), it is in `NEVER_REGISTERED`, the registry skips it in a
+   folder walk, and a backfill handed its path directly gets `[]`. Three
+   independent assertions — correct, since a digest of a file you must not read
+   is still a read of it.
+9. **SD-1 / GD-15 seam.** `mirror.discover_mappers()` finds both kinds with no
+   change on mirror's side (I ran it). `_only_ours` structurally refuses any
+   collection outside `(&quot;legacy_events&quot;,&quot;custom_state_events&quot;)`, so a
+   synthesized 8-hex identity can never become an `agents`/`run_nodes` document.
+   `MIRROR_SOURCES` matches the declared `source(path=None)` contract and decides
+   ownership from the path alone (one `basename` comparison) — I confirmed both
+   sources return `[]` for `~/.claude/projects/**` paths, which is what makes
+   `iter_backfill_observations`' five-sources-per-file walk affordable.
+10. **Non-tautology.** The anchors (`tests/fixtures/legacy/anchors.json`,
+    mtime 16:06 Jul 25) predate this attempt and belong to sp-fixtures-freeze —
+    the oracle is not self-authored. I re-derived the reduction of all four
+    frozen streams by hand and the badge/node/stat numbers match what the tests
+    assert.
+11. **Ownership.** Only `aggregator/legacy.py` (12:45) and `tests/test_legacy.py`
+    (12:51) carry mtimes in this attempt's window; every other `aggregator/*.py`
+    and `tests/test_*.py` is older. No tracked file newly modified. `run_all.sh`
+    globs `tests/test_*.py`, so no edit was needed there — correctly not made.
+
+---
+
+## Findings
+
+### 1. minor — module docstring names a field path the mapper deliberately does not use
+`aggregator/legacy.py:129`
+
+The module docstring closes the artifact-registry section with:
+
+&gt; Ordering artifacts by `seq` is therefore meaningless — order them by
+&gt; `data.custom.path`, which is what a reader wants.
+
+but `map_artifact` (`legacy.py:1744-1764`) argues at length for the opposite and
+stores the path at **`artifact.path`**, explicitly *not* under `data.custom`
+(which `mongo_store` `_raw`-wraps and would make unqueryable). The test at
+`tests/test_legacy.py:808` asserts `set(doc[&quot;artifact&quot;]) == {...}`, confirming
+the implementation.
+
+This is the one sentence in the module that a downstream consumer (sp-12's
+`/api/*`, sp-13's artifacts strip) would copy verbatim into a query, and it names
+a path that does not exist — the sort would silently do nothing. Two statements
+in one file that contradict each other is also how the *next* implementer picks
+the wrong one.
+
+**Fix:** change line 129 to `order them by `artifact.path`` (and, since it is the
+reader's only usable order, say so in the same breath as the &quot;`seq` is
+meaningless&quot; clause).
+
+### 2. minor — `artifact_stream()` can mint a stream id that `refs` later refuses, and the refusal escapes as `RefError`, not `LegacyError`
+`aggregator/legacy.py:1436-1445`, surfacing at `legacy.py:1743`
+
+`_stream_safe` percent-escapes everything outside `[A-Za-z0-9._+@=,-]`, but `.`
+is in the keep set, so a task folder named e.g. `touch-v1..v2` yields the
+perfectly-happy-looking `artifact:v1..v2`. `refs.escape_stream` (called inside
+`refs.custom_state_event_key`) rejects any stream containing `..`:
+
+```
+&gt;&gt;&gt; lg.artifact_stream(&quot;v1..v2&quot;)
+'artifact:v1..v2'
+&gt;&gt;&gt; refs.custom_state_event_key(lg.artifact_stream(&quot;v1..v2&quot;), 3)
+RefError: stream id may not contain '..': 'artifact:v1..v2'
+```
+
+Two problems, both small but real:
+
+* the validation happens one layer too late — `artifact_stream` is the declared
+  keying entry point and its own docstring promises &quot;the exact inverse&quot; grammar,
+  so it should be the thing that refuses (it already refuses over-long names with
+  a `LegacyError`, so the fence exists, it is just incomplete);
+* the escaping leak becomes a `refs.RefError` out of a `MIRROR_MAPPERS` callable.
+  `Mirror.rebuild` counts that as a rejection, which by design makes the *whole*
+  rebuild keep `derived` and set a sticky degrade (`mirror.py:2424-2434`) — one
+  awkwardly-named history folder degrades the entire mirror rebuild, and the
+  operator's error text names `refs`, not the legacy arm.
+
+**Fix:** escape `.` too in `_STREAM_UNSAFE_RE` (and extend `_stream_unsafe`'s
+round-trip test to cover `&quot;v1..v2&quot;` and a name ending in `.`), or — cheaper —
+have `artifact_stream` validate its own output with a `try: refs.escape_stream(…)
+except refs.RefError as exc: raise LegacyError(…) from None`. Add `&quot;v1..v2&quot;` to
+the `test_the_artifact_stream_id_round_trips_any_folder_name` table.
+
+### 3. minor — the artifact scan reads every byte of every file in a task folder with no deny-list, no symlink guard, no size cap
+`aggregator/legacy.py:1480-1529` (`_digest`, `iter_artifacts`)
+
+`os.walk` + `open(path,&quot;rb&quot;)` over an arbitrary user-chosen directory. `mirror.py`
+takes the opposite posture for its own walk and says why
+(`iter_backfill_sources`: *&quot;a credentials file is not redacted downstream, it is
+never read&quot;*, deny-list consulted **before** the extension filter). This module
+has exactly one exclusion — `.watcher-state.json` — and no deny-list at all, so a
+`.env`, a `credentials.json`, or a symlink pointing at `~/.claude/.credentials.json`
+dropped into a task folder is opened and hashed in full.
+
+Nothing leaks: only `{path, sha256, size, mtime}` is stored, never a body (the
+test at `tests/test_legacy.py:814` proves that against the serialized state,
+which is the right way to assert it). So this is defence-in-depth, not a
+disclosure — but GD-27's stated rule is *never read*, and the module currently
+reads.
+
+**Fix:** fold `mirror.DENY_BASENAMES` (or a shared copy of it, to avoid the
+`legacy → mirror` import cycle) into `NEVER_REGISTERED`; skip
+`os.path.islink(path)` entries in the walk; and cap `_digest` at a documented
+size, registering the file with a `truncated: true` marker beyond it rather than
+streaming a multi-GB blob on every rebuild.
+
+### 4. minor — `map_artifact` puts a non-content field in an insert-only payload, and is the one mapper that skips the `merge_ops` validation fence
+`aggregator/legacy.py:1766-1780`
+
+The `_id` slot is content-addressed on `(path, sha256)` — deliberately, and the
+reasoning at `legacy.py:1457-1471` is right. But the `$setOnInsert` body also
+carries `ts`/`tsRaw`/`artifact.mtime`, which are **not** part of the slot seed:
+
+```
+slot same: True   mtime differs: True   setOnInsert payload identical: False
+```
+
+(reproduced by `os.utime`-ing an unchanged file). That breaks the invariant
+`op_set_on_insert`'s own docstring states — *&quot;Every operation targeting a given
+`_id` must carry the same `$setOnInsert` payload&quot;* — and falsifies this module's
+claim at `legacy.py:1768-1770` that the document is &quot;a pure function of the file
+(so a rebuild reproduces it byte for byte)&quot;. In practice: after a fresh clone
+(all mtimes reset) the stored document silently keeps the *old* mtime, and a
+cross-machine GD-25 fingerprint comparison of `custom_state_events` diverges even
+though nothing changed. Within one ingest pass it is stable, which is why the
+suite is green.
+
+Secondary, same site: `map_artifact` returns `ms.op_set_on_insert(body)` raw,
+where `map_legacy_event` returns `ms.merge_ops(..., collection=…)`. The GD-25
+fence therefore does not run at map time for this mapper (it still runs later in
+`apply_update`/`bulk_upsert`, so nothing escapes — but the two mappers in one
+file behaving differently is the kind of asymmetry that gets copied).
+
+**Fix:** either seed the slot with mtime as well (making the document genuinely
+content-addressed over everything it stores), or — better, since R-51 mandates
+both `mtime` and an insert-only posture — drop the &quot;pure function of the file /
+byte for byte&quot; claim from the docstring and state the actual property: *the
+document is a function of `(path, content)`; a re-stamped mtime keeps the first
+observation's value.* Independently, wrap the return in
+`ms.merge_ops(ms.op_set_on_insert(body), collection=&quot;custom_state_events&quot;)` so
+both mappers are validated identically.
+
+### 5. nit — a replayed spawn after a result mints a phantom second node; terminals are attributed by `(plan, stage)` without checking the agent id
+`aggregator/legacy.py:1076-1077`, `legacy.py:1116-1134`
+
+`fresh = (node is None or node.resulted or (agent_id and node.agent_id and
+node.agent_id != agent_id))` — the `node.resulted` arm means a watcher restarted
+onto a checkpoint that predates a result, replaying that agent's `running` row,
+creates a *second* node for the same agent (which `_close_stale` will then close
+`stale`). Symmetrically, the terminal branch attaches to `open_nodes[key]`
+without comparing `event.agent_ref_id()` to `node.agent_id`, so interleaved
+respawn waves on one `(plan, stage)` would credit wave 1's result to wave 2's
+node.
+
+Neither fires on the four frozen streams (I checked: zero multi-id nodes, zero
+id-less nodes, node counts match the anchors), and `touch-repo-recon` is the only
+two-wave specimen in existence, so this is speculative — but it is one condition
+away from being closed.
+
+**Fix:** add `and not (agent_id and agent_id in node.agent_ids)` to the `fresh`
+predicate, and in the terminal branch prefer an already-created node whose
+`agent_ids` contains the event's agent id over `open_nodes[key]`.
+
+### 6. nit — dead conditional-expression statement that can only ever record an empty failure
+`tests/test_legacy.py:540-541`
+
+```python
+for record in reduction.tokens:
+    check(set(record.tokens) == set(lg.TOKEN_KEYS), &quot;&quot;) \
+        if set(record.tokens) != set(lg.TOKEN_KEYS) else None
+```
+
+The guard makes the condition always `False` when the body runs, so the only
+reachable effect is `failures.append(&quot;&quot;)` — a failure with no message. Line 542
+already asserts the same property properly.
+
+**Fix:** delete lines 540-541.
+
+### 7. nit — `LegacyEvent.is_node_event` is unused
+`aggregator/legacy.py:495-504`
+
+`reduce_events` re-implements the predicate inline (`is_token` / `is_badge` /
+`plan == RESERVED_PLAN`). The property is public (the dataclass is exported), so
+it is now a second definition of &quot;is this a node row&quot; that nothing keeps honest.
+
+**Fix:** either use it in `reduce_events` or drop it.
+
+### 8. nit — ts-less quiet token lines all collapse into one window
+`aggregator/legacy.py:1326-1329`
+
+`slot = None` when `event.ts is None`, so **every** unparseable-ts quiet delta
+for one agent folds into a single `(agent_id, None)` bucket regardless of
+position in the file. Still lossless (the last one carries the cumulative
+total), but &quot;at most one record per agent per throttle window&quot; quietly becomes
+&quot;one record per agent, full stop&quot; for that arm, and it is undocumented.
+
+**Fix:** one comment at the `slot = None` line stating the degenerate window, or
+fall back to `line_no // N` so ordering still segments the records.
+
+### 9. nit — the duplicate-terminal anchors carry line pairs, the test only counts them
+`tests/test_legacy.py:492-494`
+
+`anchors.json` records the exact pairs (`[241,244], [247,256], …`) but the
+assertion is `stats[&quot;deduped_terminals&quot;] == len(pairs)`. A rule change that
+deduped a *different* seven pairs would pass. (`deduped_terminals` also sums the
+plan-card and node dedup paths into one counter, which is why the count happens
+to line up.)
+
+**Fix:** record the deduped `(first, second)` line pairs in `stats` (or on the
+node/plan) and assert set equality against the anchor.
+
+---
+
+## Scope / depth
+
+Everything above is a comment edit, a predicate tweak, a two-line deletion and a
+deny-list constant, all inside the two owned files. No architectural rework, no
+cross-sub-plan boundary, no missing research ⇒ **in-scope**, and since there are
+no blocker/major findings the arm should proceed as-is; the nine items are best
+folded into whatever pass next touches this file.
+
+`critical_defect: false` — nothing here would waste or corrupt the remaining
+sub-plans. sp-10 (`agents.py`, the reducer) consumes this module's reduction in
+memory and its contract (derived state stays out of `legacy_events`, enforced by
+`_only_ours`) is sound; sp-11 (`custom_state.py`) inherits the `artifact` vs
+`legacyArtifact` kind split, which this module got right and documented.
+</pre></details>
+<p class="sum"><a href="index.html">← run overview</a></p>
+<p class="foot">rendered deterministically by cycle_reporter.py at 2026-07-27T07:46:01Z</p>
