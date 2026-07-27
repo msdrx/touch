@@ -66,53 +66,129 @@ def discover_tasks() -> dict:
 # that stopped emitting costs one scan total, not one per /tasks poll.
 _STATUS_CACHE: dict = {}
 
+# Unparseable lines per events file, surfaced via /health (R-10). A poisoned or
+# torn line is skipped silently by the replay — a counter is what turns "the
+# dashboard looks wrong" into "line N of this stream is not JSON". Counted once
+# per scan (the scan itself is cached by (mtime_ns, size)).
+PARSE_FAILURES: dict = {}
+
+
+def replay_plan_states(events_path: str):
+    """Replay one stream into ``(plan_states, last, tokens, parse_failures)``.
+
+    Per-plan badge state is **last-event-wins in FILE ORDER** — the SD-4/R-58
+    conflict rule: when a stream holds both a fabricated ``plan failed`` and a
+    later corrective ``plan done`` for the same plan, the correction wins, and no
+    stream is ever rewritten to achieve that. Order is file order, never a ts
+    sort (ts values are written by several writers and are not monotonic).
+
+    Continuation reopen (FRONTEND-6, server half): one task folder hosts several
+    phases appending to one stream, so events can continue PAST a run-level
+    ``orchestrator complete done``. Activity after a terminal orchestrator badge
+    — a sub-plan ``plan`` event opening as running/queued (seed lines included),
+    or any ``running``-state orchestrator event outside the reserved stages —
+    flips the orchestrator badge back to ``running``, exactly as the replaying
+    dashboard does. Without this the home-grid tile reads "done" while loops
+    are visibly running.
+    """
+    plan_states: dict = {}
+    last = None
+    tok_in = tok_out = tok_cached = tok_write = 0
+    failures = 0
+    with open(events_path, "rb") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                ev = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                failures += 1
+                continue
+            if not isinstance(ev, dict):
+                failures += 1
+                continue
+            stage, state = ev.get("stage"), ev.get("state")
+            if stage in ("plan", "complete"):
+                plan_states[ev.get("plan")] = state
+                if (stage == "plan" and ev.get("plan") != "orchestrator"
+                        and state in ("running", "queued")
+                        and plan_states.get("orchestrator") in ("done", "failed")):
+                    plan_states["orchestrator"] = "running"
+            elif (stage != "tokens" and state == "running"
+                    and ev.get("plan") == "orchestrator"
+                    and plan_states.get("orchestrator") in ("done", "failed")):
+                plan_states["orchestrator"] = "running"
+            tok = ev.get("tokens")
+            if tok:
+                tok_in += tok.get("in") or 0
+                tok_out += tok.get("out") or 0
+                tok_cached += tok.get("cached") or 0
+                tok_write += tok.get("cache_write") or 0
+            if not ev.get("quiet"):
+                last = {k: ev[k] for k in ("ts", "plan", "stage", "state", "detail") if k in ev}
+    tokens = {"in": tok_in, "out": tok_out, "cached": tok_cached, "cache_write": tok_write}
+    return plan_states, last, tokens, failures
+
+
+def health_payload() -> dict:
+    """`/health`: liveness plus the per-stream parse-failure counters (R-10).
+
+    The counters are a by-product of the `/tasks` stream scan (that is what makes
+    them free), so a probe taken before the first scan honestly reports zero — it
+    means "nothing scanned yet", not "no bad lines". A dashboard polls `/tasks`
+    continuously, so every counter here is as current as that stream's last scan,
+    and a stream that stops being scannable (deleted, rotated) drops out of the
+    map instead of contributing forever.
+    """
+    return {"status": "ok",
+            "parse_failures_total": sum(PARSE_FAILURES.values()),
+            "parse_failures": dict(PARSE_FAILURES)}
+
 
 def task_status(events_path: str) -> dict:
     """Overall run status + last meaningful event, for the home-grid tile.
 
     Replays the whole stream the same way the dashboard does — badge events
-    (stage ``plan``/``complete``) set per-plan state — then folds those into
-    one verdict. The reserved ``orchestrator`` card is authoritative: the
-    driver's final ``orchestrator complete done|failed`` marks the run
-    finished; until it lands, any failed plan wins, else running.
+    (stage ``plan``/``complete``) set per-plan state, last-event-wins in file
+    order, continuation activity reopens a stale orchestrator close — then folds
+    those into one verdict. The reserved ``orchestrator`` card is authoritative:
+    the run-level ``complete done|failed`` that nothing reopened marks the run
+    finished. Until it lands, LIVE ACTIVITY WINS: any running plan means the
+    flow is running (same rule as the stats page's flow tile — a plan that
+    already exhausted its attempts must not flag the whole run failed while
+    later loops are still working); with nothing running, a failed plan wins,
+    else all-done folds to done.
     """
     try:
         st = os.stat(events_path)
     except OSError:
+        # A stream that no longer exists (deleted or rotated after a poisoned
+        # scan) must not keep contributing to `/health`'s parse_failures_total
+        # for the life of the server — there is nothing left to fix (m-2).
+        PARSE_FAILURES.pop(events_path, None)
         return {"status": "empty", "last": None, "tokens": {"in": 0, "out": 0}}
     key = (st.st_mtime_ns, st.st_size)
     cached = _STATUS_CACHE.get(events_path)
     if cached and cached[0] == key:
         return cached[1]
-    plan_states: dict = {}
-    last = None
-    tok_in = tok_out = tok_cached = tok_write = 0
     try:
-        with open(events_path, "rb") as f:
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    ev = json.loads(raw)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if ev.get("stage") in ("plan", "complete"):
-                    plan_states[ev.get("plan")] = ev.get("state")
-                tok = ev.get("tokens")
-                if tok:
-                    tok_in += tok.get("in") or 0
-                    tok_out += tok.get("out") or 0
-                    tok_cached += tok.get("cached") or 0
-                    tok_write += tok.get("cache_write") or 0
-                if not ev.get("quiet"):
-                    last = {k: ev[k] for k in ("ts", "plan", "stage", "state", "detail") if k in ev}
+        plan_states, last, tokens, failures = replay_plan_states(events_path)
     except OSError:
+        PARSE_FAILURES.pop(events_path, None)  # unreadable now: same rule (m-2)
         return {"status": "empty", "last": None, "tokens": {"in": 0, "out": 0}}
+    if failures:
+        PARSE_FAILURES[events_path] = failures
+    else:
+        PARSE_FAILURES.pop(events_path, None)
+    tok_in, tok_out = tokens["in"], tokens["out"]
+    tok_cached, tok_write = tokens["cached"], tokens["cache_write"]
     orch = plan_states.get("orchestrator")
     plans = [s for p, s in plan_states.items() if p != "orchestrator"]
     if orch in ("done", "failed"):
         status = orch
+    elif "running" in plans:
+        status = "running"
     elif "failed" in plans:
         status = "failed"
     elif plans and all(s == "done" for s in plans):
@@ -450,7 +526,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             # tasks_payload/task_artifacts rescan disk (possibly multi-MB files);
             # run them off the event loop so they never stall live WS streams (SERVER-5).
             if route == "/health":
-                payload = {"status": "ok"}
+                payload = health_payload()
             elif route == "/tasks":
                 payload = await asyncio.to_thread(tasks_payload)
             else:

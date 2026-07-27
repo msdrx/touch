@@ -1,0 +1,403 @@
+/* touch-visual/style.css — Touch v0's paint (R-22 skeleton half, R-32, R-55).
+ *
+ * Two rules govern this file and both are asserted by
+ * `tests/test_touch_frontend.py`:
+ *
+ * 1. **Only the live class animates.** `.fresh` is attached by exactly one
+ *    function in `app.js`, for `live === true` frames only, so a replayed or
+ *    backfilled burst paints once and silently (R-55). Every keyframe
+ *    animation in this file is therefore reachable only through `.fresh` or
+ *    through the live-tail chip — a base `.logrow` has none.
+ * 2. **Derived is dashed.** Anything the server concluded rather than observed
+ *    (`provenance != harness`, `derived_from_legacy`, a re-label, a frozen
+ *    node) wears a dashed border. D13's honesty rule is satisfied by
+ *    *rendering* the derivation, and a solid border on a conclusion is the
+ *    render that hides it.
+ *
+ * The palette is the monitoring module's (GD-20: the substrate is inherited
+ * where it was right), with a light-scheme arm and a reduced-motion arm.
+ */
+
+:root {
+  --bg: #0f1117;
+  --panel: #171a23;
+  --panel2: #1d2130;
+  --text: #e6e8ee;
+  --muted: #8b90a0;
+  --line: #2a2f40;
+  --queued: #8b90a0;
+  --running: #e8b23c;
+  --done: #4cc38a;
+  --failed: #e5534b;
+  --info: #6ea8fe;
+  --stale: #b98adf;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --panel2: #f0f1f5;
+    --text: #1c1e26;
+    --muted: #6a6f80;
+    --line: #e2e4ea;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` must win over every author `display` in this file.
+ *
+ * The UA sheet's `[hidden] { display: none }` loses the cascade to any author
+ * rule that sets `display` on the same element — so `.notice { display: flex }`
+ * plus `box.hidden = true` left an empty grey strip with its own padding and
+ * border under the header at all times. One author-level rule fixes the class
+ * of bug rather than the instance, and it is what makes `hidden` mean hidden
+ * for #notice, #older and the load-older button alike. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 var(--mono);
+}
+
+/* ---- header ---------------------------------------------------------- */
+
+header#top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 3;
+}
+
+header#top h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.conn { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--failed); }
+.conn.on .dot { background: var(--done); }
+
+.rollup {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notice {
+  margin: 0;
+  padding: 8px 16px;
+  background: var(--panel2);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* ---- chips ----------------------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: 1px 7px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  color: var(--text);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-plain { color: var(--muted); }
+/* Two markers that describe an OBSERVED fact and must not borrow the reducer's
+   liveness palette: `current` (the server's newest-written stream — a file
+   mtime, not a verdict) and `retracted` (a record superseded by a rewrite). */
+.chip-current { border-color: var(--info); color: var(--text); }
+.chip-warn { border-style: dotted; border-color: var(--muted); color: var(--muted); }
+
+.st-running { border-color: var(--running); color: var(--running); }
+.st-done { border-color: var(--done); color: var(--done); }
+.st-unknown { border-color: var(--stale); color: var(--stale); border-style: dashed; }
+.st-failed { border-color: var(--failed); color: var(--failed); }
+.st-queued { border-color: var(--queued); color: var(--queued); }
+.st-info { border-color: var(--info); color: var(--info); }
+.st-stale { border-color: var(--stale); color: var(--stale); border-style: dashed; }
+.st-superseded { border-color: var(--stale); color: var(--stale); border-style: dashed; }
+.st-closed { border-color: var(--queued); color: var(--queued); border-style: dashed; }
+.st-other { border-color: var(--line); color: var(--muted); border-style: dotted; }
+
+.kind-live { border-color: var(--running); color: var(--running); }
+.kind-hist { border-color: var(--info); color: var(--info); }
+.kind-run { border-color: var(--info); color: var(--info); }
+.kind-plan { border-color: var(--queued); color: var(--queued); border-style: dashed; }
+
+/* Provenance (GD-28). `harness` is the only observed one, so it is the only
+   solid one; everything else is a conclusion and says so with a dashed edge. */
+.prov-harness { border-color: var(--line); color: var(--muted); }
+.prov-derived { border-style: dashed; border-color: var(--stale); color: var(--stale); }
+.prov-asserted { border-style: dashed; border-color: var(--info); color: var(--info); }
+.prov-touch { border-style: dashed; border-color: var(--info); color: var(--info); }
+.prov-unknown { border-style: dashed; border-color: var(--queued); color: var(--queued); }
+.prov-legacy { border-style: dashed; border-color: var(--queued); color: var(--queued); }
+
+/* ---- layout ---------------------------------------------------------- */
+
+#shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  #shell { grid-template-columns: minmax(0, 1fr); }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.panel h2 {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel h2 .count { color: var(--text); font-weight: 600; }
+
+#main { min-width: 0; }
+#sidebar { min-width: 0; }
+
+/* ---- sidebar rows ---------------------------------------------------- */
+
+.rows { list-style: none; margin: 0; padding: 0; max-height: 44vh; overflow: auto; }
+
+.row { border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: none; }
+.row.selected { background: var(--panel2); box-shadow: inset 2px 0 0 var(--info); }
+.row.empty { padding: 8px 12px; color: var(--muted); }
+
+.rowlink {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 12px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.rowlink:hover, .rowlink:focus-visible { background: var(--panel2); }
+/* A row the read API has no route for (`run:legacy:<task>`): same shape, no
+   hover — it is not clickable and must not look it. Declared after the rule it
+   overrides, since both have the same specificity. */
+.rowstatic, .rowstatic:hover { background: none; color: var(--muted); }
+.rowtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rowmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.rowsub, .rowts { color: var(--muted); font-size: 10px; }
+
+/* ---- detail ---------------------------------------------------------- */
+
+.detail-head { padding: 12px; border-bottom: 1px solid var(--line); }
+.detail-head h2 {
+  margin: 0 0 6px;
+  padding: 0;
+  border: none;
+  font-size: 15px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+/* The single live region (`role="status"`). It is a real, visible one-line
+   summary rather than a visually-hidden one: what a screen reader is told and
+   what the screen shows should be the same sentence. */
+.detail-status {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+.detail-status:empty { display: none; }
+.detail-body { padding: 12px; }
+.detail-body h3 {
+  margin: 16px 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+}
+.detail-body h3:first-child { margin-top: 0; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.rollup-line { margin-top: 8px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 4px 14px; }
+.field { display: flex; gap: 8px; min-width: 0; }
+.flabel { color: var(--muted); min-width: 88px; }
+.fvalue { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+/* The agent tree's nesting IS the spawn edge (`observed.parent`), drawn as
+   containment rather than announced as a `depth N` chip beside a flat list. */
+.cards.nested { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--line); }
+.card { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.card.empty { color: var(--muted); }
+/* A card whose content the server re-labelled rather than observed. */
+.card.derived { border-style: dashed; border-color: var(--stale); }
+.cardhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cardtitle { font-weight: 700; overflow-wrap: anywhere; }
+.cardsub { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; color: var(--text); font-size: 11px; }
+.cardsub .dim, .dim { color: var(--muted); }
+.mono { font-family: var(--mono); color: var(--info); }
+
+.timeline { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow: auto; }
+/* The timeline's own paging affordance sits under the list, left-aligned —
+   `margin-left: auto` is a flex rule and this is not a flex container. */
+.detail-body .pagebtn { margin-left: 0; margin-top: 8px; }
+.trow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.trow.empty { color: var(--muted); }
+.tline { color: var(--muted); min-width: 56px; font-variant-numeric: tabular-nums; }
+.tkind { font-weight: 600; min-width: 90px; }
+
+.notes { list-style: none; margin: 0; padding: 0; }
+.note { color: var(--muted); padding: 2px 0; overflow-wrap: anywhere; }
+
+.hint { color: var(--muted); margin: 4px 0; }
+/* `data-view` mirrors the sidebar selection (`app.js` sets it on <body>), so
+   the empty state reads as an invitation rather than as a failed load. */
+body[data-view="empty"] .detail-body, body[data-view="boot"] .detail-body { color: var(--muted); }
+.error { color: var(--failed); overflow-wrap: anywhere; }
+
+/* ---- log ------------------------------------------------------------- */
+
+/* The events panel's toolbar: the counters and the load-older button, in a row
+ * of their own BELOW the heading. Inside the `<h2>` they became part of the
+ * heading's accessible name, which is how "events" ended up being announced as
+ * a paragraph of counters. */
+.logbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+.logbar .count { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+
+/* Both paging affordances (load older, load more records) share one look:
+ * they are the same kind of thing — a bounded, read-only request for more of
+ * what is already on screen. */
+.pagebtn {
+  margin-left: auto;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 9px;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.pagebtn:hover, .pagebtn:focus-visible { border-color: var(--info); color: var(--info); }
+.pagebtn[disabled] { opacity: .5; cursor: default; }
+
+.log { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; }
+
+/* Loaded history, above the live tail and visibly a different thing: its own
+   scroll box, its own budget, and a dashed edge where it meets the tail. It
+   holds `live:false` rows only, so nothing in here ever animates. */
+.log-history {
+  max-height: 26vh;
+  background: var(--panel2);
+  border-bottom: 1px dashed var(--stale);
+}
+
+.logrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+}
+
+.lts { color: var(--muted); font-variant-numeric: tabular-nums; }
+.lseq { color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 30ch; white-space: nowrap; }
+.lkind { font-weight: 700; min-width: 7ch; }
+.lprov { font-size: 10px; padding: 0 5px; border: 1px solid var(--line); border-radius: 99px; }
+.lref { color: var(--info); overflow-wrap: anywhere; }
+.ldata { color: var(--muted); overflow-wrap: anywhere; flex: 1 1 40ch; }
+
+/* THE live-frame animation. `.fresh` is the only class `app.js` may attach for
+   an animated paint, and it is attached for `live === true` frames only — a
+   replayed frame reaches the DOM through the same builder without it, so
+   history cannot flash. */
+.fresh { animation: freshin .45s ease-out; }
+
+@keyframes freshin {
+  0% { background: rgba(110, 168, 254, .18); }
+  100% { background: transparent; }
+}
+
+/* The live-tail chip pulses for the same reason and under the same rule: it
+   renders the socket's own mode, which is `tail` only after the ONE boundary
+   frame. */
+.chip-mode.st-running { animation: modepulse 1.6s ease-in-out infinite; }
+
+@keyframes modepulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fresh, .chip-mode.st-running { animation: none; }
+}
+
+/* ---- footer ---------------------------------------------------------- */
+
+footer#foot {
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}

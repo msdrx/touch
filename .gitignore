@@ -1,16 +1,16 @@
 # --- Orchestrator monitoring ---------------------------------------------
 # The shared monitoring module is stateless: state written there means someone
-# forgot ORCH_STATE_DIR. Per-task state under .claude/local-orchestrators/ IS
-# tracked history and must NOT be ignored (see .claude/shared/monitoring/monitoring.md).
+# forgot ORCH_STATE_DIR.
 .claude/shared/monitoring/events.jsonl
 .claude/shared/monitoring/.watcher-state.json
 
-# Daemon logs are runtime noise; events.jsonl is the source of truth.
+# Per-task orchestration run state is local working data, kept on disk for
+# monitor replay and the Mongo legacy keyspace but no longer versioned
+# (untracked 2026-07-27). The narrower rules below predate the tree-wide one
+# and are kept because the verbatim guard lists in tests/test_bootstrap.py and
+# monitoring's test_shell.py assert them.
+.claude/local-orchestrators/
 .claude/local-orchestrators/*/*.log
-
-# Watcher checkpoints are derived, restart-safe state, not history: they are
-# rebuilt from journal.jsonl on restart. `events.jsonl` under
-# .claude/local-orchestrators/ stays TRACKED — it is the irreplaceable stream.
 .claude/local-orchestrators/*/.watcher-state.json
 
 # --- Touch runtime state --------------------------------------------------
@@ -29,23 +29,43 @@
 # holds the same unredacted transcripts .touch/ exists to protect.
 mongo-data/
 mongo-dump/
+# *.bson is unanchored on purpose (dumps land wherever mongodump is run). If a
+# .bson ever needs to be a committed test fixture, negate it explicitly rather
+# than narrowing this rule: !tests/fixtures/**/*.bson
 *.bson
 
 # --- Python ---------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*.egg-info/
+*.egg
+.eggs/
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
 
 # --- Node / web -----------------------------------------------------------
 node_modules/
 dist/
 build/
 .next/
+.nuxt/
+.parcel-cache/
+.turbo/
 coverage/
 *.tsbuildinfo
 npm-debug.log*
+yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
 # --- Env / secrets --------------------------------------------------------
 .env
@@ -54,6 +74,18 @@ yarn-error.log*
 
 # --- Editor / OS ----------------------------------------------------------
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.swp
+*.swo
+*~
 .idea/
 .vscode/
+
+# --- Temp / backup --------------------------------------------------------
+*.tmp
+*.bak
+*.orig
+*.rej
+
+.temp-develop/

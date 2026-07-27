@@ -1,0 +1,400 @@
+=== line 4 uuid=2fdbc0f0-c829-4b39-b843-ab3490da5a3f ts=2026-07-25T13:53:36.186Z len=280
+<command-message>execute-research</command-message>
+<command-name>/execute-research</command-name>
+<command-args>research codebase from different perspectives, also add researchers for @.claude/local-orchestrators/ folder too. research all and synthesize into plan.</command-args>
+
+=== line 5 uuid=648b1268-ca6d-47e3-ab1d-92dc7417b886 ts=2026-07-25T13:53:36.186Z meta len=4464
+Base directory for this skill: /home/laniakea/Projects/touch/.claude/skills/execute-research
+
+# execute-research — deterministic research orchestrator
+
+Owns the *research → plan* half of a research→implement pair: it emits ONE
+complete plan that `implement-plan` consumes via a file hand-off and divides
+itself. Never edits source, never implements, never partitions.
+
+**Argument**: `<user_prompt>` — what to research and why (a codebase area, a
+bug class, a design question, docs/logs/URLs). Everything after an optional
+`Hints:` marker is `<research_hints>` (files to prioritize, a perspective to
+emphasize, "then implement it").
+
+## Contract (what this skill produces)
+
+A plan at `.claude/local-orchestrators/<task-name>/plan/<name>-plan.md` plus a
+structured return `{ plan_file, item_count, summary }`. The plan is ONE
+complete, self-contained document — never divided into sub-plans (that
+divide-and-conquer belongs to `implement-plan`'s Fable divider). It carries:
+
+- **global decisions** — every cross-cutting/protocol question decided ONCE so
+  downstream work cannot diverge;
+- **ordered implementation items** — per item: id, title, affected files
+  (file:line), the finding ids it resolves, the decided approach, and what a
+  test should cover.
+
+Findings stay in the research files (the plan references them by id). Keep each
+item concrete and self-contained enough for `implement-plan` to partition by
+file ownership without re-research.
+
+## Procedure
+
+`templates/research.workflow.js` (next to this file) is the NORMATIVE
+protocol — prompts, schemas, models, monitor markers, status.sh calls, phase
+structure. Adapt it into
+`.claude/local-orchestrators/<task-name>/orch-scripts/research.workflow.js`
+(all task state lives under the task folder), deciding only:
+
+1. SUBJECT — the exact files / dirs / sources to study.
+2. PERSPECTIVES — a deterministic list that partitions the subject (per module
+   / layer / concern / source); the fan-out and prompts must be a pure function
+   of it.
+3. Task name, RESEARCH_CONTEXT, and how `<research_hints>` slot in.
+
+Run it, keeping the template's invariants:
+
+- Research fan-out is parallel with a barrier (synthesis needs all reports);
+  synthesis is ONE agent reading all findings files from disk.
+- All agents are READ-ONLY for source; findings/plan files are task state and
+  MUST be written. Empirical checks only in a throwaway dir under
+  `/tmp/claude-1000`; web research may use WebSearch / WebFetch.
+- Models: research = `opus` (effort by complexity, never above xhigh);
+  synthesizer = `fable` — the only Fable role here (the others are
+  `implement-plan`'s divider and final-gate reviewer). Brand-new subagent every
+  time; never resume / continue / SendMessage a prior one.
+- Keep the `[monitor] plan=… stage=… role=research|synth attempt=…` markers and
+  the status.sh calls exactly as templated.
+
+## Monitoring
+
+Per the `m-orchestrator` skill (scripts in `.claude/shared/monitoring/`) — if
+that skill does not exist, STOP and notify the caller instead of improvising.
+Seed one card per phase-stream (`research`, `synthesis`) before launching and
+start the daemons. When synthesis finishes, the plan card closes via the
+templated status calls; the driver closes the badge with
+`status.sh orchestrator complete done "<run summary>"`.
+
+## Completion
+
+Present the plan's item summary and the plan-file path. Build an HTML final
+report via the artifact flow: load the `artifact-design` skill FIRST (design
+guidance), write the page to
+`.claude/local-orchestrators/<task-name>/report/research-report.html`
+(named so an auto-chained `implement-plan` run's `final-report.html` cannot
+overwrite it), then publish that file with the Artifact tool. The task-folder
+file is the required local copy — the dashboard auto-links artifacts inside
+the task folder, so it must live there, not in /tmp, and stays even after
+publishing. KEEP the task state folder (including `events.jsonl`) — completed
+runs are monitor history; never delete or truncate.
+
+**Auto-chain**: only if `<user_prompt>` / `<research_hints>` asks to implement
+/ build / execute it — then invoke the `implement-plan` skill on the SAME task
+folder, handing `{ plan_file }` only (its Fable divider derives the sub-plans;
+sequential default). Otherwise hand off the plan and stop.
+
+
+ARGUMENTS: research codebase from different perspectives, also add researchers for @.claude/local-orchestrators/ folder too. research all and synthesize into plan.
+
+=== line 14 uuid=3790ad5e-c303-468f-abfa-acc2c55efcd0 ts=2026-07-25T13:53:43.663Z len=22
+[TOOL_RESULT len=9003]
+
+=== line 19 uuid=1836a870-3faf-494f-9963-c84d8baa4996 ts=2026-07-25T13:53:44.451Z len=22
+[TOOL_RESULT len=4764]
+
+=== line 23 uuid=38987e57-0b37-4127-9a09-c5daf2c6d8cd ts=2026-07-25T13:53:54.618Z len=22
+[TOOL_RESULT len=8063]
+
+=== line 25 uuid=d1f851e7-8355-4382-8500-b4c8bddfad0f ts=2026-07-25T13:53:55.091Z len=21
+[TOOL_RESULT len=769]
+
+=== line 27 uuid=e86d9e14-88cd-45df-af39-cdba2cf387bf ts=2026-07-25T13:53:55.532Z len=23
+[TOOL_RESULT len=18168]
+
+=== line 34 uuid=226830cd-c4d1-4370-853b-c95f311c7046 ts=2026-07-25T13:54:40.793Z len=22
+[TOOL_RESULT len=1492]
+
+=== line 36 uuid=64778bbc-27d7-4cc1-bd3d-404d5d99ea79 ts=2026-07-25T13:54:41.352Z len=21
+[TOOL_RESULT len=891]
+
+=== line 40 uuid=6cd08012-61e0-4662-81ed-f81dfb0a6b6b ts=2026-07-25T13:55:33.188Z len=21
+[TOOL_RESULT len=137]
+
+=== line 46 uuid=e651f0dc-82da-4f90-ab97-6ae1e0801997 ts=2026-07-25T13:56:27.185Z len=21
+[TOOL_RESULT len=296]
+
+=== line 54 uuid=7725742c-a5dc-492b-8331-74b3471aa16e ts=2026-07-25T13:56:33.955Z len=21
+[TOOL_RESULT len=789]
+
+=== line 57 uuid=f8e32e35-e4ff-42df-8ddc-ed88a48a59de ts=2026-07-25T13:56:36.957Z len=22
+[TOOL_RESULT len=1300]
+
+=== line 61 uuid=17bd8adc-3db8-4aa7-a0aa-4cd1542566e2 ts=2026-07-25T13:56:46.377Z len=22
+[TOOL_RESULT len=1506]
+
+=== line 67 uuid=2d50261c-41ae-4a0d-bc51-04fa845c9931 ts=2026-07-25T14:14:59.444Z len=9604
+<task-notification>
+<task-id>w4hiywrt6</task-id>
+<tool-use-id>toolu_01CUgTdcY4yUDvS1D3WmSHWz</tool-use-id>
+<output-file>/tmp/claude-1000/-home-laniakea-Projects-touch/292fc08c-923d-4ab4-8ff2-a9572417dbc8/tasks/w4hiywrt6.output</output-file>
+<status>completed</status>
+<summary>Dynamic workflow "Full recon of the Touch repo and its local-orchestrators history — research from 6 perspectives and synthesize one complete implementation plan" completed</summary>
+<result>{"raw_findings":[{"file":"/home/laniakea/Projects/touch/.claude/local-orchestrators/touch-full-recon/findings/research-product-attempt-1.md","count":13,"summary":"Product/docs/hygiene recon of Touch, every claim re-verified on disk (no facts inherited from the earlier aborted touch-repo-recon run). Two blockers: (1) CLAUDE.md — the file every fresh session auto-loads — states a false repo inventory, points only at the two orchestration skills, and never mentions inception.md, the 903-line normative touch-aggregator plan, the 229-line v0 touch-monitor-spawn plan, or the m-orchestrator/touch-orchestrate skills, so the next implementer re-derives a design already settled by ~1.1M tokens of research; (2) `.touch/` is not gitignored (verified via git check-ignore) in a repo with zero commits, and inception.md:115-119 says that store holds unredacted transcript content — any `git add -A` after the first code item bakes secrets into commit #1, which cannot be reverted away. Majors: no initial-commit definition and `git commit` currently fails outright (user.name/user.email unset locally and in /home/agent/.gitconfig; `git add -An` stages 45 paths; this run's events.jsonl/.watcher-state.json are mutating right now); README/CLAUDE.md promise \"pause\" that inception §4 proves cannot exist and \"restart\" is defined two incompatible ways (inception resumeFromRunId vs touch-orchestrate fresh attempt+1) while v0 implements neither; both CLAUDE.md:127-130 and inception.md:54-56 claim the task folders are foreign `omnigent` history when all three orch-config wf_dir paths are `-home-laniakea-Projects-touch` (this repo, this machine) — actively telling implementers to discount the only real data Touch must render; a user-directed normative model policy (Opus 5 @ xhigh for research/implementation roles, Fable reserved for synthesizer/main terminal/final review, divider pin an explicit open decision) exists solely inside the aborted touch-repo-recon workflow script and was dropped from this run's perspective list, so it will be lost unless the synthesizer carries it forward; and forensics on the event streams confirm touch-aggregator has only a `stage:complete state:running` line (no script anywhere emits the terminal `orchestrator complete done`) plus a fabricated `research plan failed \"loop exited -&gt; synthesis\"` nine minutes before `synthesis plan done \"plan written\"` — the repo's flagship success is on record as a failure, while touch-repo-recon (3 of 6 findings, empty plan/ and report/, hand-typed stop event) is indistinguishable from a complete run. Verified-good: all four monitoring test suites pass, CLAUDE.md's port/wf_dir precedence lines match the code exactly, and CLI 2.1.220 matches inception's pin. Five decisions are handed to the synthesizer (restart semantics, role→model table, watcher-state tracking, one README or two, branch name + commit boundary) plus hard preconditions: gitignore edit before anything creates `.touch/`, git identity set, no commit while a watcher is writing."},{"file":"/home/laniakea/Projects/touch/.claude/local-orchestrators/touch-full-recon/findings/research-monitoring-attempt-1.md","count":14,"summary":"Reviewed the whole monitoring module (status.sh, monitor_server.py, decision_watcher.py, monitor.html, monitoring.md, 4 test suites — all 4 pass) adversarially, verifying suspicions empirically in throwaway dirs under /tmp/claude-1000. 14 findings: 1 blocker, 4 major, 7 minor, 2 nits.\n\nThe blocker is a design decision Touch must make before writing any code: the server binds 0.0.0.0 with no authentication and no Origin check — I verified a cross-origin WebSocket upgrade (Origin: https://evil.example.com) is accepted and replays the full event history, and that /tasks//health answer any Host. That is tolerable for a read-only dev dashboard, but README.md requires pause/restart/terminate controls and touch-orchestrate SKILL.md §4 specifies the UI writing stop actions into .touch/control.jsonl. Bolting a write path onto this posture lets any page in the user's browser (WebSockets bypass SOP) terminate the user's agents.\n\nThree majors are architectural gaps between the module and the touch-orchestrate skill that was drafted after both existing plans, so neither plan reflects them. (a) decision_watcher.py is hard-wired to a Workflow journal.jsonl, but touch-orchestrate mandates background Agent-tool spawns for TaskStop-ability — verified those produce no journal (~/.claude/projects/*/*/subagents/ contains only workflows/), so stoppability and deterministic monitoring are currently mutually exclusive. (b) The event schema is flat (plan → agent rows) with no parent/child edges and MARKER parses only [monitor], not [touch] name=/parent=/root=, so README's n8n-like graph is not derivable from events.jsonl at all; the frontend's \"topology\" is a heuristic over splitting a label string on \" #\". (c) An unknown ?task= silently falls back to the server's default state dir — verified streaming another task's events over /ws — which the frontend's FRONTEND-5 fix only papers over cosmetically, and which becomes a wrong-target hazard once task names route control actions.\n\nThe fourth major is a live defect: decision_watcher's emit() never creates STATE_DIR (the SHELL-6 mkdir -p fix went into status.sh only), so if the backgrounded watcher wins the launch-order race against the first seeding status.sh call it dies instantly on its heartbeat with an unhandled FileNotFoundError (reproduced), leaving the run with ze
+
+=== line 74 uuid=44537613-8550-4485-9cdd-bf5e2cd0fb0c ts=2026-07-25T14:15:08.091Z len=21
+[TOOL_RESULT len=298]
+
+=== line 78 uuid=224983ef-44af-4658-a6ec-0c91559d1c68 ts=2026-07-25T14:15:13.430Z len=21
+[TOOL_RESULT len=217]
+
+=== line 81 uuid=131f36f1-c150-4a98-a5b0-e234d05b3492 ts=2026-07-25T14:15:18.264Z len=22
+[TOOL_RESULT len=2030]
+
+=== line 85 uuid=5cd49e3b-2c9d-492e-894c-0113ded3d054 ts=2026-07-25T14:15:24.494Z len=21
+[TOOL_RESULT len=214]
+
+=== line 87 uuid=3a6ac265-9a69-4d93-b996-f7d353ac949c ts=2026-07-25T14:15:27.220Z len=23
+[TOOL_RESULT len=57659]
+
+=== line 94 uuid=2b170f6f-2272-47b9-9468-6da694164e13 ts=2026-07-25T14:15:33.135Z len=21
+[TOOL_RESULT len=119]
+
+=== line 95 uuid=dedfc1c3-ce88-4942-a701-7b7abf6b3d8d ts=2026-07-25T14:15:33.117Z meta len=8835
+Approach this as the design lead at a small studio known for their versatility, giving every client a visual identity pitched at the treatment the task actually calls for. Make deliberate choices about palette, typography, and layout that are specific to this subject, and avoid templated designs.
+
+## Read the request first
+
+Calibrate treatment, not whether to design. A doc deserves the same craft as a landing page — what changes is the treatment that craft is delivered in.
+
+Many requests call for a more utilitarian treatment: a plan, a memo, a demo. Make it polished: include real typographic hierarchy, considered spacing, and a proper palette, but avoid over-designing. Most pages do not need a flashy, gigantic hero. Keep flourishes tasteful and limited.
+
+Some requests call for an editorial treatment: a landing page, a game, an app or tool they'll keep or share.
+
+When unsure: a well-composed page is never the wrong answer; an over-designed visual identity sometimes is.
+
+Fundamentals below apply to everything. The editorial process after that runs only when the read above says so.
+
+## Fundamentals for every artifact
+
+**Honor what's already there** Look for an existing design system first — CLAUDE.md, a tokens or theme file, existing component styles. When one exists, apply it; everything below fills gaps and never overrides. Precedence is always: the user's own words, then the project's existing system, then your choices.
+
+**Ground it in the subject.** If the subject isn't already clear, pin it: one concrete subject, its audience, and the page's single job. The subject's own world — its materials, instruments, vernacular — is where distinctive choices come from. Build with real content throughout, never lorem.
+
+**Pair typefaces** Typography carries the page even when the page isn't about typography. The Artifact CSP blocks font CDNs, so don't link a webfont URL and risk a silent fallback. Instead inline the face as a @font-face data URI. Keep running text near 65 characters wide; set a type scale and stay on it; give headings `text-wrap: balance`, body text room to breathe, and uppercase labels a touch of letter-spacing.
+
+**Choose neutrals, don't default to them.** A pure mid-grey reads as unconsidered; a grey with a slight hue bias toward the page's accent reads as chosen. Pure white and near-black are fine grounds when they suit the subject — the point is that the neutral was picked, not inherited.
+
+**Design both themes.** The page renders in the viewer's theme: `prefers-color-scheme` carries the OS preference, and the viewer's toggle stamps `data-theme="dark"` / `data-theme="light"` on the root element, which must override the media query in both directions. The robust pattern is token-level: define the palette as custom properties on `:root`, redefine only the tokens under `@media (prefers-color-scheme: dark)` — style components through the tokens, never directly inside the media query — then redefine them again under `:root[data-theme="dark"]` and `:root[data-theme="light"]`. Give the second theme the same care as the first — don't naively invert; keep contrast legible and the accent working on both grounds. A design that deliberately commits to one visual world (a neon arcade screen, a letterpress invitation) may stay single-theme — make it a choice, not an omission.
+
+**Let layout do the spacing.** Lay out sibling groups with flex or grid and `gap`, not per-element margins that silently collapse or double. Wide content — tables, code, diagrams — gets `overflow-x: auto` on its own container so the page body never scrolls sideways. Reach for `font-variant-numeric: tabular-nums` wherever digits line up in columns.
+
+**Avoid AI-generated design** AI-generated design currently clusters around a few looks: warm cream (#F4F1EA) with a serif display and terracotta accent; near-black with a lone acid-green or vermilion pop; broadsheet hairline rules with dense columns; a purple-to-blue gradient hero on white; Inter or Space Grotesk as the "safe" face; emoji as section markers; everything centered; `rounded-lg` everywhere; accent bar/rail on rounded cards. Where the user pins down a visual direction, follow it exactly — their words always win, including when they ask for one of these looks. Where nothing is specified, don't spend that freedom on one of these defaults.
+
+**Build cleanly** Be cognizant of overlapping elements, cascade collisions, silent font fallbacks; visual bugs hide in the gap between source and output. Close every non-void element, double-quote attributes, give keyboard focus a visible state, respect `prefers-reduced-motion`. For generative or decorative graphics, reach for Canvas or WebGL rather than hand-authoring long SVG path data.
+
+**CSS rules** When writing the CSS, watch your selector specificities. It is easy to generate classes that cancel each other out — a type-based selector like `.section` fighting an element-based one like `.cta` over padding and margins between sections. Structure the cascade so it doesn't silently undo your spacing.
+
+**Writing the copy** Words are design material, not decoration. Write from the user's side of the screen — name things by what people recognize, not how the system is built (a person manages *notifications*, not *webhook config*). Active voice; a control says exactly what happens ("Publish", then a toast that says "Published"). Errors explain what went wrong and how to fix it — no apologies, no vagueness. Specific beats clever.
+
+**Structure is information** Structural devices, numbering, eyebrows, dividers, labels, should encode something true about the content, not decorate it. Many generic designs use numbered markers (01 / 02 / 03), but that's only appropriate if the content actually is a sequence - like a real process or a typed timeline where order carries information the reader needs. Question if choices like numbered markers actually make sense before incorporating them.
+
+**When it's a UI, not a document** A dashboard or too
+
+=== line 100 uuid=1c07588b-2888-4ce3-b90b-eec517a988c8 ts=2026-07-25T14:16:06.121Z len=21
+[TOOL_RESULT len=513]
+
+=== line 103 uuid=c0f9b490-4359-490a-a821-5ba70cd6297f ts=2026-07-25T14:16:12.295Z len=22
+[TOOL_RESULT len=2060]
+
+=== line 110 uuid=38ee0932-e099-45f0-86a2-2f6b60b70f48 ts=2026-07-25T14:16:26.006Z len=22
+[TOOL_RESULT len=8258]
+
+=== line 114 uuid=d3ce53cf-a32b-4ef2-ab96-58088fcc67b9 ts=2026-07-25T14:16:55.398Z len=21
+[TOOL_RESULT len=111]
+
+=== line 115 uuid=b93df5e5-059b-472a-b415-5b7ae97de82c ts=2026-07-25T14:16:55.395Z meta len=7073
+Base directory for this skill: /tmp/claude-1000/bundled-skills/2.1.220/5acf9afa69a8c6e96f860464def7c181/dataviz
+
+# Data Visualization
+
+A chart is **read by people and executed by you**. This skill turns "make it look
+good" into a procedure with checks, so the result is right by construction rather
+than by taste.
+
+**The method here is design-system-agnostic.** Nothing in the procedure, the form
+heuristic, the six checks, or the mark specs is specific to one product. A design
+system supplies a small set of *parameters* (its ramps, a categorical order, a
+diverging pair, a status palette, a texture, its surfaces, its filter components);
+the method consumes them unchanged. A **validated default palette** is the
+reference instance, fully specified in `references/palette.md`. To target your
+brand, read that file's structure and substitute its values — touch nothing else.
+
+> The single most important habit: **the color part is computable, so compute it.**
+> Never eyeball whether a palette is colorblind-safe — run `scripts/validate_palette.js`.
+
+## The procedure — do these in order
+
+Color comes LAST. Most bad charts pick colors first.
+
+1. **Pick the form.** What is the data's job — magnitude, identity, polarity, a
+   single headline, change-over-time? The job picks the chart type, and sometimes
+   the answer is *not a chart* (a stat tile or hero number). → `references/choosing-a-form.md`
+2. **Assign color by the job it does.** Categorical (identity), sequential
+   (magnitude), diverging (polarity), or status (state) — each has one rule.
+   Assign categorical hues in fixed order, never cycled. → `references/color-formula.md`
+3. **VALIDATE the palette — run the script, don't reason about ΔE.**
+   `node scripts/validate_palette.js "<hex,hex,…>" --mode light` (relative to
+   this skill's base directory — or load it as `<script type="module">` in the
+   chart's own page, where it reads
+   `data-palette` off `<body>` and logs a `console.table` report). It returns
+   pass/fail on the lightness band, chroma floor, adjacent-pair CVD separation,
+   the normal-vision floor, and contrast. Fix anything that FAILs before continuing. Re-run for
+   `--mode dark` with that mode's surface.
+4. **Apply mark specs & spacers.** Thin marks, 4px rounded data-ends anchored to
+   the baseline, 2px lines, ≥8px markers, a 2px surface gap between fills (stacked
+   segments and adjacent bars alike) and a 2px surface ring on overlapping marks,
+   selective direct labels. → `references/marks-and-anatomy.md`
+5. **Add the hover layer — by default.** An HTML/SVG chart *is* interactive; ship
+   a crosshair+tooltip on line/area and a per-mark hover tooltip on bar/dot/cell.
+   The only form that skips it is a bare stat tile with no plot. Hit targets bigger
+   than the mark; filters in one row above the charts. → `references/interaction.md`
+6. **Final accessibility pass.** For ≥ 2 series a legend is always present and ≤ 4
+   are also direct-labeled (a single series needs no legend box — the title names
+   it), so identity is never color-alone; a table view exists; dark mode is **selected** — its own
+   steps from the same ramps, validated against the dark surface, not an automatic
+   flip; texture is available for the CVD/print/forced-colors case.
+7. **Render it and look at it.** The validator checks color, not layout — open or
+   screenshot the output and eyeball it for label collisions, geometry, and overflow
+   before calling it done.
+
+Then check the result against **`references/anti-patterns.md`** — it is the catalog
+of what goes wrong. If your chart matches an entry, it's wrong.
+
+## Non-negotiables (true in every design system)
+
+- **Assign categorical hues in fixed order, never cycled.** A 9th series is never a
+  generated hue — it folds into "Other," small multiples, or composite encoding.
+- **One axis.** Never a dual-axis chart (two y-scales). Two measures of different
+  scale → two charts, small multiples, or indexed to a common base. *(This is the
+  #1 chart mistake — see anti-patterns.)*
+- **Color follows the entity, never its rank.** A filter that changes the series
+  count must not repaint the survivors.
+- **Sequential = one hue, light→dark. Diverging = two hues + a neutral gray
+  midpoint.** Never a rainbow; never a hue at the diverging midpoint.
+- **Run the validator before shipping any categorical palette.** CVD ΔE ≥ 8 is the
+  target (OKLab ×100); 6–8 is a floor that is legal ONLY with secondary encoding. A
+  normal-vision floor below 15 is a hard FAIL — full-color readers can't tell the
+  pair apart; re-step it on the adjacent pairlist (secondary encoding does not excuse
+  this one); under `--pairs all` cut series or facet instead — see check 4. A contrast WARN
+  obligates visible labels or a table view — it is not dismissable.
+- **Thin marks; a legend always present for ≥ 2 series (none for one), with
+  selective direct labels (never a number on every point); recessive grid/axes.**
+- **Text wears text tokens, never the series color** — values, labels, and legends
+  stay in primary/secondary/muted ink; a colored mark beside them carries identity.
+- **Status colors are reserved** (good/warning/serious/critical) and never reused
+  for "series 4"; they ship with an icon + label, never color alone.
+
+## Plugging in a design system
+
+The method is invariant; only these parameters change per system. The reference
+instance — every value filled in — is `references/palette.md`.
+
+| Parameter | What the system provides |
+|---|---|
+| **Ramps** | the hue scales (named steps) the palette draws from |
+| **Categorical theme** | the fixed hue order (a named theme); default + alternates |
+| **Sequential hue** | the default single hue for magnitude |
+| **Diverging pair** | two warm/cool poles + a neutral midpoint |
+| **Status palette** | good / warning / serious / critical — steps distinct from categorical |
+| **Texture fill** | one directional hand-drawn fill, used at 45° / 135° |
+| **Surfaces** | light & dark chart-surface colors (the v
+
+=== line 123 uuid=8f0139bb-0fdb-44bc-a8b3-11b57dfa30cc ts=2026-07-25T14:17:30.091Z len=22
+[TOOL_RESULT len=1958]
+
+=== line 128 uuid=f4658bd2-38c4-4dda-bdba-458d53a76e32 ts=2026-07-25T14:17:43.811Z len=22
+[TOOL_RESULT len=5959]
+
+=== line 134 uuid=bc1b7fcd-7293-49ae-943f-808a57edc348 ts=2026-07-25T14:17:49.097Z len=22
+[TOOL_RESULT len=3745]
+
+=== line 138 uuid=845ba6a3-1516-437d-8716-6e4284aa8d9c ts=2026-07-25T14:18:12.884Z len=22
+[TOOL_RESULT len=1903]
+
+=== line 145 uuid=88f67af6-fdad-4a1e-8f1f-a3f91224d1dd ts=2026-07-25T14:18:32.859Z len=22
+[TOOL_RESULT len=1036]
+
+=== line 149 uuid=d8f16e7a-88f1-4f0f-b506-4e860c16caa7 ts=2026-07-25T14:18:41.720Z len=21
+[TOOL_RESULT len=548]
+
+=== line 156 uuid=55bd1fe1-aef7-4e3d-850b-e83d13b3a887 ts=2026-07-25T14:20:57.036Z len=21
+[TOOL_RESULT len=290]
+
+=== line 164 uuid=250333a0-a266-4e0a-8383-0a49254a2a5e ts=2026-07-25T14:21:05.535Z len=22
+[TOOL_RESULT len=2539]
+
+=== line 168 uuid=2828e54c-c006-4a4f-8583-536f03b277e4 ts=2026-07-25T14:21:24.175Z len=21
+[TOOL_RESULT len=137]
+
+=== line 173 uuid=f99a3ce1-8788-4aec-b878-211d68856f3a ts=2026-07-25T14:21:28.522Z len=21
+[TOOL_RESULT len=805]
+
+=== line 181 uuid=90cd92b1-0d70-4ecb-ad7b-b3341ba07326 ts=2026-07-25T14:25:40.204Z len=286
+does that plan contains saving claude code session into mongo db and mapping local session agents info to mongo records? also does it contains custom saving implementation, where we can create custom state into another mongodb colection and reference that to mapped session agents info?
+
+=== line 186 uuid=df60f3a4-c2c6-4c1b-a438-0b1acf76e20c ts=2026-07-25T14:25:56.380Z len=21
+[TOOL_RESULT len=740]
+
+=== line 188 uuid=ea274d50-dcb8-440c-bb5c-751a22f31f3a ts=2026-07-25T14:26:00.257Z len=22
+[TOOL_RESULT len=1799]
+
+=== line 195 uuid=761331dc-c98d-4be9-ba62-2ebd874c6a83 ts=2026-07-25T14:26:31.377Z len=72
+can we create deterministic code for saving session jsonl infos into db?
+
+=== line 204 uuid=b003ac9f-6b8d-4b36-8981-87d7df537f80 ts=2026-07-25T14:27:21.529Z len=98
+can we read session info to correctly show monitoring status about agents and geterministic loops?
+
+=== line 209 uuid=5e05ab4e-10c6-47b8-8512-29cacbab6c9c ts=2026-07-25T14:29:11.599Z len=434
+<command-message>execute-research</command-message>
+<command-name>/execute-research</command-name>
+<command-args>research current conversation history and explore how to persist current claude code session jsonl files into mongodb, also how to add agents custom state persistence and map them to real session saved copy in mongodb. also research monitoring flow, and how to correctly show subagents and loops live info.</command-args>
+
+=== line 210 uuid=e0d80098-2e9e-4fae-8b0e-43c35a115f5c ts=2026-07-25T14:29:11.599Z meta len=4618
+Base directory for this skill: /home/laniakea/Projects/touch/.claude/skills/execute-research
+
+# execute-research — deterministic research orchestrator
+
+Owns the *research → plan* half of a research→implement pair: it emits ONE
+complete plan that `implement-plan` consumes via a file hand-off and divides
+itself. Never edits source, never implements, never partitions.
+
+**Argument**: `<user_prompt>` — what to research and why (a codebase area, a
+bug class, a design question, docs/logs/URLs). Everything after an optional
+`Hints:` marker is `<research_hints>` (files to prioritize, a perspective to
+emphasize, "then implement it").
+
+## Contract (what this skill produces)
+
+A plan at `.claude/local-orchestrators/<task-name>/plan/<name>-plan.md` plus a
+structured return `{ plan_file, item_count, summary }`. The plan is ONE
+complete, self-contained document — never divided into sub-plans (that
+divide-and-conquer belongs to `implement-plan`'s Fable divider). It carries:
+
+- **global decisions** — every cross-cutting/protocol question decided ONCE so
+  downstream work cannot diverge;
+- **ordered implementation items** — per item: id, title, affected files
+  (file:line), the finding ids it resolves, the decided approach, and what a
+  test should cover.
+
+Findings stay in the research files (the plan references them by id). Keep each
+item concrete and self-contained enough for `implement-plan` to partition by
+file ownership without re-research.
+
+## Procedure
+
+`templates/research.workflow.js` (next to this file) is the NORMATIVE
+protocol — prompts, schemas, models, monitor markers, status.sh calls, phase
+structure. Adapt it into
+`.claude/local-orchestrators/<task-name>/orch-scripts/research.workflow.js`
+(all task state lives under the task folder), deciding only:
+
+1. SUBJECT — the exact files / dirs / sources to study.
+2. PERSPECTIVES — a deterministic list that partitions the subject (per module
+   / layer / concern / source); the fan-out and prompts must be a pure function
+   of it.

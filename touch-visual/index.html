@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<!--
+  touch-visual/index.html — Touch v0, read-only (R-22 skeleton half, R-32, R-55).
+
+  Three files, one page: this document is the *shape* (it holds no data and no
+  logic), `app.js` is the wire and the render, `style.css` is the paint. Every
+  element below is an empty container that `app.js` fills through text nodes;
+  nothing here is a template string that an id, a name or a detail is
+  interpolated into, because the corpus this page renders is agent-authored
+  text (GD-20's escape-first rule, kept structurally rather than by remembering
+  to call an escape function).
+
+  The token (GD-13). The three `token` spellings below hold
+  `server.inject_token`'s placeholder, replaced with the raw per-boot token at
+  serve time. (This note does not spell the placeholder a fourth time on
+  purpose: `inject_token` replaces *every* occurrence in the document, so a
+  comment that named it would ship carrying the live token — and would then
+  read as gibberish.) It appears exactly where a raw URL-safe token is already
+  syntactically valid: as a query parameter on the two sub-resources
+  (`/app.js` and `/style.css` are NOT open routes — a browser cannot put a
+  header on a `<script src>`), and as the content of the `<meta>` tag `app.js`
+  reads for its `fetch`/WS calls. Served any other way the placeholder survives
+  verbatim, and `app.js` treats the literal as "no token" rather than sending
+  it.
+
+  No control affordance renders in v0 (R-32, D13): there is no run-control
+  group in this document, `CONTROL_ROUTES` on the server side is empty, and
+  `tests/test_touch_frontend.py` asserts the absence from both sides. The
+  footer says so in the page rather than leaving a reader to infer it from a
+  missing button.
+-->
+<meta name="touch-token" content="__TOUCH_TOKEN__">
+<title>touch — sessions, runs and subagents</title>
+<link rel="stylesheet" href="/style.css?token=__TOUCH_TOKEN__">
+</head>
+<body data-view="boot">
+
+<header id="top">
+  <h1>touch</h1>
+  <span id="conn" class="conn"><span class="dot"></span><span id="connText">connecting</span></span>
+  <!-- The replay/tail boundary (R-55): `replay` until the ONE `mode` frame. -->
+  <span id="modeChip" class="chip chip-mode">replay</span>
+  <!-- GD-22: `absent`/`down` here is a label, never a degraded page. -->
+  <span id="mirrorChip" class="chip chip-prov">mirror —</span>
+  <span id="reducerChip" class="chip chip-prov">reducer —</span>
+  <span id="rollup" class="rollup" title="absolute token records, summed per ref"></span>
+</header>
+
+<!--
+  A live region (`role="status"` is an implicit `aria-live="polite"`), and the
+  second one on the page. `app.js` writes it through a text comparison and
+  leaves it untouched when the lines have not changed, exactly as it does for
+  #detailStatus below — a live region that is cleared and rebuilt on every
+  paint is re-announced on every paint.
+-->
+<p id="notice" class="notice" role="status" hidden></p>
+
+<div id="shell">
+  <aside id="sidebar" aria-label="sessions, runs and legacy task folders">
+    <section class="panel">
+      <h2>sessions <span id="sessionCount" class="count"></span></h2>
+      <ul id="sessionList" class="rows"></ul>
+    </section>
+    <section class="panel">
+      <h2>runs <span id="runCount" class="count"></span></h2>
+      <ul id="runList" class="rows"></ul>
+    </section>
+    <section class="panel">
+      <h2>task folders <span id="taskCount" class="count"></span></h2>
+      <ul id="taskList" class="rows"></ul>
+    </section>
+  </aside>
+
+  <main id="main">
+    <!--
+      The live region is the one-line #detailStatus below, NOT the panel:
+      `renderDetail` clears and rebuilds the head and the body on every paint,
+      so `aria-live` on the section would re-announce the whole panel to a
+      screen reader on every refresh. `app.js` writes the status line only when
+      its text actually changes.
+    -->
+    <section id="detail" class="panel detail">
+      <div id="detailHead" class="detail-head"></div>
+      <p id="detailStatus" class="detail-status" role="status" aria-live="polite"></p>
+      <div id="detailBody" class="detail-body"></div>
+    </section>
+
+    <section id="logPanel" class="panel">
+      <!--
+        The heading is the heading and nothing else.
+
+        The meta line and the load-older button used to live INSIDE this `<h2>`,
+        which made the heading's accessible name the whole toolbar read aloud as
+        one string ("events 0 seen · 0 shown · … load older · run:wf_a"). They
+        are a sibling toolbar row now: same panel, same order on screen, and a
+        heading that names the section.
+      -->
+      <h2>events</h2>
+      <div class="logbar">
+        <span id="logMeta" class="count"></span>
+        <!--
+          R-55's "load older": the socket's replay window is bounded, and the
+          `mode`/`anchors` frames publish what it cut off. This button is the
+          only thing that walks backwards (`/api/events?stream=&before=`), and
+          it stays hidden unless a frame said something was actually truncated
+          — a truncation marker with nothing to click is a dead end. It belongs
+          to ONE stream at a time (the selected one), and `app.js` empties the
+          history list when that stream changes rather than showing one
+          stream's history above another stream's live tail.
+        -->
+        <button id="olderBtn" class="pagebtn" type="button" hidden>load older</button>
+      </div>
+      <!--
+        TWO lists, one panel: loaded history above, the live tail below.
+
+        They are separate elements because they are separate budgets. A stream
+        is only ever declared `truncated` after the server cut a replay at its
+        window, by which time the live log has been sitting at its own cap for
+        a long time — so a history page drawn out of the live list's room could
+        never be drawn at all, and one drawn by evicting rows would delete the
+        newest records, the ones the operator is watching. `app.js` fills
+        `#older` by prepending and never trims it (it refuses to fetch past its
+        budget); `#log` is capped from the top and knows nothing about history.
+
+        Both boxes scroll, and `app.js` manages both scroll positions: the live
+        tail follows its newest row unless the operator has scrolled away from
+        the edge, and a freshly prepended page of history scrolls to the oldest
+        row that was just loaded. A live view whose live edge is off-screen by
+        default is not a live view.
+      -->
+      <ol id="older" class="log log-history" aria-label="older records, loaded on demand" hidden></ol>
+      <ol id="log" class="log" aria-label="the live tail"></ol>
+    </section>
+  </main>
+</div>
+
+<footer id="foot">
+  read-only view — v0 renders observations and the reducer's verdicts only;
+  no run-control affordance exists on this page or on the server's route table.
+</footer>
+
+<script src="/app.js?token=__TOUCH_TOKEN__" defer></script>
+</body>
+</html>

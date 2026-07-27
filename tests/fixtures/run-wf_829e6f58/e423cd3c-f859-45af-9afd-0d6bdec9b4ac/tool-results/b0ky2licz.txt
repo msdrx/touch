@@ -1,0 +1,664 @@
+   601 research-agentgraph-attempt-1.md
+   547 research-control-attempt-1.md
+   657 research-liveio-attempt-1.md
+   656 research-priorart-attempt-1.md
+   688 research-sessiondata-attempt-1.md
+   605 research-stack-attempt-1.md
+  3754 total
+===
+     1	# Research findings — perspective: PRIOR ART (`.claude/shared/monitoring/` + the three skills)
+     2	
+     3	Read the implementation, not the docs. Every claim below is anchored to a line
+     4	or to a command whose output I inspected. Empirical checks were run in
+     5	`/tmp/claude-1000/priorart/`; the live task folder was only read, never written
+     6	(except the two mandated `status.sh` calls).
+     7	
+     8	## What the module already gets RIGHT (reuse verbatim — see PRIORART-18)
+     9	
+    10	Before the defects: this is a genuinely well-built prototype. Torn-tail
+    11	tailing, checkpoint-with-identity, monotonic token deltas, message-id dedup,
+    12	session-id rotation survival, realpath containment and escape-first rendering
+    13	are all correct and tested. The findings below are about **scope**, not craft.
+    14	
+    15	---
+    16	
+    17	## PRIORART-1 — The transport is one-directional by construction; there is no place to put a control command
+    18	
+    19	**File**: `.claude/shared/monitoring/monitor_server.py:393-514` (`handle`),
+    20	`:313-327` (`drain_client`), `:358-388` (`stream_events`)
+    21	**Severity**: blocker
+    22	
+    23	**Scenario.** Touch's per-terminal page must "pause, restart, start and
+    24	terminate agent loops" (README.md:5-6) and the main page must accept keystrokes
+    25	into a live Claude Code session (README.md:3-4). Nothing in the prior art can
+    26	carry a byte from browser to backend:
+    27	
+    28	- `handle()` parses the request line at `:403-404` but **never reads the HTTP
+    29	  method** and never reads a request body (it stops at `readuntil(b"\r\n\r\n")`,
+    30	  `:397`). A `POST /control` is indistinguishable from `GET /control`.
+    31	- The websocket is server→client only: `drain_client()` (`:313-327`) exists
+    32	  purely to *discard* client frames and detect CLOSE. `parse_client_frames()`
+    33	  (`:279-310`) deliberately skips over payloads without ever decoding them —
+    34	  it does not even unmask.
+    35	- Every route that is not `/ws`, `/health`, `/tasks`, `/artifacts`, `/file`
+    36	  falls through to the catch-all that returns `monitor.html` with **200**
+    37	  (`:495-506`).
+    38	
+    39	The data model has the same shape: `events.jsonl` is append-only and every
+    40	consumer (`read_frames`, `task_status`, the browser) is a pure reader.
+    41	
+    42	**Recommendation.** Do not "add a POST endpoint" to `monitor_server.py` — its
+    43	request loop has no method dispatch, no body reader, no routing table, and no
+    44	keep-alive (every response hard-codes `Connection: close`). Keep the *reader*
+    45	half (tail + replay + WS framing) as a component, and put commands on a
+    46	separate, explicitly-designed plane. Migration consequence: the reader half is
+    47	~120 lines of `monitor_server.py` (`ws_frame`, `parse_client_frames`,
+    48	`drain_client`, `read_frames`, `stream_events`) and lifts cleanly; the
+    49	`handle()` router does not and should be replaced.
+    50	
+    51	---
+    52	
+    53	## PRIORART-2 — Zero authentication, no Origin check, no Host check, binds 0.0.0.0 — safe for a read-only dashboard, fatal the moment controls exist
+    54	
+    55	**File**: `monitor_server.py:519` (`asyncio.start_server(handle, "0.0.0.0", PORT)`),
+    56	`:412-441` (the entire `/ws` admission check)
+    57	**Severity**: blocker
+    58	
+    59	**Scenario.** The `/ws` upgrade validates exactly two things:
+    60	`sec-websocket-key` present and `sec-websocket-version in (None, "13")`. There
+    61	is no `Origin` validation, no `Host` allowlist, no token, no cookie, no
+    62	same-origin requirement. WebSocket connections are **not** subject to CORS, so
+    63	any web page the user visits in the same browser can today do
+    64	`new WebSocket("ws://<sandbox-host>:8931/ws?task=<name>")` and read the entire
+    65	event stream, and `fetch("/file?task=…&path=…")` to read every `.md`/`.html`
+    66	under a task folder (opaque-response restrictions do not apply to the WS path).
+    67	A `Host:`-header-based DNS-rebinding attack is likewise unblocked.
+    68	
+    69	Today the blast radius is "an attacker learns your agent logs". Once the same
+    70	origin accepts *pause/terminate/start* commands and terminal keystrokes, the
+    71	blast radius becomes **arbitrary command execution in the user's repo**, and it
+    72	is reachable by CSRF from any tab. The environment makes this worse, not
+    73	better: the module is documented to bind `0.0.0.0` and be published to the host
+    74	(`CLAUDE.md:112-114`).
+    75	
+    76	**Recommendation.** Decide the auth model **before** writing the first write
+    77	endpoint, not after: a per-boot random token in the URL (`/?k=<token>`) that the
+    78	page echoes into the WS query + an `Origin`/`Host` allowlist enforced in the
+    79	upgrade handler is the minimum, and is ~20 lines. Migration consequence: the
+    80	token must be printed on stdout at startup (the module already prints its state
+    81	dir at `:523-525`, so the pattern exists) and every `sbx ports --publish`
+    82	instruction in the docs must carry it.
+    83	
+    84	---
+    85	
+    86	## PRIORART-3 — The unit of aggregation is a repo-local task folder, not a Claude Code session
+    87	
+    88	**File**: `monitor_server.py:21` (`TASKS_ROOT = .../local-orchestrators`),
+    89	`:49-62` (`discover_tasks`), `:148-151` (`resolve_task_dir`)
+    90	**Severity**: major
+    91	
+    92	**Scenario.** Touch's sidebar is "a list of such terminal sessions"
+    93	(README.md:4). The prior art's list is `.claude/local-orchestrators/*/`
+    94	directories in **one repo**, discovered by `os.listdir` of a path computed
+    95	relative to the module's own location (`:21`). It never opens `~/.claude` at
+    96	all except in the watcher's journal auto-discovery.
+    97	
+    98	Ground truth for what Touch actually needs is elsewhere and is richer.
+    99	`~/.claude/sessions/622.json` contains:
+   100	
+   101	```json
+   102	{"pid":622,"sessionId":"dd469822-…","cwd":"/home/laniakea/Projects/touch",
+   103	 "startedAt":1784946693282,"procStart":"10028","version":"2.1.220",
+   104	 "peerProtocol":1,"kind":"interactive","entrypoint":"cli","name":"touch-2b",
+   105	 "nameSource":"derived","status":"busy","updatedAt":…,"statusUpdatedAt":…}
+   106	```
+   107	
+   108	and the CLI binary reads additional per-session fields `tempo`
+   109	(`active|idle|blocked`), `needs`, and `tmux` from those same files (verified:
+   110	`grep -aoP '.{0,120}peerProtocol.{0,220}' /home/agent/.local/share/claude/versions/2.1.220`).
+   111	That is exactly the sidebar model — with a live status, a name, a cwd and a pid
+   112	— and the prior art has no concept of any of it. Note also that
+   113	`local-orchestrators/*/` in this repo is **carried-over history from a
+   114	different project** (`CLAUDE.md:127-130`), so its own discovery root is not
+   115	even describing this machine's runs.
+   116	
+   117	**Recommendation.** Build session discovery as a new layer over
+   118	`~/.claude/sessions/*.json` + `~/.claude/projects/<slug>/<sessionId>.jsonl`, and
+   119	demote `events.jsonl` to a *per-run overlay* joined onto a session by id. Reuse
+   120	the shape of `tasks_payload()` (`:133-145`) — name/mtime/status/last/tokens per
+   121	entry is the right tile payload — but not its source. Migration consequence:
+   122	`?task=<name>` becomes `?session=<uuid>` (+ optionally `&run=<wfId>`), which
+   123	breaks every saved dashboard URL; do it now while there are none.
+   124	
+   125	---
+   126	
+   127	## PRIORART-4 — Only Workflow-tool agents carrying the `[monitor]` marker are visible; ordinary session subagents are invisible
+   128	
+   129	**File**: `decision_watcher.py:115-135` (`MARKER`, `STAGE_HINT`,
+   130	`ROLE_PATTERNS`), `:330-367` (`classify`), `:53-73` (journal pinning)
+   131	**Severity**: major
+   132	
+   133	**Scenario.** The watcher's only input is one `wf_*/journal.jsonl`, and an
+   134	agent only becomes anything but "unclassified" (`:664-666`) if the first line of
+   135	its transcript contains
+   136	`[monitor] plan=… role=… attempt=…`. That marker is authored by the
+   137	orchestrator workflow script — so the watcher sees **only** agents spawned by
+   138	an `execute-research`/`implement-plan` workflow.
+   139	
+   140	But a Claude Code session spawns subagents outside workflows too, and they are
+   141	recorded in a completely different place with a completely different shape.
+   142	Verified in this very session:
+   143	
+   144	```
+   145	~/.claude/projects/-home-laniakea-Projects-touch/<sessionId>/subagents/
+   146	  agent-a4e343a0f7d73268c.jsonl        (937 KB)
+   147	  agent-a4e343a0f7d73268c.meta.json -> {"agentType":"general-purpose",
+   148	      "description":"Assess control and UI feasibility",
+   149	      "toolUseId":"toolu_017UzEDnR28ARKERuMw2PGwX","spawnDepth":1,"model":"opus"}
+   150	  agent-a483cae616edffe81.jsonl        (421 KB)
+   151	```
+   152	
+   153	Two real subagents, no journal, no marker, `spawnDepth` and `toolUseId` instead
+   154	— and the workflow variant's meta is *poorer*
+   155	(`{"agentType":"workflow-subagent","spawnDepth":1,"model":"opus"}`, no
+   156	description, no toolUseId). README.md:1 says Touch visualizes "subagents in a
+   157	Claude Code session"; the prior art can see roughly half of them, and the half
+   158	it can see is the half that needed a special prompt convention.
+   159	
+   160	**Recommendation.** Make the **session transcript** the primary source: the
+   161	`Task` tool_use/tool_result pairs in `<sessionId>.jsonl` give you parent→child
+   162	edges, labels (`description`), and the `toolUseId` join key to
+   163	`subagents/agent-*.meta.json`, with zero prompt cooperation. Keep the
+   164	`[monitor]` marker as *optional enrichment* that adds plan/stage/attempt
+   165	semantics when a workflow authored it. Migration consequence: `classify()` stops
+   166	being the gate on visibility and becomes a decorator — the marker convention
+   167	survives, but nothing depends on it any more.
+   168	
+   169	---
+   170	
+   171	## PRIORART-5 — Parallel fan-out is unrepresentable: six live agents render as six identical rows and collapse into ONE graph node
+   172	
+   173	**File**: `decision_watcher.py:636-638` and `:682-688` (label construction),
+   174	`monitor.html:287-293` (`upsertAgent` role derivation), `:300-321` (`renderFlow`)
+   175	**Proof**: `.claude/local-orchestrators/touch-aggregator/events.jsonl:12,15,17,19,21,23`
+   176	**Severity**: major
+   177	
+   178	**Scenario.** The watcher builds every agent label as
+   179	`f"{info['role']} #{info['attempt']}"` — role and attempt only. It **has**
+   180	`info["stage"]` in hand (it uses it as the emitted event's stage on the very
+   181	same line) and throws it away. For a `parallel()` fan-out every sibling shares
+   182	role and attempt, so every label is identical. From the live run right now:
+   183	
+   184	```
+   185	events.jsonl:12  "stage":"sessiondata" … "agent":{"id":"a2fc883c","label":"research #1"…}
+   186	events.jsonl:15  "stage":"liveio"      … "agent":{"id":"a74f0c93","label":"research #1"…}
+   187	events.jsonl:17  "stage":"control"     … "agent":{"id":"a9eabf26","label":"research #1"…}
+   188	events.jsonl:19  "stage":"agentgraph"  … "agent":{"id":"a82d2e25","label":"research #1"…}
+   189	events.jsonl:21  "stage":"stack"       … "agent":{"id":"a79fa2f4","label":"research #1"…}
+   190	events.jsonl:23  "stage":"priorart"    … "agent":{"id":"a2ec1069","label":"research #1"…}
+   191	```
+   192	
+   193	The frontend renders `a.label || a.id` into `.alabel` (`monitor.html:278`) and
+   194	never shows the id, so the user sees six rows all reading `research #1`. Worse,
+   195	the flow strip derives its node key by `(a.label||a.id).split(" #")[0]`
+   196	(`:287`) → all six map to the single role `"research"` → `renderFlow` draws
+   197	**one** node. The orchestrator log is equally degenerate: six consecutive
+   198	identical `"spawn research research attempt 1"` lines (`events.jsonl:11,14,16,
+   199	18,20,22`).
+   200	
+   201	This is precisely the case Touch's n8n-style graph exists to show.
+   202	
+   203	**Recommendation.** Two-line fix in the watcher: label as
+   204	`f"{info['stage']}:{info['role']} #{info['attempt']}"`, and add explicit
+   205	`agent.stage` / `agent.role` / `agent.attempt` fields to the `agent` sub-object
+   206	rather than making the UI reverse-engineer them out of a display string.
+   207	Migration consequence: purely additive to the event schema — already-recorded
+   208	history (which the ops rules forbid deleting, `CLAUDE.md:118-121`) still renders,
+   209	just with the old collapsed labels.
+   210	
+   211	---
+   212	
+   213	## PRIORART-6 — The event schema is a flat state overlay; it cannot express a graph, and it has no version field
+   214	
+   215	**File**: `.claude/shared/monitoring/monitoring.md:25-46` (normative schema),
+   216	`monitor.html:203-219` (`planEl` — one card per `plan` id)
+   217	**Severity**: major
+   218	
+   219	**Scenario.** The whole model is `(plan, stage, state)` → one card per `plan`,
+   220	one chip per `stage`, plus a per-agent row list. There are **no node ids, no
+   221	edges, no parent/child, no ordering other than first-seen**. `renderFlow`
+   222	(`monitor.html:300-321`) fakes a topology by iterating `p.roles` in insertion
+   223	order and drawing `→` between consecutive entries — that is a rendering
+   224	accident, not data. An n8n-like UML graph needs an actual node/edge structure
+   225	(fan-out, barrier/join, retry back-edge, gate branch), and none of it can be
+   226	derived from this stream.
+   227	
+   228	Separately: events carry **no schema version**. Backward compatibility so far
+   229	has been achieved by defaulting missing keys (`ev.tokens.cached || 0`,
+   230	`monitor.html:371`; the one-time backfill at `decision_watcher.py:538-561`).
+   231	Any *structural* change is unabsorbable, and the operating rule is that
+   232	completed runs' `events.jsonl` are permanent history that replays on connect
+   233	(`monitoring.md:183-187`).
+   234	
+   235	**Recommendation.** (a) Derive the graph topology from a source that actually
+   236	has one — the workflow script's phase/`agent()` structure plus the journal's
+   237	spawn order and the session transcript's Task parent/child edges — and use
+   238	events only to *paint state onto* nodes. (b) Add `"v": 2` to every emitted
+   239	event now, and have readers treat a missing `v` as 1. Migration consequence:
+   240	one field in `emit()` (`decision_watcher.py:138-152`) and in `status.sh:34-40`;
+   241	doing it later means either a lossy history migration or a permanent branch in
+   242	the reader.
+   243	
+   244	---
+   245	
+   246	## PRIORART-7 — The watcher fully re-parses every running agent's entire transcript once per second (O(size) per tick, and size grows all run)
+   247	
+   248	**File**: `decision_watcher.py:154-197` (`agent_tokens`), `:86-100`
+   249	(`agent_paths`), called from `:764-795` (every ~1s) and `:678`, `:705`
+   250	**Severity**: major
+   251	
+   252	**Scenario.** `agent_tokens(aid)` globs
+   253	`~/.claude/projects/*/*/subagents/workflows/<wf>/agent-<id>.jsonl` (a filesystem
+   254	glob, per agent, per tick) and then reads and `json.loads`-es **every line of
+   255	every copy** to rebuild `usage_by_msg` from scratch. It is called for every
+   256	still-running agent on every 1-second poll, and again on every result.
+   257	
+   258	Measured on the live run (`/tmp/claude-1000/priorart/bench.py`):
+   259	
+   260	```
+   261	6 transcripts, 2.26 MB, 456 usage rows, one full pass = 16 ms   [6 minutes in]
+   262	```
+   263	
+   264	16 ms/s is nothing — but the cost is linear in transcript size, which grows for
+   265	the whole run. Extrapolating from the measured rate (~0.38 MB per agent per
+   266	6 min), a 2-hour six-agent implement loop reaches ~45 MB, i.e. **~300+ ms of
+   267	JSON parsing every single second**, on the *same single thread* that tails the
+   268	journal, classifies spawns, and runs the completion debounce. Touch wants to
+   269	watch whole sessions, whose transcripts are larger still (this session's
+   270	`<sessionId>.jsonl` is 777 KB after ~30 minutes).
+   271	
+   272	**Recommendation.** Apply the module's own checkpoint pattern one level down:
+   273	store `{path: (byte_offset, partial_usage_totals)}` per transcript in
+   274	`.watcher-state.json` and only parse the appended tail — `read_new_lines()`
+   275	(`:470-491`) is already exactly the right primitive and is already tested.
+   276	Message-id dedup still works because you keep the accumulated id set (or, since
+   277	ids are per-message and monotonic, just the running sums plus a small
+   278	recently-seen id window). Migration consequence: `.watcher-state.json` gains a
+   279	key; `load_state()`'s journal-identity reset (`:494-512`) already handles a
+   280	stale/incompatible checkpoint by discarding it.
+   281	
+   282	---
+   283	
+   284	## PRIORART-8 — Full replay from byte 0 on every connect, one WS frame per event, no log trimming — and the UI offers a 500 ms full-resync button
+   285	
+   286	**File**: `monitor_server.py:358-378` (`stream_events`, `offset = 0`, one
+   287	`writer.write(ws_frame(line))` per line), `monitor.html:699-708` (clear + rebuild
+   288	on every `onopen`), `:390-391` (unbounded `log.insertBefore` + `render()` on
+   289	every event), `:172-181` and `:714-732` (`rateSel` / `forceResync`)
+   290	**Severity**: major
+   291	
+   292	**Scenario.** There is no resume cursor: every `/ws` connection replays the file
+   293	from offset 0 as individual text frames, and the page throws away all DOM and
+   294	accumulators and rebuilds. Then:
+   295	
+   296	- `render()` runs on **every** event and re-`appendChild`s **every** card
+   297	  (`monitor.html:220-238`) — O(events × plans) DOM moves during replay.
+   298	- log `<li>`s are never trimmed (`:390`), so replay materialises one DOM node
+   299	  per historical event.
+   300	- the refresh dropdown offers **500 ms**, and `forceResync()` implements it by
+   301	  *closing and reopening the socket* (`:717-724`) — i.e. a full history replay
+   302	  twice per second.
+   303	
+   304	Measured on the live run: **375 events / 150 871 bytes in ~6 minutes** for a
+   305	single six-agent research phase — ~1.5 MB/h, dominated by the quiet 1 Hz token
+   306	ticks (`decision_watcher.py:781-791`). One hour of history on the 500 ms setting
+   307	is ≈3 MB/s of replay per open tab, and ≈21 600 log DOM nodes. Touch's terminal
+   308	view (which must replay a session transcript, already 777 KB at 30 min) makes
+   309	this the dominant cost of the whole product.
+   310	
+   311	**Recommendation.** Add `?from=<byte-offset>` (or `?after=<seq>`) to `/ws`,
+   312	batch replay into multi-line frames, emit an explicit `{"kind":"replay-end"}`
+   313	marker, cap the client log with a ring buffer, and coalesce `render()` into a
+   314	`requestAnimationFrame`. Migration consequence: the client must persist a
+   315	cursor and keep its accumulators across reconnects — which means giving up the
+   316	"full replay is safe against double counting" invariant that the current design
+   317	leans on (`monitoring.md:172-175`); the replacement invariant is
+   318	"events are ordered and idempotent by seq", which is stronger and is what a
+   319	control plane needs anyway.
+   320	
+   321	---
+   322	
+   323	## PRIORART-9 — The watcher is structurally blind to control actions, so a paused/stopped run will be reported as a completed one
+   324	
+   325	**File**: `decision_watcher.py:110-113` (`QUIET_SECS`), `:450-467`
+   326	(`run_outcome`), `:731-762` (the completion sweep)
+   327	**Proof**: `grep -aoP 'resumeFromRunId.{0,400}' /home/agent/.local/share/claude/versions/2.1.220`
+   328	**Severity**: major
+   329	
+   330	**Scenario.** Verified against the CLI binary: a Workflow run is a background
+   331	task in a task registry — the binary contains
+   332	`i.type==="local_workflow" && i.status==="running" && i.workflowRunId===e.resumeFromRunId`
+   333	and the user-facing string *"Workflow ${runId} is still running (task ${id}).
+   334	Stop it first with TaskStop({taskId: …}) before resuming."* And, decisively:
+   335	
+   336	> *"It may have been stopped (via the UI or TaskStop — **these leave no
+   337	> transcript marker**), or it may have been running when the previous Claude
+   338	> Code process exited."*
+   339	
+   340	So a stopped workflow and a stalled workflow produce **byte-identical**
+   341	journals. The watcher's only terminal signal is the 60-second quiet debounce
+   342	(`:738-760`), which will confidently emit
+   343	`orchestrator complete done|failed … "(watcher-detected end)"` and settle every
+   344	open plan card by `state["decisive"]` (`:748-753`) — i.e. it will fabricate a
+   345	verdict for a run the user *paused on purpose*, and the fabricated verdict will
+   346	usually be `failed` (because `decisive` is unset for a plan mid-loop, `:751`).
+   347	
+   348	**Recommendation.** Once Touch owns the control actions it must record them
+   349	itself (an append-only control log: `paused|resumed|stopped|started`, with
+   350	runId, taskId and actor) and *join* that onto the derived state, with the
+   351	control log winning. Concretely: gate the quiet-debounce close behind "no
+   352	pause/stop recorded for this run". Migration consequence: `run_outcome()` grows
+   353	an input it currently cannot see; the 60 s heuristic stays only as the fallback
+   354	for runs Touch did not initiate.
+   355	
+   356	---
+   357	
+   358	## PRIORART-10 — "Restart" is `resumeFromRunId` cache replay into a NEW journal, and the checkpoint model turns that into duplicated history
+   359	
+   360	**File**: `decision_watcher.py:494-512` (`load_state` journal-identity reset),
+   361	`:72-74` (`JOURNAL`/`WF_NAME` fixed at import)
+   362	**Proof**: binary text *"To resume after a pause, kill, or script edit, relaunch
+   363	with Workflow({scriptPath, resumeFromRunId}) — the longest unchanged prefix of
+   364	agent() calls returns cached results instantly; the first edited/new call and
+   365	everything after it runs live."*
+   366	**Severity**: major
+   367	
+   368	**Scenario.** The harness's restart primitive replays cached `agent()` results
+   369	into a **new run**, with a new runId and (per `nEp()` in the binary, which
+   370	symlinks a canonical `workflowRunId` path at the `transcriptDir`) a new
+   371	transcript dir and journal. `load_state()` sees `state["journal"] != JOURNAL`
+   372	and — correctly, for its own assumptions — resets `offset=0` and discards all
+   373	derived state. The watcher then re-emits the *entire* spawn/result/token history
+   374	of the resumed run into the **same** `events.jsonl`, on top of the original
+   375	run's events. The dashboard replays both: duplicate agent rows (different agent
+   376	ids), duplicated token deltas on the card counters (`monitor.html:370-372`
+   377	accumulates unconditionally), and a card whose badge flips through two runs'
+   378	worth of transitions.
+   379	
+   380	Note the harness *does* hand you the dedup key and the prior art ignores it —
+   381	every journal `started` line carries a content hash:
+   382	
+   383	```
+   384	{"type":"started","key":"v2:c13a866b3bd1e7129557fc996a218a044553d0115ac84c64a6184c41e4042639","agentId":"a2fc883c96ff7b837"}
+   385	```
+   386	
+   387	(verified: `~/.claude/projects/…/subagents/workflows/wf_829e6f58-b2f/journal.jsonl`).
+   388	`key` is stable across a cached resume; `agentId` is not. The watcher reads only
+   389	`type` and `agentId` (`:586-587`).
+   390	
+   391	**Recommendation.** Key run state by `(runId, key)` rather than by journal path
+   392	+ agentId: a `started` whose `key` was already emitted is a cache replay and
+   393	must update the existing node, not create a second one. Migration consequence:
+   394	`.watcher-state.json` gains a `keys` map and `load_state`'s hard reset becomes a
+   395	merge; this is the single change that makes the README's "restart" control
+   396	truthful rather than duplicative.
+   397	
+   398	---
+   399	
+   400	## PRIORART-11 — One watcher process per run, with all run identity in module-level globals — the module cannot grow to N sessions
+   401	
+   402	**File**: `decision_watcher.py:19-113` (module-level `ROOT`, `STATE_DIR`,
+   403	`WF_DIR`, `JOURNAL`, `WF_NAME`, `EVENTS`, `STATE`, `MAX_*`, `QUIET_SECS` all
+   404	resolved at import), `:523-796` (`main()` = one infinite loop over one journal);
+   405	`monitoring.md:143-145` ("`decision_watcher.py` still watches one task per
+   406	process — start one per concurrent orchestration")
+   407	**Severity**: major
+   408	
+   409	**Scenario.** Everything that identifies *which run* is being watched is a
+   410	module global computed at import time. Two runs = two OS processes, started by
+   411	hand, with no supervisor, no restart, no health check, and nothing that notices
+   412	a new run appearing. Touch's sidebar implies N sessions × M runs, discovered
+   413	and attached **live**. The server half already solved the multiplicity problem
+   414	(one `monitor_server.py` serves every task, rescanning per request,
+   415	`:49-62`); the watcher half did not.
+   416	
+   417	**Recommendation.** Refactor the watcher into a `RunWatcher` class holding what
+   418	are now globals, plus a supervisor loop that reconciles a watch-set against
+   419	disk (new `wf_*/journal.jsonl` appears → attach; journal quiet + run closed →
+   420	detach). Migration consequence: this is a real refactor of ~800 lines, not a
+   421	wrapper — every helper (`agent_paths`, `agent_tokens`, `prompt_text`,
+   422	`first_ts`, `last_ts`, `emit`, `classify`) closes over `WF_DIR`/`WF_NAME`/
+   423	`EVENTS` today. Budget it explicitly; the alternative (spawning a process per
+   424	run from Touch) inherits a process-lifecycle problem the prior art never had to
+   425	solve.
+   426	
+   427	---
+   428	
+   429	## PRIORART-12 — An unknown `?task=` silently streams a different task's data
+   430	
+   431	**File**: `monitor_server.py:148-151` (`discover_tasks().get(task, STATE_DIR)`),
+   432	used by `/ws` (`:446`), `/artifacts` (`:457`) and `/file` (`:467`)
+   433	**Severity**: minor
+   434	
+   435	**Scenario.** A renamed, deleted, or mistyped task name does not 404 — it
+   436	resolves to the process's startup `STATE_DIR` and the client gets a **200/101
+   437	with someone else's events, artifacts and files**. The frontend has a
+   438	band-aid for the display side (`selectTask` injects a disabled
+   439	`"(unknown task)"` option, `monitor.html:598-613`) but the socket is still
+   440	streaming the wrong run underneath it: URL, breadcrumb and dropdown say one
+   441	thing, the cards show another.
+   442	
+   443	For Touch, where the identifier is a session and the page carries controls,
+   444	"silently act on a different target" graduates from confusing to dangerous.
+   445	
+   446	**Recommendation.** Return 404 for an unresolvable id on `/ws`, `/artifacts` and
+   447	`/file`; keep the default-selection behaviour only for the *absent* parameter.
+   448	Migration consequence: `monitor.html`'s `route()` must handle a failed WS
+   449	upgrade as "unknown session" rather than as a retry loop (`:707-708` currently
+   450	reconnects forever).
+   451	
+   452	---
+   453	
+   454	## PRIORART-13 — Catch-all route returns the dashboard with 200 for every unknown path; HTTP method is never parsed
+   455	
+   456	**File**: `monitor_server.py:403-404` (request line parsed for path only),
+   457	`:495-506` (catch-all)
+   458	**Severity**: minor
+   459	
+   460	**Scenario.** `GET /favicon.ico`, `GET /api/anything`, `DELETE /file` all return
+   461	the full `monitor.html` body with `200 OK` and `Content-Type: text/html`. There
+   462	is no 404, no 405, no method dispatch, and no `HEAD` handling. A browser
+   463	requesting `/favicon.ico` downloads the whole dashboard.
+   464	
+   465	**Recommendation.** Introduce a real `(method, route) → handler` table with a
+   466	default 404 before adding any endpoint. Migration consequence: trivial now
+   467	(five routes); painful once Touch has thirty.
+   468	
+   469	---
+   470	
+   471	## PRIORART-14 — `events.jsonl` is multi-writer and its safety rests on an undocumented "one `write()` per record" invariant
+   472	
+   473	**File**: `status.sh:28-45` (`python3 … >> "$STATE_DIR/events.jsonl"`),
+   474	`decision_watcher.py:150-151` (`open(EVENTS,"a")` + one `f.write(line+"\n")`)
+   475	**Proof**: `/tmp/claude-1000/priorart/interleave.py` and `interleave2.py`
+   476	**Severity**: minor (today) / blocker (if Touch reuses the file as a transport)
+   477	
+   478	**Scenario.** N concurrent agents' `status.sh` calls plus the watcher all append
+   479	to the same file with no locking. I tested this directly with 4 concurrent
+   480	writers × 200 records of ~6 KB each:
+   481	
+   482	```
+   483	one write() per record   -> lines=800  corrupted(mixed-writer)=0
+   484	record split over 2 write() calls -> lines=800  corrupted(mixed-writer)=206
+   485	```
+   486	
+   487	So the current design is genuinely safe — Linux serialises a single `O_APPEND`
+   488	`write()` on a regular file — but *only* because every writer today happens to
+   489	emit a whole record in exactly one syscall (`print()` on a buffered stdout that
+   490	is flushed once at process exit; a single `f.write()`). Nothing documents this,
+   491	nothing tests it, and it is exactly the invariant a new writer breaks: a Node.js
+   492	`stream.write()` of a large payload, an incrementally-built line, or anything
+   493	streaming terminal output in chunks produces the 206/800 case.
+   494	
+   495	**Recommendation.** Write the invariant down next to the schema in
+   496	`monitoring.md`, and add it to `test_shell.py` as a concurrency test (it is a
+   497	20-line stdlib test). For Touch: do **not** carry terminal I/O over a shared
+   498	append-only file — use one file per writer, or a socket. Migration consequence:
+   499	none for the existing event stream; it decides Touch's terminal transport.
+   500	
+   501	---
+   502	
+   503	## PRIORART-15 — Reserved magic names live in the same flat namespace as user data
+   504	
+   505	**File**: `monitoring.md:41-42`; enforced by string comparison in three places:
+   506	`monitor_server.py:100` and `:112-113`, `monitor.html:352` and `:360-361`,
+   507	`decision_watcher.py:139` (`plan="orchestrator"` default)
+   508	**Severity**: minor
+   509	
+   510	**Scenario.** `plan == "orchestrator"` means "the wide card pinned last";
+   511	`stage in ("plan","complete")` means "this event sets the badge instead of
+   512	adding a chip"; `stage == "tokens"` means "this is a counter delta, not a log
+   513	line". These are ordinary values of ordinary data fields. The plan ids in
+   514	`implement-plan` are generated at runtime by a Fable divider from the plan text
+   515	(`implement.workflow.js:219-228`, `id: "sp-<slug>"`), and stage names are
+   516	free-form; a sub-plan or stage that happens to be called `plan`, `complete`,
+   517	`tokens` or `orchestrator` silently hijacks the rendering, and nothing in
+   518	`status.sh` or the watcher rejects it.
+   519	
+   520	**Recommendation.** Move the control semantics into a dedicated field (`kind:
+   521	"badge" | "chip" | "tokens" | "log"`) and let `plan`/`stage` be pure data.
+   522	Migration consequence: readers must accept both forms for one release — which
+   523	is exactly what the `v` field from PRIORART-6 is for.
+   524	
+   525	---
+   526	
+   527	## PRIORART-16 — `classify()` sleeps inside the single poll thread; a fan-out can stall the whole watcher for seconds
+   528	
+   529	**File**: `decision_watcher.py:330-367` (up to `retries=3` × `time.sleep(0.5)`),
+   530	called synchronously at `:595` and `:670`
+   531	**Severity**: minor
+   532	
+   533	**Scenario.** When an agent's transcript has not flushed yet, `classify()`
+   534	blocks the poll loop for up to 1.5 s. The code comments acknowledge this and
+   535	call it a deliberate bound (WATCHER-5, `:331-337`) — but the bound is per agent,
+   536	and a `parallel()` fan-out delivers all `started` entries in one journal chunk:
+   537	the six spawns in this run are consumed in a single iteration, so the worst case
+   538	is ~9 s during which journal tailing, live token ticks and the completion
+   539	debounce are all frozen.
+   540	
+   541	Acceptable for a dashboard that lags a second. Not acceptable for Touch, whose
+   542	same-loop responsibilities would include a live terminal.
+   543	
+   544	**Recommendation.** Make classification deferred: on `started`, register the
+   545	agent as pending and return immediately; retry classification on subsequent
+   546	ticks (the code already re-attempts on the `result` entry, `:670`, so the
+   547	fallback path exists). Migration consequence: `state["agents"]` gains a
+   548	"pending" state; the `stale`-close guard at `:610-616` must tolerate a sibling
+   549	with no classification yet.
+   550	
+   551	---
+   552	
+   553	## PRIORART-17 — The network layer has no tests at all, and the frontend is tested by grepping its own source
+   554	
+   555	**File**: `tests/test_server.py:36-271` (covers only `read_frames`,
+   556	`resolve_port`, `task_status`, `ws_frame`, `parse_client_frames`,
+   557	`task_artifacts`, `safe_artifact_path`), `tests/test_frontend.py:1-9` and
+   558	`:30-134`
+   559	**Severity**: minor
+   560	
+   561	**Scenario.** `handle()`, `stream_events()`, `drain_client()` and `main()` — the
+   562	entire request lifecycle, the upgrade handshake, the CSP/`nosniff` headers, the
+   563	404 path, shutdown — are never executed by any test; `test_server.py` explicitly
+   564	notes "No server is started (main() is never called)" (`:19-21`). And
+   565	`test_frontend.py` asserts on **`monitor.html` source text** ("the fixed pattern
+   566	present, the vulnerable one absent", `CLAUDE.md:97-99`) because no JS runtime is
+   567	available under the zero-dependency rule. That yields assertions like
+   568	`assert "innerHTML" not in flow` and
+   569	`assert 'rel = "noopener"' in arts` — which are refactor-fragile and prove
+   570	nothing about behaviour.
+   571	
+   572	The approach is *right for its size*. It does not survive Touch, which has a
+   573	terminal emulator, a graph renderer, routing and a control plane in the browser.
+   574	
+   575	**Recommendation.** Decide the testing posture as a global decision in the plan,
+   576	not per sub-plan. Two coherent options: (a) stay zero-dependency and add
+   577	**stdlib socket-level integration tests** (`asyncio.open_connection` against a
+   578	real `start_server` on port 0 — ~50 lines, no third-party anything) — this
+   579	closes the network gap without breaking the constraint, and should be done
+   580	regardless; (b) admit a JS test runner for the frontend, which breaks the
+   581	zero-dependency property the module was explicitly built around
+   582	(`monitoring.md:11`) and the sandbox's default-deny egress makes installing it a
+   583	user action. Migration consequence: (a) is additive; (b) changes the project's
+   584	identity and must be decided once, up front.
+   585	
+   586	---
+   587	
+   588	## PRIORART-18 — What to reuse verbatim, and what to generalize (consolidated recommendation)
+   589	
+   590	**File**: various (below)
+   591	**Severity**: nit (it is a decision record, not a defect)
+   592	
+   593	**Reuse verbatim — these are correct, tested, and hard to re-derive:**
+   594	
+   595	- **Torn-tail tailing + truncation sentinel**: `monitor_server.py:330-356`
+   596	  (`read_frames`, `-1` on `size < offset`) and `decision_watcher.py:470-491`
+   597	  (`read_new_lines`, `errors="replace"` on a torn multibyte tail). Tested by
+   598	  `test_server.py:36-85`. Every log-tailing feature in Touch needs exactly this.
+   599	- **Checkpoint with identity + atomic replace**: `decision_watcher.py:494-520`
+   600	  (`load_state` refuses a checkpoint whose `journal` differs; `save_state` writes
+   601	  `.tmp` then `os.replace`).
+   602	- **Monotonic token deltas + message-id dedup**: `:154-197`, `:705-722`
+   603	  (`max(0, …)` clamps and never-lowered baselines). This is the reason restarts
+   604	  and 1 Hz ticks do not double-count, and it is subtle.
+   605	- **Session-id rotation survival**: `agent_paths()` (`:86-100`) unions every
+   606	  session dir holding the same `wf_*` name. `/clear` and `/compact` relocate
+   607	  transcripts mid-run; Touch will hit this on day one.
+   608	- **Path containment**: `safe_artifact_path()` (`monitor_server.py:199-212`) —
+   609	  extension whitelist + `realpath` + `startswith(base + os.sep)`. The
+   610	  `+ os.sep` correctly excludes both the base itself and sibling-prefix dirs.
+   611	  Tested (`test_server.py:235-262`). Keep it exactly as written.
+   612	- **Escape-first rendering discipline**: `monitor.html:463-543` (`esc` before
+   613	  every inline transform, href protocol whitelist) and the `NODE_STATES`
+   614	  whitelist pattern at `:299-311`. Agent-written text is untrusted input; this
+   615	  is the right default and the tests enforce it.
+   616	- **`status.sh` as the agent trace point** (49 lines, `set -u`, `mkdir -p` up
+   617	  front, non-zero exit on a failed append). Take it as-is — but note it forks a
+   618	  Python interpreter per event (~30-50 ms), so it must never become a hot path.
+   619	- **The `?task=` URL-as-state routing model** (`monitor.html:196-200, 562-591`):
+   620	  query string is the single source of truth, back/forward re-route, refresh and
+   621	  share both work. Generalize the identifier, keep the pattern.
+   622	
+   623	**Generalize:** `tasks_payload()`/`task_status()` (the tile payload shape is
+   624	right, the source must become sessions — PRIORART-3); the `agent` sub-object
+   625	(add `stage`/`role`/`attempt` — PRIORART-5); the watcher's globals (→ per-run
+   626	objects — PRIORART-11); `agent_tokens` (→ incremental — PRIORART-7).
+   627	
+   628	**Replace:** `handle()`'s router (PRIORART-1, -13); the auth posture, i.e. add
+   629	one (PRIORART-2); the full-replay-only WS protocol (PRIORART-8); the flat event
+   630	schema as the graph source (PRIORART-6); the marker-gated visibility model
+   631	(PRIORART-4).
+   632	
+   633	---
+   634	
+   635	## Summary of severities
+   636	
+   637	| id | severity | one line |
+   638	|----|----------|----------|
+   639	| PRIORART-1 | blocker | transport is read-only by construction; no place for a command |
+   640	| PRIORART-2 | blocker | no auth / Origin / Host check on a 0.0.0.0 bind — fatal once controls exist |
+   641	| PRIORART-3 | major | unit is a repo task folder, not a Claude Code session |
+   642	| PRIORART-4 | major | only marker-carrying Workflow agents are visible; session subagents are not |
+   643	| PRIORART-5 | major | parallel fan-out renders as identical rows and one collapsed graph node |
+   644	| PRIORART-6 | major | flat schema cannot express a DAG; no version field |
+   645	| PRIORART-7 | major | full transcript re-parse every second, O(size) and growing |
+   646	| PRIORART-8 | major | replay-from-zero on every connect, no cursor, unbounded log DOM |
+   647	| PRIORART-9 | major | stops leave no journal marker → paused runs reported as completed |
+   648	| PRIORART-10 | major | `resumeFromRunId` cache replay duplicates the whole history |
+   649	| PRIORART-11 | major | one watcher process per run, run identity in module globals |
+   650	| PRIORART-12 | minor | unknown `?task=` silently streams a different task |
+   651	| PRIORART-13 | minor | catch-all 200 for every unknown path; method never parsed |
+   652	| PRIORART-14 | minor | multi-writer append safety rests on an undocumented invariant |
+   653	| PRIORART-15 | minor | reserved magic names share the namespace with user data |
+   654	| PRIORART-16 | minor | `classify()` sleeps in the poll thread; fan-out stalls it |
+   655	| PRIORART-17 | minor | zero tests on the network layer; frontend tested by grep |
+   656	| PRIORART-18 | nit | reuse/generalize/replace decision record |

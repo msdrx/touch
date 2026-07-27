@@ -78,6 +78,61 @@ here). The decision watcher reads attempt caps from `orch-config.json`
 publish your MAX_ATTEMPTS there if different. Start the daemons; dashboard at
 `http://<host>:8931/`.
 
+## Cycle reports and the user-decision protocol
+
+Every implement→test→critique cycle ends with a visual report:
+`report/cycles/<sp-id>-cycle-<N>.html` plus a run overview at
+`report/cycles/index.html` — the monitor's artifacts strip lists `report/`
+automatically. Each page renders the cycle as a simple UML-style flow
+(implementer → test gate → critique → verdict; color always paired with glyph +
+word) and MUST answer WHY — on failure *and* on success: the gate/critique
+verdict summaries plus the full findings files embedded as the evidence.
+
+The reports are rendered DETERMINISTICALLY (never by an LLM scribe) by
+`templates/cycle_reporter.py`: adapt it into the task's `orch-scripts/` and
+launch it as a third daemon next to the watcher — it tails the run's
+`journal.jsonl`, correlates each structured result to (plan, stage, attempt)
+via the `[monitor]` markers in the agent transcripts (zero LLM cooperation,
+same technique as decision_watcher), reads the caps and `extra_attempts` from
+`orch-config.json`, renders the pages, and emits the loop-terminal
+`plan done|failed` status event when a loop closes on a REAL verdict at the
+published cap. The workflow script cannot do any of this itself: the runtime
+has no filesystem or Node API (`import()` throws; the template's try/catch'd
+`runStatus`/`closeRun` helpers silently no-op — they document the contract the
+daemon fulfills).
+
+```bash
+TASK=$PWD/.claude/local-orchestrators/<task-name>
+ORCH_STATE_DIR="$TASK" nohup python3 "$TASK/orch-scripts/cycle_reporter.py" "<wf_dir>" \
+  >> "$TASK/cycle_reporter.log" 2>&1 &
+echo $! > "$TASK/cycle-reporter.pid"
+```
+
+`cycle_reporter.py --once <wf_dir> --no-status` renders a finished/foreign run's
+pages without emitting status events (backfill mode).
+
+Loop-failure policy (enforced by the template; acted on by you, the driver):
+
+- A loop that exhausts its attempt cap closes `failed` and the NEXT loop starts
+  — a red loop never silently blocks the rest of the run.
+- The FINAL attempt's critique classifies the failure (CRIT_SCHEMA):
+  - `depth: 'needs-own-flow'` — the remaining work is too deep for one more
+    attempt (architectural rework, cross-sub-plan redesign, missing research).
+    Do NOT stop the run and do NOT grant extra attempts: after the run, route
+    that sub-plan to its own execute-research → implement-plan pass.
+  - `critical_defect: true` — a defect fundamental enough that its `next_steps`
+    need a user decision before the remaining loops are worth running. A serial
+    run stops right there (`status: 'stopped-critical'`); send a
+    PushNotification naming the decision, surface `decision_needed` and the
+    critique findings, and WAIT for the user.
+- After the LAST loop's last cycle report, a run with red loops skips the final
+  gate and returns `status: 'awaiting-user'`: STOP and ask the user whether
+  each red `retryable` loop gets another attempt — granted by
+  relaunching/resuming with `args.extra_attempts = { 'sp-<slug>': N }`, which
+  raises only that loop's cap — or whether the red close is accepted.
+- `status: 'complete'` (all loops green, aggregate sweep green): nothing to ask;
+  do the Completion section.
+
 ## Completion
 
 Emit `status.sh <plan> plan done "..."` for any still-open card, then

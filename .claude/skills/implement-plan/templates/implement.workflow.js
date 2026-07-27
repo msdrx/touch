@@ -28,6 +28,9 @@ const TASK = REPO + '/.claude/local-orchestrators/TASK_NAME'
 const FINDINGS = TASK + '/findings'
 const S = REPO + '/.claude/shared/monitoring/status.sh'
 const MAX_ATTEMPTS = 4
+// Final aggregate gate: gate -> fixer -> re-gate. Published to orch-config.json
+// so the watcher's decision text quotes this cap, not its own default (R-09).
+const FINALGATE_ATTEMPTS = 2
 
 // Hand-off is { plan_file?, parallel? } — ONE complete plan, never sub-plans;
 // the Divide phase below derives them. Default strategy is SEQUENTIAL.
@@ -35,12 +38,133 @@ const ARGS = typeof args === 'string' ? JSON.parse(args) : (args || {})
 const PLAN_FILE = ARGS.plan_file || TASK + '/plan/TASK_NAME-plan.md'
 const SUBPLANS_FILE = TASK + '/plan/TASK_NAME-subplans.md'
 const PARALLEL_MODE = ARGS.parallel === true   // never shadow the parallel() global
+// User-granted attempt extensions after an 'awaiting-user' close: relaunch /
+// resume with args.extra_attempts = { 'sp-<slug>': N } to raise ONLY that
+// loop's cap to MAX_ATTEMPTS + N. This is how "add another attempt to that
+// loop" is granted — never by editing MAX_ATTEMPTS for everyone.
+const EXTRA_ATTEMPTS = ARGS.extra_attempts || {}
 
 // Quote every path interpolation so a REPO/TASK/S path with a space cannot split
 // the env assignment / arg list. Keep agent-filled <summary> text single-line,
 // no double quotes (see m-orchestrator SKILL.md).
 const statusCmd = (plan, stage, state, msg) =>
   `ORCH_STATE_DIR="${TASK}" bash "${S}" "${plan}" ${stage} ${state} "${msg}"`
+
+// SCRIPT-emitted status event (R-09). Terminal plan/run events must not depend on
+// an agent remembering its LAST-run line: the script emits them at a fixed
+// control-flow point, so they are as deterministic as the journal itself.
+// Best-effort by contract — a monitoring write never fails the workflow.
+// NEVER route this through a shell: `plan` is the DIVIDER AGENT's `sp.id` and
+// `msg` can carry an agent-authored file path, so a shell string would let a
+// stray `"` mangle the event — or execute arbitrary commands in the driver
+// process. argv + env go straight to status.sh; `statusCmd` stays for PROMPT
+// TEXT only (where the agent runs it itself, in its own shell).
+// status.sh is a best-effort writer that reports problems on STDERR (an
+// out-of-enum state, an unwritable state dir) and still exits 0, so stderr is
+// captured and logged — a discarded warning is the one way this call can fail
+// silently. spawnSync (not execFileSync) because only spawnSync hands back the
+// child's stderr on SUCCESS.
+let statusProbed = false
+// `extraEnv` (optional) carries additive status.sh env keys — e.g.
+// ORCH_PLANS_TOTAL, the declared plan-card total — as env, never argv, so the
+// argv contract above stays five fixed strings.
+const runStatus = async (plan, stage, state, msg, extraEnv) => {
+  try {
+    const cp = await import('node:child_process')
+    if (!statusProbed) { statusProbed = true; log('status emitter ready (node:child_process)') }
+    const r = cp.spawnSync('bash', [S, String(plan), String(stage), String(state), String(msg)],
+      { env: { ...process.env, ORCH_STATE_DIR: TASK, ...(extraEnv || {}) }, encoding: 'utf8' })
+    if (r.error) throw r.error
+    const warn = (r.stderr || '').trim()
+    if (warn) log(`status.sh warned on ${plan}/${stage}/${state}: ${warn.split('\n')[0]}`)
+  } catch (e) {
+    log(`status event ${plan}/${stage}/${state} not written: ${e}`)
+  }
+}
+
+// Publish this script's caps into orch-config.json (R-09) so the watcher narrates
+// the SAME numbers the loops actually enforce instead of its built-in defaults.
+// The watcher re-reads this file while running (it starts BEFORE this script
+// does), so writing it here is not too late.
+// `strategy` is descriptive only. It must NEVER be published as the literal
+// `serial`: that exact value is the legacy opt-in that re-enables the watcher's
+// RETIRED sequenced plan-close heuristic (GD-10), which is what fabricated
+// `plan failed "loop exited -> ..."` badges — a new run must not resurrect it, so
+// the sequential case publishes `sequential`. What actually prevents the
+// fabricated badge is the watcher's `close_state_for()` predicate plus the
+// script-emitted terminal `plan done` events below (R-58), not this key.
+// Merge, never overwrite: the driver may have written wf_dir/port here already.
+const publishConfig = async () => {
+  try {
+    const fs = await import('node:fs')
+    const path = TASK + '/orch-config.json'
+    fs.mkdirSync(TASK, { recursive: true })
+    let cfg = {}
+    try { cfg = JSON.parse(fs.readFileSync(path, 'utf8')) } catch (e) { cfg = {} }
+    fs.writeFileSync(path, JSON.stringify({
+      ...cfg,
+      max_plan_attempts: MAX_ATTEMPTS,
+      max_finalgate_attempts: FINALGATE_ATTEMPTS,
+      strategy: PARALLEL_MODE ? 'parallel' : 'sequential',
+    }, null, 2) + '\n')
+  } catch (e) {
+    log(`could not publish orch-config.json: ${e}`)
+  }
+}
+
+// R-40 run-close protocol: when the run ends, close the Orchestrator badge with
+// the run's REAL state — `done` only when everything is green, `failed` on every
+// throw path — because monitor_server's home grid treats the reserved
+// `orchestrator` card as authoritative and a hardcoded `done` would paint a
+// thrown run green. This event is ALSO what authorizes the watcher to stop:
+// decision_watcher.py exits only on a `w:"agent"` `orchestrator complete
+// done|failed` line appended after it started (its own inferred close never stops
+// it, because a harness stall is indistinguishable from a finished run). So this
+// call is the mechanism; the pid signal below is only a fast path.
+//
+// Daemon shutdown: kill by RECORDED PID only, and only after VERIFYING that the
+// pid really is a decision_watcher — a stale pid file is the same wrong-target
+// hazard as a name-matched kill (pids get reused, and other tasks' watchers are
+// live processes; GD-12's invariant, GD-1's gate). The launch side must record
+// the pid — `python3 decision_watcher.py & echo $! > "$TASK/watcher.pid"`, the
+// form monitoring.md's run block documents; without that line this block is a
+// no-op and the watcher's own self-exit does the work. monitor_server.py is
+// deliberately NOT touched: ONE server serves ALL tasks, so a per-task epilogue
+// SIGTERMing it would take the dashboard down for every other live run.
+//
+// The signal is sent IMMEDIATELY after the terminal event, which is only safe
+// because decision_watcher.py handles SIGTERM by DRAINING (one more tail+emit
+// pass, then a short quiet window) instead of dying where it stands. Its poll
+// interval is ~1 s and the last agent's journal `result` lands ~0.2 s before
+// this call, so an unhandled signal lost that agent's stage chip, its decision
+// line and — token deltas being wire-only — its ENTIRE usage from the run
+// totals, permanently, in most runs (M-2). Do not "simplify" the watcher's
+// stop handler away on the grounds that this epilogue already closed the run.
+const closeRun = async (state, summary) => {
+  await runStatus('orchestrator', 'complete', state, summary)
+  try {
+    const fs = await import('node:fs')
+    const p = TASK + '/watcher.pid'
+    if (!fs.existsSync(p)) { return }
+    const pid = parseInt(fs.readFileSync(p, 'utf8').trim(), 10)
+    if (!pid) { return }
+    let cmdline = null
+    try { cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8') } catch (e) { cmdline = null }
+    if (cmdline === null) {
+      log(`watcher.pid ${pid} not verifiable (no /proc entry) — leaving it to the watcher's self-exit`)
+      return
+    }
+    if (!cmdline.includes('decision_watcher')) {
+      log(`stale watcher.pid ${pid} (not a decision_watcher) — not signalling`)
+      try { fs.unlinkSync(p) } catch (e) { /* leave it */ }
+      return
+    }
+    try { process.kill(pid, 'SIGTERM'); log(`stopped watcher.pid (${pid})`) } catch (e) { /* already gone */ }
+    try { fs.unlinkSync(p) } catch (e) { /* leave it */ }
+  } catch (e) {
+    log(`daemon shutdown skipped: ${e}`)
+  }
+}
 
 const IMPL_SCHEMA = {
   type: 'object', required: ['done', 'files_changed', 'summary'],
@@ -54,10 +178,24 @@ const GATE_SCHEMA = {
   properties: { passed: { type: 'boolean' }, summary: { type: 'string' },
                 findings_file: { type: 'string' } },
 }
+// The critique also CLASSIFIES a rejection, because the loop-failure policy
+// branches on it at the final attempt:
+//   depth 'in-scope'       -> the red loop stays failed, the next loop starts,
+//                             and the user is asked at run end about one more
+//                             attempt (args.extra_attempts).
+//   depth 'needs-own-flow' -> too deep for another attempt: the run does NOT
+//                             stop; the close-out routes this sub-plan to its
+//                             own execute-research -> implement-plan pass.
+//   critical_defect true   -> the defect defines the next steps and needs the
+//                             user: a serial run stops HERE (before the next
+//                             loop) and the driver notifies the user.
 const CRIT_SCHEMA = {
-  type: 'object', required: ['approved', 'summary', 'findings_file'],
+  type: 'object', required: ['approved', 'summary', 'findings_file', 'depth', 'critical_defect'],
   properties: { approved: { type: 'boolean' }, summary: { type: 'string' },
-                findings_file: { type: 'string' } },
+                findings_file: { type: 'string' },
+                depth: { type: 'string', enum: ['in-scope', 'needs-own-flow'] },
+                critical_defect: { type: 'boolean' },
+                next_steps: { type: 'string' } },
 }
 
 const CONTEXT = `
@@ -154,20 +292,52 @@ shared decisions, tautological/fragile tests, needless rewrites beyond scope, st
 Write your FULL review to ${file} (mkdir -p ${FINDINGS} first): each finding with
 severity (blocker/major/minor/nit), file:line, and a concrete fix suggestion.
 approved=true ONLY with zero blocker/major findings.
+Classify your verdict too (structured fields):
+- depth: 'in-scope' if everything you found is fixable by ONE more gated attempt
+  on these files; 'needs-own-flow' if the right fix demands its own
+  research->plan->implement pass (architectural rework, redesign crossing
+  sub-plan boundaries, missing upstream research). An approved review is 'in-scope'.
+- critical_defect: true ONLY for a defect so fundamental that implementing the
+  REMAINING sub-plans before a human decides would waste or corrupt work; then
+  next_steps MUST name the decision the user has to make (one short sentence).
 LAST run: ${statusCmd(sp.id, 'critique', 'done', `attempt ${attempt}: <approved/rejected + finding count>`)} (state failed if rejected)
-Return structured output only: approved, summary (short), findings_file (${file}).
+Return structured output only: approved, summary (short), findings_file (${file}), depth, critical_defect, next_steps.
 `
+
+// ---- Per-cycle visual report: ONE artifact after EVERY impl->test->critique cycle ----
+// Rendered DETERMINISTICALLY by the cycle reporter daemon (templates/
+// cycle_reporter.py next to this file, adapted into the task's orch-scripts/
+// and launched by the driver alongside decision_watcher — see SKILL.md). The
+// workflow runtime has NO filesystem or Node API access (import() throws in
+// scripts; the try/catch'd runStatus/closeRun helpers above are the documented
+// contract but silently no-op at runtime), so the script CANNOT write pages
+// itself, and an LLM scribe would be non-deterministic. The daemon tails the
+// run journal, correlates every structured result to (plan, stage, attempt)
+// via the [monitor] markers — zero LLM cooperation — renders
+// report/cycles/<sp>-cycle-<N>.html + index.html with the WHY (verdict
+// summaries + findings files embedded as evidence, on failure AND success),
+// and emits the loop-terminal `plan done|failed` status event when it sees a
+// loop close (a REAL verdict at the published cap — not the retired GD-10
+// phase-advance inference). The script carries only the CLASSIFICATION
+// contract, which the daemon and the driver both read:
+//   retryable      -> stays failed; next loop starts; user asked at run end.
+//   needs-own-flow -> never stops the run; gets its own research pass later.
+//   critical-stop  -> a serial run stops before the next loop starts.
+const classify = (success, crit) => success ? 'green'
+  : (crit && crit.critical_defect) ? 'critical-stop'
+    : (crit && crit.depth === 'needs-own-flow') ? 'needs-own-flow' : 'retryable'
 
 // One full impl->test->critique loop for a single sub-plan. Fresh implementer
 // every attempt; the handoff is ONLY through findings files + the current tree.
 const runLoop = async (sp) => {
+  const cap = MAX_ATTEMPTS + (EXTRA_ATTEMPTS[sp.id] || 0)
   let attempt = 0
   let openFindings = []   // findings-file paths from every failed gate so far
   let impl = null, gate = null, crit = null
   let success = false
-  while (!success && attempt < MAX_ATTEMPTS) {
+  while (!success && attempt < cap) {
     attempt++
-    log(`${sp.id} attempt ${attempt}/${MAX_ATTEMPTS}${openFindings.length ? ` (open findings: ${openFindings.length})` : ''}`)
+    log(`${sp.id} attempt ${attempt}/${cap}${openFindings.length ? ` (open findings: ${openFindings.length})` : ''}`)
 
     impl = await agent(implPrompt(sp, attempt, openFindings), {
       model: 'opus', effort: attempt >= 3 ? 'xhigh' : 'high',
@@ -204,7 +374,19 @@ const runLoop = async (sp) => {
       openFindings = [...new Set(openFindings)]
     }
   }
-  return { id: sp.id, success, attempts: attempt,
+  const classification = classify(success, crit)
+  // Terminal plan event for this sub-plan's loop, script-emitted at the loop
+  // exit (R-09) — the one place that deterministically knows whether the loop
+  // closed green. `failed` here is a REAL verdict: the gates rejected every
+  // attempt, unlike the retired heuristic that inferred failure from a phase
+  // advance (R-58).
+  if (success) {
+    await runStatus(sp.id, 'plan', 'done', `green on attempt ${attempt}/${cap}`)
+  } else {
+    await runStatus(sp.id, 'plan', 'failed', `attempts exhausted ${attempt}/${cap} (${classification})`)
+  }
+  return { id: sp.id, success, attempts: attempt, classification,
+           next_steps: (!success && crit && crit.next_steps) || null,
            files_changed: (impl && impl.files_changed) || [],
            gate, critique: crit, open_findings: success ? [] : openFindings }
 }
@@ -253,35 +435,57 @@ Return structured output only: subplans (id/title/files/finding_ids each), subpl
 `
 
 phase('Divide')
+await publishConfig()
 const divide = await agent(dividePrompt(), {
   model: 'fable', effort: 'high',
   label: 'divide', phase: 'Divide', schema: DIVIDE_SCHEMA,
 })
 if (!divide || !Array.isArray(divide.subplans) || !divide.subplans.length) {
+  await runStatus('divide', 'plan', 'failed', 'divider produced no sub-plans')
+  await closeRun('failed', 'run failed: no partition to implement')
   throw new Error('divider produced no sub-plans — cannot implement')
 }
 // Deterministic isolation guard: one file, exactly one owner.
 const owner = {}
 for (const sp of divide.subplans) for (const f of sp.files) {
-  if (owner[f]) throw new Error(`partition not isolated: ${f} owned by ${owner[f]} and ${sp.id}`)
+  if (owner[f]) {
+    await runStatus('divide', 'plan', 'failed', `partition not isolated: ${f} has two owners`)
+    await closeRun('failed', 'run failed: partition not isolated')
+    throw new Error(`partition not isolated: ${f} owned by ${owner[f]} and ${sp.id}`)
+  }
   owner[f] = sp.id
 }
 const SUBPLANS = divide.subplans
+// The Divide phase is a single agent with no gate verdict — its card closes here
+// (R-09), not by inference from the first sub-plan spawning (R-58). The close
+// also DECLARES this run's full plan-card count — divide + N sub-plans +
+// finalgate — so dashboards can show progress over all plans, including the
+// ones not started yet, instead of only the cards already in the stream.
+// Readers fold plans_total as a monotonic max, so a resume re-declaring the
+// same number is idempotent.
+await runStatus('divide', 'plan', 'done', `${SUBPLANS.length} sub-plans`,
+  { ORCH_PLANS_TOTAL: String(SUBPLANS.length + 2) })
 
 // ---- Drive the sub-plans: SERIAL by default, PARALLEL only when instructed ----
 log(`implementing ${SUBPLANS.length} feature-sub-plans (${PARALLEL_MODE ? 'PARALLEL' : 'SERIAL'}): ${SUBPLANS.map(s => s.id).join(', ')}`)
 let results
+let criticalStop = null   // the red loop whose final critique flagged critical_defect
 if (PARALLEL_MODE) {
   // Opt-in only, and only for disjoint file ownership. Barrier: the final gate
-  // sweeps the MERGED change-set.
+  // sweeps the MERGED change-set. (The critical-stop early exit is a serial-mode
+  // behavior — concurrent loops cannot be stopped mid-flight cleanly.)
   results = (await parallel(SUBPLANS.map(sp => () => runLoop(sp)))).filter(Boolean)
+  criticalStop = results.find(r => r.classification === 'critical-stop') || null
 } else {
-  // Default: one sub-plan at a time, each to green before the next starts.
+  // Default: one sub-plan at a time. A red loop STAYS failed and the next loop
+  // starts — except a critical-stop, which ends the run before the next loop
+  // so the user decides while the remaining token budget is still unspent.
   results = []
   for (const sp of SUBPLANS) {
     const r = await runLoop(sp)
     results.push(r)
-    if (!r.success) log(`${sp.id} did not close green after ${r.attempts} attempts`)
+    if (!r.success) log(`${sp.id} did not close green after ${r.attempts} attempts (${r.classification})`)
+    if (r.classification === 'critical-stop') { criticalStop = r; break }
   }
 }
 
@@ -327,7 +531,7 @@ Return structured output only: done, files_changed, summary.
 let finalGate = { passed: false, summary: 'final gate not run' }
 if (!failed.length) {
   phase('FinalGate')
-  for (let fga = 1; fga <= 2; fga++) {
+  for (let fga = 1; fga <= FINALGATE_ATTEMPTS; fga++) {
     const file = finalGateFindings(fga)
     // The final gate reviewer is the one implement-side agent that runs fable.
     finalGate = await agent(finalGatePrompt(fga, file), {
@@ -339,7 +543,7 @@ if (!failed.length) {
                     findings_file: await writePlaceholderFindings(file, `final gate crashed (attempt ${fga}); rerun full sweep`) }
     }
     if (finalGate.passed) break
-    if (fga < 2) {
+    if (fga < FINALGATE_ATTEMPTS) {
       const fixer = await agent(finalFixPrompt(fga, finalGate.findings_file), {
         model: 'opus', effort: 'xhigh',
         label: `finalgate:fix:${fga}`, phase: 'FinalGate', schema: IMPL_SCHEMA,
@@ -347,10 +551,48 @@ if (!failed.length) {
       if (!fixer || !fixer.done) break
     }
   }
+  // Terminal plan event for the aggregate sweep (R-09).
+  if (finalGate.passed) {
+    await runStatus('finalgate', 'plan', 'done', 'aggregate sweep green')
+  } else {
+    await runStatus('finalgate', 'plan', 'failed',
+      `sweep not green after ${FINALGATE_ATTEMPTS} attempts`)
+  }
 } else {
   log(`skipping final gate: ${failed.map(f => f.id).join(', ')} did not close green`)
 }
 
-return { subplans: results, final_gate: finalGate,
-         all_green: !failed.length && finalGate.passed,
+// Close the Orchestrator badge and stop this task's daemons (R-09/R-40): the
+// watcher cannot see run completion in the journal. The driver may repeat the
+// `orchestrator complete done` call after the workflow returns — it is an
+// idempotent backstop, and the badge is last-event-wins either way.
+const allGreen = !failed.length && !!finalGate.passed
+// Run disposition for the DRIVER (the assistant that launched this workflow):
+//   complete         -> publish the final report; nothing to ask.
+//   stopped-critical -> PushNotification the user with decision_needed and WAIT;
+//                       remaining loops were deliberately not started.
+//   awaiting-user    -> every loop ran and the last cycle report is written:
+//                       STOP and ask the user whether each red 'retryable' loop
+//                       gets another attempt (relaunch/resume with
+//                       args.extra_attempts = { 'sp-<slug>': N }) or the red
+//                       close is accepted; 'needs-own-flow' loops get their own
+//                       execute-research -> implement-plan pass, not attempts.
+const status = criticalStop ? 'stopped-critical'
+  : failed.length ? 'awaiting-user' : 'complete'
+await closeRun(allGreen ? 'done' : 'failed',
+  criticalStop
+    ? `stopped at ${criticalStop.id}: critical defect needs a user decision`
+    : allGreen
+      ? `all ${results.length} sub-plans green; aggregate sweep green`
+      : `${failed.length} of ${results.length} sub-plans not green; sweep ${finalGate.passed ? 'green' : 'not green'}; awaiting user decision`)
+
+return { status, subplans: results, final_gate: finalGate,
+         all_green: allGreen,
+         decision_needed: criticalStop
+           ? (criticalStop.next_steps || 'see the final critique findings file')
+           : null,
+         not_started: criticalStop ? SUBPLANS.slice(results.length).map(s => s.id) : [],
+         failed_loops: failed.map(f => ({ id: f.id, classification: f.classification,
+                                          attempts: f.attempts, next_steps: f.next_steps,
+                                          open_findings: f.open_findings })),
          files_changed: allFiles }
