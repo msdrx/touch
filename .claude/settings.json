@@ -2,5 +2,18 @@
   "statusLine": {
     "type": "command",
     "command": ".claude/statusline.sh"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Glob|Grep|Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/.claude/hooks/orch_scope_guard.py"
+          }
+        ]
+      }
+    ]
   }
 }

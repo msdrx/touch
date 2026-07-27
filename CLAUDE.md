@@ -216,6 +216,14 @@ python3 -c "import aggregator.mirror as m; raise SystemExit(m.main(['--check']))
   is positional (`legacy:<task>#<line>`), so it *depends* on that rule. There is
   no cleanup step. Wiping is only for a task you are actively re-running (stop
   daemons, delete `events.jsonl` + `.watcher-state.json`, re-seed, restart).
+- **Run scope guard**: while `.claude/local-orchestrators/ACTIVE` lists task
+  names (one per line), the PreToolUse hook `.claude/hooks/orch_scope_guard.py`
+  (registered in `.claude/settings.json`) denies SUBAGENT access to every
+  unlisted task's folder except its `plan/` (the authority ladder lives
+  there). The main terminal agent is never restricted; no ACTIVE file means
+  the guard is inert. Drivers append their task's line at daemon start and
+  delete only that line at close-out (m-orchestrator §4); a stale line only
+  over-restricts — delete it.
 - Every `status.sh` call must set `ORCH_STATE_DIR`; a forgotten one dribbles a
   stray `events.jsonl` into the shared module dir.
 - Never `pkill -f` these scripts from a command line that spells the script name

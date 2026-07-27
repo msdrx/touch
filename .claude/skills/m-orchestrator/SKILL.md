@@ -73,11 +73,30 @@ proxies.
      ```
      ORCH_STATE_DIR=<task-dir> bash <shared>/status.sh orchestrator complete done "<run summary>"
      ```
-4. Start the daemons (background; restart-safe):
+4. Start the daemons (background; restart-safe) and declare the run scope by
+   appending this task's line to the `ACTIVE` sentinel (one task name per
+   line — concurrent runs coexist; never truncate with `>`):
    ```bash
    ORCH_STATE_DIR="$TASK" python3 <shared>/monitor_server.py &   # port: argv > $ORCH_PORT > config > 8931
    ORCH_STATE_DIR="$TASK" python3 <shared>/decision_watcher.py & # wf_dir: argv > $ORCH_WF_DIR > config > newest wf_* journal
+   f=.claude/local-orchestrators/ACTIVE
+   grep -qxF "<task-name>" "$f" 2>/dev/null || printf '%s\n' "<task-name>" >> "$f"
    ```
+   The sentinel arms the run-scope guard (`.claude/hooks/orch_scope_guard.py`,
+   a PreToolUse hook registered in `.claude/settings.json`): while it lists
+   tasks, loop SUBAGENTS can touch only the listed tasks' folders under
+   `local-orchestrators/` — other tasks keep their `plan/` readable (authority
+   ladder) and have everything else denied. The main terminal agent is never
+   restricted. At run end, next to the `orchestrator complete` close-out,
+   remove ONLY this task's line (another run may still be active):
+   ```bash
+   f=.claude/local-orchestrators/ACTIVE
+   grep -vxF "<task-name>" "$f" > "$f.tmp" 2>/dev/null
+   if [ -s "$f.tmp" ]; then mv "$f.tmp" "$f"; else rm -f "$f" "$f.tmp"; fi
+   ```
+   A crashed run leaves its line behind, which only over-restricts subagents
+   (every deny reason lists the active tasks) — delete the stale line (or the
+   whole file if nothing is running) and move on.
 5. Dashboard: `http://<host>:8931/`. If the sandbox's ports aren't reachable
    from the host, run `monitor_server.py` on the host — if the state folder is
    on a shared mount it tails the same `events.jsonl`. `ORCH_STATE_DIR` is

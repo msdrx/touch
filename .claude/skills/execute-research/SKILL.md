@@ -64,7 +64,8 @@ Run it, keeping the template's invariants:
 Per the `m-orchestrator` skill (scripts in `.claude/shared/monitoring/`) — if
 that skill does not exist, STOP and notify the caller instead of improvising.
 Seed one card per phase-stream (`research`, `synthesis`) before launching and
-start the daemons. When synthesis finishes, the plan card closes via the
+start the daemons, writing the `ACTIVE` run-scope sentinel (m-orchestrator §4)
+so research subagents stay out of other tasks' state. When synthesis finishes, the plan card closes via the
 templated status calls; the driver closes the badge with
 `status.sh orchestrator complete done "<run summary>"`.
 
@@ -79,7 +80,10 @@ overwrite it), then publish that file with the Artifact tool. The task-folder
 file is the required local copy — the dashboard auto-links artifacts inside
 the task folder, so it must live there, not in /tmp, and stays even after
 publishing. KEEP the task state folder (including `events.jsonl`) — completed
-runs are monitor history; never delete or truncate.
+runs are monitor history; never delete or truncate. Clear the run scope by
+removing this task's line from `.claude/local-orchestrators/ACTIVE`
+(m-orchestrator §4) — unless auto-chaining, where `implement-plan` keeps the
+same task's line armed.
 
 **Auto-chain**: only if `<user_prompt>` / `<research_hints>` asks to implement
 / build / execute it — then invoke the `implement-plan` skill on the SAME task

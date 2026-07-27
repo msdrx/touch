@@ -75,8 +75,9 @@ returns). Roles: `synth` (the divider), `impl`, `test`, `critique`
 (`gate:run`/`gate:fix` are reserved for standalone gate→fixer loops, not used
 here). The decision watcher reads attempt caps from `orch-config.json`
 (`max_plan_attempts` 4 / `max_gate_attempts` 3 / `max_e2e_attempts` 3) —
-publish your MAX_ATTEMPTS there if different. Start the daemons; dashboard at
-`http://<host>:8931/`.
+publish your MAX_ATTEMPTS there if different. Start the daemons and write the
+`ACTIVE` run-scope sentinel (m-orchestrator §4) so loop subagents stay out of
+other tasks' state; dashboard at `http://<host>:8931/`.
 
 ## Cycle reports and the user-decision protocol
 
@@ -136,7 +137,9 @@ Loop-failure policy (enforced by the template; acted on by you, the driver):
 ## Completion
 
 Emit `status.sh <plan> plan done "..."` for any still-open card, then
-`status.sh orchestrator complete done "<run summary>"`. Build the HTML final
+`status.sh orchestrator complete done "<run summary>"`, and clear the run
+scope by removing this task's line from `.claude/local-orchestrators/ACTIVE`
+(m-orchestrator §4 — never `rm` the whole file; another run may be active). Build the HTML final
 report via the artifact flow: load the `artifact-design` skill FIRST (design
 guidance), write the page to
 `.claude/local-orchestrators/<task-name>/report/final-report.html`, then
