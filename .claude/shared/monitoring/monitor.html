@@ -17,46 +17,22 @@
   body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); }
   header { display:flex; align-items:center; gap:12px; padding:16px 24px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; flex-wrap:wrap; }
   header h1 { font-size:16px; margin:0; font-weight:600; }
-  body.task header h1, body.stats header h1 { cursor:pointer; }
-  body.task header h1:hover, body.stats header h1:hover { text-decoration:underline; text-underline-offset:3px; }
-  /* lives in the timeplan card's title row, after the right-aligned range */
-  #statsLink { color:var(--info); font-size:12px; font-weight:500; text-transform:none; letter-spacing:0; text-decoration:none; white-space:nowrap; }
-  #statsLink:hover, #statsLink:focus-visible { text-decoration:underline; text-underline-offset:3px; }
+  body.task header h1 { cursor:pointer; }
+  body.task header h1:hover { text-decoration:underline; text-underline-offset:3px; }
   #crumb { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:40vw; }
-  #taskSel, #rateSel, #zoomSel { background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 8px; font:12px/1.4 inherit; max-width:280px; }
-  #rate, #zoom { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
-  /* Task-view zoom: CSS zoom (not transform) reflows real layout, so every
-     part — header, cards, dials, log — grows in the same proportion and the
-     grid re-wraps to fit. 100% is the untouched default; home never zooms. */
-  body.task, body.stats { zoom: var(--zoom, 1); }
+  #taskSel, #rateSel { background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 8px; font:12px/1.4 inherit; max-width:280px; }
+  #rate { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
   #conn { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
   #conn .dot { width:8px; height:8px; border-radius:50%; background:var(--failed); }
   #conn.on .dot { background: var(--done); }
   #overall { margin-left:auto; color:var(--muted); font-size:12px; }
-  body.home #taskSel, body.home #conn, body.home #rate, body.home #zoom, body.home #overall { display:none; }
+  body.home #taskSel, body.home #conn, body.home #rate, body.home #overall { display:none; }
   /* auto-fill (not auto-fit): with few plans on a wide screen, empty tracks
      keep each card at a readable ~380-520px instead of stretching it edge to edge */
   main#cards { padding: 20px 24px; display:grid; gap:16px; grid-template-columns:repeat(auto-fill, minmax(min(380px, 100%), 1fr)); max-width:1600px; margin:0 auto; align-items:start; }
   body.home main#cards { display:none; }
   main#home { padding: 24px; display:grid; gap:14px; grid-template-columns:repeat(auto-fill, minmax(min(280px, 100%), 1fr)); max-width:1200px; margin:0 auto; }
-  body.task main#home, body.stats main#home { display:none; }
-  body.stats main#cards { display:none; }
-  /* Statistics view: large-figure stat tiles over the same accumulators the
-     cards build — one hero figure, then a KPI grid. Values wear ink tokens;
-     the only color is a status dot beside the plans-green/red labels. */
-  main#statsView { display:none; padding:20px 24px; gap:14px; grid-template-columns:repeat(auto-fill, minmax(min(210px, 100%), 1fr)); max-width:1600px; margin:0 auto; }
-  body.stats main#statsView { display:grid; }
-  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px; display:flex; flex-direction:column; gap:4px; min-width:0; }
-  .stat .sl { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); display:flex; align-items:center; gap:7px; }
-  .stat .sl .dot { width:8px; height:8px; border-radius:50%; flex:none; }
-  .stat .sl .dot.done { background:var(--done); }
-  .stat .sl .dot.failed { background:var(--failed); }
-  .stat .sl .dot.running { background:var(--running); animation:chipblink 1.1s ease-in-out infinite; }
-  .stat .sl .dot.queued { background:var(--queued); }
-  .stat .sv { font-size:34px; font-weight:650; line-height:1.15; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .stat .ss { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .stat.hero { grid-column:1 / -1; }
-  .stat.hero .sv { font-size:56px; }
+  body.task main#home { display:none; }
   .tile { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; cursor:pointer; display:flex; flex-direction:column; gap:8px; transition:border-color .15s, transform .15s; }
   .tile:hover, .tile:focus-visible { border-color:var(--info); transform:translateY(-2px); }
   .tile:focus-visible { outline:2px solid var(--info); outline-offset:2px; }
@@ -67,12 +43,6 @@
   .card.wide { grid-column: 1 / -1; }
   .card h2 { font-size:13px; font-weight:600; margin:0; padding:12px 14px; display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; border-bottom:1px solid var(--line); min-width:0; }
   .card h2 .title { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  /* Orchestrator log disclosure: the header always stays visible; only the log
-     list folds. Collapsed by default, arrow rotates when open. */
-  .card h2 .foldbtn { background:none; border:none; color:var(--muted); font-size:10px; line-height:1; cursor:pointer; padding:2px 4px; flex:none; transition:transform .15s; }
-  .card h2 .foldbtn:hover, .card h2 .foldbtn:focus-visible { color:var(--text); }
-  .card:not(.logfold) h2 .foldbtn { transform:rotate(90deg); }
-  .card.logfold .log { display:none; }
   .badge { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:2px 9px; border-radius:99px; text-transform:uppercase; letter-spacing:.04em; color:#0f1117; background:var(--queued); }
   .badge.running { background:var(--running); animation:runpulse 1.1s ease-in-out infinite; }
   .badge.running::before { content:""; width:7px; height:7px; border-radius:50%; border:2px solid #0f1117; border-top-color:transparent; animation:spin .7s linear infinite; }
@@ -80,7 +50,6 @@
   .badge.failed { background:var(--failed); }
   .badge.info { background:var(--info); }
   .tok { margin-left:auto; color:var(--muted); font-weight:500; font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis; }
-  .span { color:var(--muted); font-weight:500; font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .tok.bump { animation:tokbump .5s ease-out; }
   @keyframes tokbump { 0% { color:var(--running); transform:scale(1.12); } 100% { color:var(--muted); transform:scale(1); } }
   @keyframes spin { to { transform:rotate(360deg); } }
@@ -127,38 +96,16 @@
   .log li.info .s { color:var(--info); }
   .log li .d { overflow-wrap:anywhere; }
   .empty { color:var(--muted); padding:14px; font-size:12px; grid-column:1/-1; }
-  /* Artifacts card (task view only): a full-width card inside the cards grid,
-     placed after the wide orchestrator card and before the loop cards. The
-     card pins at most two rows — the final HTML report and the plan document;
-     every other file lives behind the "all files" popup so the working set
-     never crowds the task view. */
-  #artifacts { display:none; grid-column:1 / -1; background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
-  body.task #artifacts.has { display:block; }
-  #artifacts .ahdr { display:flex; align-items:center; gap:4px 10px; flex-wrap:wrap; padding:10px 14px; color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
-  .allfiles { margin-left:auto; display:inline-flex; align-items:center; gap:6px; font-family:inherit; font-size:11px; font-weight:600; letter-spacing:.04em; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:99px; padding:3px 11px; cursor:pointer; }
-  .allfiles:hover, .allfiles:focus-visible { border-color:var(--info); color:var(--info); }
-  .allfiles .n { color:var(--muted); font-weight:500; }
-  #artifacts .anone { border-top:1px solid var(--line); padding:9px 14px; color:var(--muted); font-size:12px; }
-  /* One artifact row, shared by the card (reports) and the popup (everything):
-     kind icon, dir-muted/name-bold path, size + age on the right. */
-  .arow { display:flex; align-items:baseline; gap:8px; width:100%; padding:7px 14px; background:none; border:none; border-top:1px solid var(--line); color:var(--text); text-align:left; text-decoration:none; cursor:pointer; font-family:inherit; font-size:12px; min-width:0; }
-  .arow:hover, .arow:focus-visible { background:var(--panel2); }
-  .arow .aicon { flex:none; }
-  .arow.rep .aicon, .arow.rep .aname { color:var(--done); }
-  .arow.plan .aicon, .arow.plan .aname { color:var(--info); }
-  .arow.note .aicon { color:var(--muted); }
-  .arow .apath { display:flex; flex:1 1 auto; min-width:0; font-family:ui-monospace, monospace; }
-  .arow .adir { color:var(--muted); flex:0 4 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .arow .aname { font-weight:600; flex:0 1 auto; min-width:8ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .arow .ameta { flex:none; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
-  .arow .go { flex:none; color:var(--muted); font-size:11px; }
-  /* All-files popup: plan files -> html reports -> notes, grouped */
-  #artOverlay { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9; display:none; align-items:center; justify-content:center; padding:24px; }
-  #artOverlay.open { display:flex; }
-  #artBox { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(720px, 100%); max-height:88vh; display:flex; flex-direction:column; overflow:hidden; }
-  #artBox .mdhead button { margin-left:auto; }
-  #artList { overflow:auto; overscroll-behavior:contain; padding:2px 0 10px; scrollbar-width:thin; }
-  #artList .agroup { padding:12px 14px 6px; color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  /* Artifacts row: final HTML report link + .md note previews (task view only).
+     Lives inside the cards grid as a full-width row placed after the loop
+     cards and before the wide orchestrator card. */
+  #artifacts { display:none; grid-column:1 / -1; flex-wrap:wrap; gap:8px; align-items:center; }
+  body.task #artifacts.has { display:flex; }
+  #artifacts .ahdr { color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .artlink { font:12px/1.4 inherit; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:99px; padding:3px 12px; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .artlink:hover, .artlink:focus-visible { border-color:var(--info); color:var(--info); }
+  .artlink.report { border-color:var(--done); color:var(--done); font-weight:600; }
+  .artlink.report:hover, .artlink.report:focus-visible { border-color:var(--done); filter:brightness(1.2); }
   /* Markdown preview modal */
   #mdOverlay { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:10; display:none; align-items:center; justify-content:center; padding:24px; }
   #mdOverlay.open { display:flex; }
@@ -181,82 +128,6 @@
   #mdBody th { background:var(--panel2); }
   #mdBody a { color:var(--info); }
   #mdBody hr { border:none; border-top:1px solid var(--line); margin:12px 0; }
-  /* Session timeplan (task view): the run-dossier timeline bar, computed live
-     from the event stream — solid where agents were emitting events, hatched
-     where no run was open (between runs), red where an open run went silent. */
-  #timeplan { display:none; padding:20px 24px 0; max-width:1600px; margin:0 auto; }
-  body.task #timeplan.has, body.stats #timeplan.has { display:block; }
-  #timeplan .tpanel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
-  .tphead { display:flex; align-items:baseline; gap:10px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px; }
-  .tphead .range { margin-left:auto; font-weight:500; text-transform:none; letter-spacing:0; font-variant-numeric:tabular-nums; }
-  .tpbar { display:flex; height:24px; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:var(--panel2); position:relative; }
-  .tpbar i { display:block; height:100%; flex:1 0 0; }
-  .tpbar .up { background:color-mix(in srgb, var(--done) 40%, var(--panel2)); }
-  .tpbar .idle { background:repeating-linear-gradient(135deg, var(--panel2) 0 5px, var(--line) 5px 7px); }
-  .tpbar .down { background:var(--failed); }
-  .tpbar .idle, .tpbar .down { min-width:3px; }
-  .tplab { display:flex; justify-content:space-between; font-family:ui-monospace, monospace; font-size:11px; color:var(--muted); margin-top:5px; }
-  .tplegend { display:flex; flex-wrap:wrap; gap:4px 18px; margin-top:8px; font-size:11px; color:var(--muted); }
-  .tplegend i { display:inline-block; width:11px; height:11px; border:1px solid var(--line); border-radius:3px; vertical-align:-2px; margin-right:5px; }
-  .tplegend .tphint { margin-left:auto; opacity:.75; }
-  .tplegend .up { background:color-mix(in srgb, var(--done) 40%, var(--panel2)); }
-  .tplegend .idle { background:repeating-linear-gradient(135deg, var(--panel2) 0 4px, var(--line) 4px 6px); }
-  .tplegend .down { background:var(--failed); }
-  /* Hover time-point: a measuring ruler under the strip (labeled major
-     graduations on round wall-clock instants, unlabeled minors), a cursor
-     line under the pointer, and a popover previewing the agents mid-run at
-     that instant. A session longer than a day widens the track to one
-     viewport width per day inside a horizontally slidable scroll viewport.
-     overflow-y is hidden and the popover lives OUTSIDE the scroll container
-     (in .tpstrip): anything poking below the track would otherwise summon a
-     vertical scrollbar and clip the popover. */
-  .tpscroll { overflow-x:auto; overflow-y:hidden; scrollbar-width:thin; }
-  .tptrack { position:relative; min-width:100%; }
-  .tpbar .tpgrid { position:absolute; top:0; bottom:0; width:1px; background:var(--line); opacity:.8; pointer-events:none; }
-  .tpbar .tpgrid.day { background:var(--muted); }
-  .tpruler { position:relative; height:18px; margin-top:2px; }
-  .tpruler i { position:absolute; top:0; width:0; border-left:1px solid var(--line); pointer-events:none; }
-  .tpruler i.min { height:4px; }
-  .tpruler i.maj { height:7px; border-left-color:var(--muted); }
-  .tpruler i.day { height:9px; border-left-color:var(--text); }
-  .tpruler b { position:absolute; top:6px; left:0; transform:translateX(-50%); font:500 9px/1.3 ui-monospace, monospace; color:var(--muted); white-space:nowrap; }
-  #tpCursor { position:absolute; top:0; bottom:0; width:0; border-left:1px solid var(--info); pointer-events:none; z-index:2; }
-  #tpTip { position:absolute; transform:translateX(-50%); z-index:6; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 11px; font-size:11px; line-height:1.5; pointer-events:none; white-space:nowrap; box-shadow:0 8px 24px rgba(0,0,0,.35); max-width:min(440px, 92vw); }
-  #tpTip .tth { display:flex; align-items:center; gap:10px; font-family:ui-monospace, monospace; font-weight:600; }
-  #tpTip .tth .kind.up { color:var(--done); }
-  #tpTip .tth .kind.idle { color:var(--muted); }
-  #tpTip .tth .kind.down { color:var(--failed); }
-  #tpTip .seg { color:var(--muted); font-family:ui-monospace, monospace; }
-  #tpTip ul { list-style:none; margin:6px 0 0; padding:0; }
-  #tpTip li { display:flex; align-items:center; gap:7px; font-family:ui-monospace, monospace; }
-  #tpTip li .dot { width:7px; height:7px; border-radius:50%; background:var(--queued); flex:none; }
-  #tpTip li.running .dot { background:var(--running); }
-  #tpTip li.done .dot { background:var(--done); }
-  #tpTip li.failed .dot { background:var(--failed); }
-  #tpTip li.stale { opacity:.55; }
-  #tpTip li .who { max-width:44ch; overflow:hidden; text-overflow:ellipsis; }
-  #tpTip li .at { margin-left:auto; color:var(--muted); padding-left:14px; font-variant-numeric:tabular-nums; }
-  #tpTip .none { color:var(--muted); margin-top:4px; }
-  /* Time dials beside the strip: elapsed chronograph (one revolution/hour),
-     silence stopwatch (needle sweeps toward the 4m stall limit; status color
-     always paired with a state word), working-share gauge. Values live in
-     figcaption text tokens — the arc only ever carries state, never a label. */
-  .tpbody { display:flex; gap:14px 26px; align-items:flex-start; flex-wrap:wrap; }
-  .tpstrip { flex:1 1 420px; min-width:260px; position:relative; }
-  .tpdials { display:flex; gap:16px; flex:none; padding-top:2px; }
-  .dial { margin:0; display:flex; flex-direction:column; align-items:center; gap:1px; width:74px; text-align:center; }
-  .dial svg { width:58px; height:58px; display:block; }
-  .dial .track, .dial .ticks { stroke:var(--line); }
-  .dial .hub { fill:var(--muted); }
-  .dial .needle { stroke:var(--text); }
-  .dial .dv { font:600 12px/1.4 ui-monospace, monospace; font-variant-numeric:tabular-nums; color:var(--text); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .dial .dl { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
-  #dialWork .arc { stroke:color-mix(in srgb, var(--done) 70%, var(--panel2)); }
-  #dialSilence .arc { stroke:var(--done); }
-  #dialSilence.slow .arc { stroke:var(--running); }
-  #dialSilence.stall .arc { stroke:var(--failed); }
-  .dial.off svg { opacity:.45; }
-  .dial.off .needle { visibility:hidden; }
   /* Wide screens: the full-width orchestrator card splits into two columns —
      flow/agents/stages on the left, the log filling the right — so a short
      log no longer sits alone in a huge empty strip. */
@@ -269,26 +140,19 @@
     .card.wide .agents { grid-area:agents; }
     .card.wide .stagebar { grid-area:stage; }
     .card.wide .log { grid-area:log; border-left:1px solid var(--line); max-height:420px; }
-    /* Folded, the two-column split would leave an empty right strip where the
-       log was — fall back to the base single-column flex card. */
-    .card.wide.logfold { display:flex; }
     .log li .d { max-width:90ch; }
   }
   @media (max-width: 640px) {
     header { padding:10px 12px; gap:8px; }
     main#cards { padding:12px; gap:12px; }
-    #timeplan { padding:12px 12px 0; }
     main#home { padding:12px; gap:10px; }
-    main#statsView { padding:12px; gap:10px; }
-    .stat .sv { font-size:28px; }
-    .stat.hero .sv { font-size:40px; }
     #crumb { display:none; }
     #taskSel { max-width:48vw; }
     /* ≥16px stops iOS Safari from auto-zooming on focus; extra padding = tap target */
-    #taskSel, #rateSel, #zoomSel { font-size:16px; padding:6px 10px; }
+    #taskSel, #rateSel { font-size:16px; padding:6px 10px; }
     #overall { flex-basis:100%; margin-left:0; }
-    #mdOverlay, #artOverlay { padding:8px; }
-    .arow .ameta { display:none; }
+    #mdOverlay { padding:8px; }
+    .artlink { max-width:100%; }
     .log { max-height:45vh; }
     .log li { flex-wrap:wrap; }
     .log li .s { width:auto; min-width:48px; }
@@ -315,75 +179,10 @@
     <option value="30000">30s</option>
     <option value="60000">1m</option>
   </select></label>
-  <label id="zoom">zoom <select id="zoomSel" title="task view zoom — everything scales in the same proportion">
-    <option value="1">100%</option>
-    <option value="1.15">115%</option>
-    <option value="1.3">130%</option>
-    <option value="1.5">150%</option>
-    <option value="1.75">175%</option>
-    <option value="2">200%</option>
-  </select></label>
   <span id="overall"></span>
 </header>
 <main id="home"></main>
-<div id="timeplan">
-  <div class="tpanel">
-    <div class="tphead">session timeplan<span class="range" id="tpRange"></span><a id="statsLink" hidden></a></div>
-    <div class="tpbody">
-      <div class="tpstrip">
-        <div class="tpscroll" id="tpScroll">
-          <div class="tptrack" id="tpTrack">
-            <div class="tpbar" id="tpBar" role="img"></div>
-            <div class="tpruler" id="tpRuler"></div>
-            <div id="tpCursor" hidden></div>
-          </div>
-        </div>
-        <div id="tpTip" hidden></div>
-        <div class="tplab"><span id="tpStart"></span><span id="tpMid"></span><span id="tpEnd"></span></div>
-        <div class="tplegend">
-          <span><i class="up"></i>agents working</span>
-          <span><i class="idle"></i>idle · between runs</span>
-          <span><i class="down"></i>stall · run open, stream silent</span>
-          <span class="tphint">ctrl+scroll resizes the view range · double-click resets · slide sideways</span>
-        </div>
-      </div>
-      <div class="tpdials">
-        <figure class="dial" id="dialElapsed">
-          <svg viewBox="0 0 64 64" role="img" aria-label="session elapsed">
-            <title>session elapsed — one needle revolution per hour</title>
-            <circle class="track" cx="32" cy="32" r="26" fill="none" stroke-width="2"/>
-            <circle class="ticks" cx="32" cy="32" r="26" fill="none" stroke-width="5" pathLength="96" stroke-dasharray="1 7"/>
-            <line class="needle" x1="32" y1="32" x2="32" y2="11" stroke-width="2" stroke-linecap="round"/>
-            <circle class="hub" cx="32" cy="32" r="2.5"/>
-          </svg>
-          <figcaption><b class="dv" id="dialElapsedV">—</b><span class="dl">elapsed</span></figcaption>
-        </figure>
-        <figure class="dial off" id="dialSilence">
-          <svg viewBox="0 0 64 64" role="img" aria-label="stream silence">
-            <title>time since last event — a run open and 4m of silence is a stall</title>
-            <path class="track" d="M14.32 49.68 A25 25 0 1 1 49.68 49.68" fill="none" stroke-width="5" pathLength="100" stroke-linecap="round"/>
-            <path class="arc" d="M14.32 49.68 A25 25 0 1 1 49.68 49.68" fill="none" stroke-width="5" pathLength="100" stroke-linecap="round" stroke-dasharray="0 100"/>
-            <line class="needle" x1="32" y1="32" x2="51" y2="32" stroke-width="2" stroke-linecap="round"/>
-            <circle class="hub" cx="32" cy="32" r="2.5"/>
-          </svg>
-          <figcaption><b class="dv" id="dialSilenceV">—</b><span class="dl">silence</span></figcaption>
-        </figure>
-        <figure class="dial" id="dialWork">
-          <svg viewBox="0 0 64 64" role="img" aria-label="working share">
-            <title>share of session wall-clock spent with agents working</title>
-            <path class="track" d="M14.32 49.68 A25 25 0 1 1 49.68 49.68" fill="none" stroke-width="5" pathLength="100" stroke-linecap="round"/>
-            <path class="arc" d="M14.32 49.68 A25 25 0 1 1 49.68 49.68" fill="none" stroke-width="5" pathLength="100" stroke-linecap="round" stroke-dasharray="0 100"/>
-            <line class="needle" x1="32" y1="32" x2="51" y2="32" stroke-width="2" stroke-linecap="round"/>
-            <circle class="hub" cx="32" cy="32" r="2.5"/>
-          </svg>
-          <figcaption><b class="dv" id="dialWorkV">—</b><span class="dl">working</span></figcaption>
-        </figure>
-      </div>
-    </div>
-  </div>
-</div>
 <main id="cards"><div id="artifacts"></div></main>
-<main id="statsView"></main>
 <div id="mdOverlay" role="dialog" aria-modal="true">
   <div id="mdBox">
     <div class="mdhead">
@@ -392,15 +191,6 @@
       <button id="mdClose" title="close (Esc)">✕</button>
     </div>
     <article id="mdBody"></article>
-  </div>
-</div>
-<div id="artOverlay" role="dialog" aria-modal="true">
-  <div id="artBox">
-    <div class="mdhead">
-      <span class="fname" id="artTitle">task artifacts</span>
-      <button id="artClose" title="close (Esc)">✕</button>
-    </div>
-    <div id="artList"></div>
   </div>
 </div>
 <script>
@@ -414,28 +204,14 @@ function planEl(id) {
   if (plans.has(id)) return plans.get(id);
   const card = document.createElement("section");
   card.className = "card" + (id === "orchestrator" ? " wide" : "");
-  card.innerHTML = `<h2><span class="badge">queued</span><span class="title"></span><span class="span"></span><span class="tok"></span></h2>
+  card.innerHTML = `<h2><span class="badge">queued</span><span class="title"></span><span class="tok"></span></h2>
     <div class="flow"></div><ul class="agents"></ul><div class="stagebar"></div><ul class="log"></ul>`;
   card.querySelector(".title").textContent = id === "orchestrator" ? "Orchestrator" : id;
-  if (id === "orchestrator") {
-    // Fold arrow in the card header toggles only the log (header stays).
-    // Collapsed by default; choice persists like the other orch* prefs.
-    const btn = document.createElement("button");
-    btn.className = "foldbtn"; btn.textContent = "▶"; btn.title = "show/hide log";
-    const applyFold = (open) => { card.classList.toggle("logfold", !open); btn.setAttribute("aria-expanded", String(open)); };
-    applyFold(localStorage.getItem("orchLogOpen") === "1");
-    btn.onclick = () => {
-      const open = card.classList.contains("logfold");
-      localStorage.setItem("orchLogOpen", open ? "1" : "0");
-      applyFold(open);
-    };
-    card.querySelector("h2").prepend(btn);
-  }
   const entry = { card, badge: card.querySelector(".badge"), stagebar: card.querySelector(".stagebar"),
                   log: card.querySelector(".log"), tok: card.querySelector(".tok"),
-                  titleEl: card.querySelector(".title"), spanEl: card.querySelector(".span"),
+                  titleEl: card.querySelector(".title"),
                   flowEl: card.querySelector(".flow"), agentsEl: card.querySelector(".agents"),
-                  agents: new Map(), roles: new Map(), firstTs: null, lastTs: null,
+                  agents: new Map(), roles: new Map(),
                   tokIn: 0, tokOut: 0, tokCached: 0, tokWrite: 0, stages: new Map(), state: "queued" };
   plans.set(id, entry);
   render();
@@ -443,10 +219,10 @@ function planEl(id) {
 }
 function render() {
   const cards = document.getElementById("cards");
-  if (plans.has("orchestrator")) cards.appendChild(plans.get("orchestrator").card);
   for (const id of plans.keys())
     if (id !== "orchestrator") cards.appendChild(plans.get(id).card);
-  placeArtifacts();  // artifacts row sits after the orchestrator card, before the loop cards
+  if (plans.has("orchestrator")) cards.appendChild(plans.get("orchestrator").card);
+  placeArtifacts();  // artifacts row sits after the loop cards, before the orchestrator card
   let done = 0, failed = 0, running = 0;
   for (const [id, p] of plans) {
     if (id === "orchestrator") continue;
@@ -500,19 +276,12 @@ function upsertAgent(p, a, ts) {
     li.innerHTML = `<span class="dot"></span><span class="alabel"></span><span class="atok"></span><span class="adur"></span>`;
     li.querySelector(".alabel").textContent = a.label || a.id;
     p.agentsEl.appendChild(li);
-    row = { li, started: a.started || ts, state: "running", label: a.label || a.id,
+    row = { li, started: a.started || ts, state: "running",
             tok: li.querySelector(".atok"), dur: li.querySelector(".adur") };
     p.agents.set(a.id, row);
   }
   if (a.started) row.started = a.started;
-  if (a.state) {
-    row.state = a.state; row.li.className = a.state;
-    // first terminal event stamps the finish instant (event ts), for the stats view
-    if ((a.state === "done" || a.state === "failed") && !row.finishedMs) {
-      const f = Date.parse(ts || "");
-      if (!isNaN(f)) row.finishedMs = f;
-    }
-  }
+  if (a.state) { row.state = a.state; row.li.className = a.state; }
   if (a.tokens) setTok(row.tok, `⟳ ${fmtIn(a.tokens.in || 0, a.tokens.cached || 0, a.tokens.cache_write || 0)} · out ${fmtTok(a.tokens.out || 0)}`);
   if (a.runtime) row.dur.textContent = a.runtime;
   const role = (a.label || a.id).split(" #")[0];
@@ -575,56 +344,15 @@ function freezePlan(pl) {
     if (node.state === "running") { node.state = "stale"; touched = true; }
   if (touched) renderFlow(pl);
 }
-// Card time span in the loop header: first event -> last event (terminal
-// cards) or -> now (open cards, refreshed by the interval below). Event ts
-// values are UTC instants (time policy); rendering converts to the viewer's
-// local clock via toLocaleTimeString — display-local, storage-UTC.
-function fmtClock(d) {
-  return d.toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit" });
-}
-function fmtDur(ms) {
-  const m = Math.max(0, Math.round(ms / 60000));
-  return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m";
-}
-function updateSpan(p) {
-  if (!p.firstTs || !p.spanEl) return;
-  const open = p.state === "running" || p.state === "queued";
-  const end = open ? new Date() : (p.lastTs || p.firstTs);
-  p.spanEl.textContent = fmtClock(p.firstTs) + "–" + (open ? "now" : fmtClock(end)) +
-    " · " + fmtDur(end - p.firstTs);
-}
-setInterval(() => {
-  for (const p of plans.values())
-    if (p.state === "running" || p.state === "queued") updateSpan(p);
-}, 30000);
-
 function onEvent(ev) {
   const p = planEl(ev.plan);
-  tpNote(ev);  // session timeplan sees every event, quiet token ticks included
-  evCount++; if (ev.quiet) quietCount++;
-  statsDirty = true;
-  const ets = new Date(ev.ts || "");
-  if (!isNaN(ets)) {
-    if (!p.firstTs) p.firstTs = ets;
-    if (!p.lastTs || ets > p.lastTs) p.lastTs = ets;
-    updateSpan(p);
-  }
   if (ev.title) { p.titleEl.textContent = ev.title; p.titleEl.title = ev.title; }
-  // Declared run-wide plan-card total (ORCH_PLANS_TOTAL -> plans_total).
-  // Untrusted event data: coerce to a bounded integer, and fold MONOTONICALLY —
-  // a resume re-declares the same number and a stray smaller value must never
-  // shrink the denominator below what the run already promised.
-  if (ev.plans_total !== undefined) {
-    const n = Math.floor(Number(ev.plans_total));
-    if (Number.isFinite(n) && n > planTotal && n <= 9999) planTotal = n;
-  }
   if (ev.agent && ev.agent.id) upsertAgent(p, ev.agent, ev.ts);
   // plan-level state: stage "plan" (and run-level "complete") events set the card badge directly
   if (ev.stage === "plan" || ev.stage === "complete") {
     p.state = ev.state; p.badge.textContent = ev.state; p.badge.className = "badge " + ev.state;
     if (ev.state === "done" || ev.state === "failed") {
       freezePlan(p);
-      updateSpan(p);  // settle the span at the terminal event's instant
       // FRONTEND-3: a run-level "complete" settles every still-open sub-plan card
       // (defense-in-depth alongside the watcher's run-complete sweep: covers a
       // driver-emitted "complete" with no per-plan "plan" events, or a last
@@ -635,7 +363,6 @@ function onEvent(ev) {
           if (pl.state === "queued" || pl.state === "running") {
             pl.state = ev.state; pl.badge.textContent = ev.state; pl.badge.className = "badge " + ev.state;
             freezePlan(pl);
-            updateSpan(pl);
           }
         }
     }
@@ -645,16 +372,7 @@ function onEvent(ev) {
     setTok(p.tok, `⟳ ${fmtIn(p.tokIn, p.tokCached, p.tokWrite)} · out ${fmtTok(p.tokOut)}`);
     if (ev.quiet) { render(); return; }  // live delta: counters only, no log line
   } else {
-    // FRONTEND-6: one task folder hosts several phases (research, then
-    // implement-plan) appending to the same events.jsonl, so a replay can pass
-    // an earlier phase's run-level "complete done" and then keep going. Fresh
-    // watcher/driver activity on the reserved orchestrator card must reopen a
-    // settled badge — never leave it "done" while loops are visibly running.
-    // Orchestrator only: sub-plan cards get authoritative stage-"plan" reopens
-    // from the watcher, and a stray late agent event must not un-settle them.
-    const reopen = ev.plan === "orchestrator" && ev.state === "running" &&
-                   (p.state === "done" || p.state === "failed");
-    if (p.state === "queued" || reopen) { p.state = "running"; p.badge.textContent = "running"; p.badge.className = "badge running"; }
+    if (p.state === "queued") { p.state = "running"; p.badge.textContent = "running"; p.badge.className = "badge running"; }
     let chip = p.stages.get(ev.stage);
     if (!chip) { chip = document.createElement("span"); chip.className = "chip"; p.stages.set(ev.stage, chip); p.stagebar.appendChild(chip); }
     chip.textContent = ev.stage + " · " + ev.state;
@@ -673,32 +391,21 @@ function onEvent(ev) {
   render();
 }
 
-// ---- artifacts: reports on the card, plan files + notes in a popup ----
+// ---- artifacts: final-report link + .md note previews ----
 // The server lists .html/.md files under the task folder (/artifacts) and
 // serves them extension-whitelisted + realpath-contained (/file). File names
 // and markdown bodies are agent-written, i.e. untrusted input like the event
 // stream: names render via textContent only, and the preview escapes the
 // whole document BEFORE any inline transform runs (FRONTEND-1 discipline).
-// The card pins just the final report + the plan document; every file
-// sits behind the "all files" popup, grouped plan -> reports -> notes.
 const artifactsEl = document.getElementById("artifacts");
-const artOverlay = document.getElementById("artOverlay"),
-      artList = document.getElementById("artList");
-let artifactsKey = "", lastArts = [];
+let artifactsKey = "";
 function fileUrl(rel) {
   return "/file?task=" + encodeURIComponent(currentTask) + "&path=" + encodeURIComponent(rel);
 }
-// Display kind: "rep" (html report), "plan" (anything under plan/), "note".
-function artKind(a) {
-  if (a.kind === "report") return "rep";
-  return a.path.startsWith("plan/") ? "plan" : "note";
-}
 function clearArtifacts() {
   artifactsKey = "";
-  lastArts = [];
   artifactsEl.textContent = "";
   artifactsEl.classList.remove("has");
-  closeArt();
 }
 async function refreshArtifacts() {
   if (!currentTask) return;
@@ -707,147 +414,52 @@ async function refreshArtifacts() {
     const data = await (await fetch("/artifacts?task=" + encodeURIComponent(forTask))).json();
     if (forTask !== currentTask) return;  // stale response after navigation
     const arts = data.artifacts || [];
-    // minute bucket: the "Nm ago" labels re-render once a minute even when
-    // the file list itself is unchanged
-    const key = JSON.stringify(arts.map(a => [a.path, a.mtime])) + "|" + Math.floor(Date.now() / 60000);
+    const key = JSON.stringify(arts.map(a => [a.path, a.mtime]));
     if (key === artifactsKey) return;
     artifactsKey = key;
     renderArtifacts(arts);
   } catch (e) {}
 }
-// Keep the row right after the wide orchestrator card, before the loop cards.
-// Called from render() (which re-appends cards in order) and from
-// renderArtifacts() — stopWs()/ws.onopen clear #cards' innerHTML, detaching the
-// row, so an /artifacts response landing after the last render must re-attach
-// it itself.
+// Keep the row between the loop cards and the wide orchestrator card. Called
+// from render() (which re-appends cards in order) and from renderArtifacts()
+// — stopWs()/ws.onopen clear #cards' innerHTML, detaching the row, so an
+// /artifacts response landing after the last render must re-attach it itself.
 function placeArtifacts() {
   const cards = document.getElementById("cards");
   const orch = plans.has("orchestrator") ? plans.get("orchestrator").card : null;
-  if (orch && orch.parentNode === cards) cards.insertBefore(artifactsEl, orch.nextSibling);
-  else cards.insertBefore(artifactsEl, cards.firstChild);
+  if (orch && orch.parentNode === cards) cards.insertBefore(artifactsEl, orch);
+  else cards.appendChild(artifactsEl);
 }
 function renderArtifacts(arts) {
-  lastArts = arts;
   artifactsEl.textContent = "";
   artifactsEl.classList.toggle("has", arts.length > 0);
   placeArtifacts();
-  if (!arts.length) { closeArt(); return; }
-  // The card pins at most TWO rows: THE final report (an .html named
-  // report/final, else the newest .html) and THE plan document (the newest
-  // plan/*-plan.md, else the newest .md under plan/). Everything else —
-  // secondary reports, RESUME.md, findings — is reachable via "all files".
-  const report = primaryArt(arts.filter(a => artKind(a) === "rep"), /report|final/i);
-  const planDoc = primaryArt(arts.filter(a => artKind(a) === "plan"), /(^|-)plan\.md$/i);
-  const onCard = [report, planDoc].filter(Boolean);
-  const hdr = document.createElement("div");
+  if (!arts.length) return;
+  const hdr = document.createElement("span");
   hdr.className = "ahdr";
-  const lab = document.createElement("span");
-  lab.textContent = "artifacts";
-  hdr.appendChild(lab);
-  const all = document.createElement("button");
-  all.type = "button";
-  all.className = "allfiles";
-  all.title = "browse every artifact in this task folder";
-  const allLab = document.createElement("span");
-  allLab.textContent = "all files";
-  const allN = document.createElement("span");
-  allN.className = "n";
-  allN.textContent = String(arts.length);
-  all.append(allLab, allN);
-  all.onclick = openArt;
-  hdr.appendChild(all);
+  hdr.textContent = "artifacts";
   artifactsEl.appendChild(hdr);
-  for (const a of onCard) artifactsEl.appendChild(artRow(a));
-  if (!onCard.length) {
-    const none = document.createElement("div");
-    none.className = "anone";
-    none.textContent = "no report or plan file yet — " + arts.length +
-      " working file" + (arts.length === 1 ? "" : "s") + " under all files";
-    artifactsEl.appendChild(none);
-  }
-  if (artOverlay.classList.contains("open")) renderArtPopup();  // keep an open popup fresh
-}
-// The one file a group gets pinned on the card: prefer basenames matching
-// nameRe (e.g. "research-report.html" over "run-dossier.html"), newest wins.
-function primaryArt(group, nameRe) {
-  if (!group.length) return null;
-  const named = group.filter(a => nameRe.test(a.path.split("/").pop()));
-  const pool = named.length ? named : group;
-  return pool.reduce((best, a) => (a.mtime > best.mtime ? a : best));
-}
-// One row per artifact, shared by the card (pinned files) and the popup:
-// reports open in a new tab, plan files and notes open the markdown preview.
-function artRow(a) {
-  const kind = artKind(a);
-  let row;
-  if (kind === "rep") {
-    row = document.createElement("a");
-    row.href = fileUrl(a.path);
-    row.target = "_blank";
-    row.rel = "noopener";
-    row.title = "open HTML report in a new tab";
-  } else {
-    row = document.createElement("button");
-    row.type = "button";
-    row.title = "preview " + a.path;
-    row.onclick = () => openMd(a.path);
-  }
-  row.className = "arow " + kind;
-  const icon = document.createElement("span");
-  icon.className = "aicon";
-  icon.textContent = kind === "rep" ? "⬒" : kind === "plan" ? "◆" : "▤";
-  const path = document.createElement("span");
-  path.className = "apath";
-  const cut = a.path.lastIndexOf("/") + 1;
-  const dir = document.createElement("span");
-  dir.className = "adir";
-  dir.textContent = a.path.slice(0, cut);
-  const name = document.createElement("span");
-  name.className = "aname";
-  name.textContent = a.path.slice(cut);
-  path.append(dir, name);
-  const meta = document.createElement("span");
-  meta.className = "ameta";
-  meta.textContent = (a.size != null ? fmtSize(a.size) + " · " : "") + fmtAgo(a.mtime);
-  row.append(icon, path, meta);
-  if (kind === "rep") {
-    const go = document.createElement("span");
-    go.className = "go";
-    go.textContent = "↗";
-    row.appendChild(go);
-  }
-  return row;
-}
-function fmtSize(b) {
-  if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
-  return b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B";
-}
-function fmtAgo(mt) {
-  const s = Math.max(0, Date.now() / 1000 - mt);
-  if (s < 60) return "just now";
-  if (s < 3600) return Math.round(s / 60) + "m ago";
-  if (s < 86400) return Math.round(s / 3600) + "h ago";
-  return Math.round(s / 86400) + "d ago";
-}
-// All-files popup: every artifact grouped plan files -> reports -> notes, so
-// plan documents surface first instead of drowning in attempt findings.
-const ART_GROUPS = [["plan", "plan files"], ["rep", "html reports"], ["note", "notes"]];
-function renderArtPopup() {
-  artList.textContent = "";
-  for (const [kind, label] of ART_GROUPS) {
-    const group = lastArts.filter(a => artKind(a) === kind);
-    if (!group.length) continue;
-    const h = document.createElement("div");
-    h.className = "agroup";
-    h.textContent = label + " · " + group.length;
-    artList.appendChild(h);
-    for (const a of group) artList.appendChild(artRow(a));
+  for (const a of arts) {
+    if (a.kind === "report") {
+      const link = document.createElement("a");
+      link.className = "artlink report";
+      link.href = fileUrl(a.path);
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.title = "open HTML report in a new tab";
+      link.textContent = "⬒ " + a.path;
+      artifactsEl.appendChild(link);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "artlink";
+      btn.type = "button";
+      btn.title = "preview " + a.path;
+      btn.textContent = "▤ " + a.path;
+      btn.onclick = () => openMd(a.path);
+      artifactsEl.appendChild(btn);
+    }
   }
 }
-function openArt() { renderArtPopup(); artOverlay.classList.add("open"); }
-function closeArt() { artOverlay.classList.remove("open"); artList.textContent = ""; }
-document.getElementById("artClose").onclick = closeArt;
-artOverlay.onclick = (e) => { if (e.target === artOverlay) closeArt(); };
 // ---- minimal escape-first markdown preview ----
 const esc = s => s.replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -945,577 +557,38 @@ function openMd(rel) {
 function closeMd() { mdOverlay.classList.remove("open"); mdBody.textContent = ""; }
 document.getElementById("mdClose").onclick = closeMd;
 mdOverlay.onclick = (e) => { if (e.target === mdOverlay) closeMd(); };
-window.addEventListener("keydown", (e) => {  // top-most overlay first: md preview stacks above the popup
-  if (e.key !== "Escape") return;
-  if (mdOverlay.classList.contains("open")) closeMd(); else closeArt();
-});
-
-// ---- session timeplan ----
-// The run-dossier timeline bar, computed live: one wall-clock strip from the
-// task's first event to its last (or to "now" while any plan is open). Gaps
-// in the event stream classify by whether a plan run was open when they
-// began: nothing open -> idle (between runs, hatched); open and silent
-// beyond TP_STALL_MS -> stall (red). Everything else is solid working time.
-// Segment classes come from the TP_KINDS whitelist and titles are
-// self-formatted times — no event text reaches the DOM here (FRONTEND-1
-// discipline). Rebuilt at most once per second, so replay bursts stay cheap.
-const TP_IDLE_MS = 120000;   // no-run gap worth hatching as idle
-const TP_SLOW_MS = 180000;   // silence dial goes amber past the normal-generation ceiling
-const TP_STALL_MS = 240000;  // 1.5-3m gaps are one long generation; >4m while running is a stall
-const TP_KINDS = { up: "agents working", idle: "idle (between runs)", down: "stall (run open, stream silent)" };
-const tpEl = document.getElementById("timeplan"), tpBar = document.getElementById("tpBar"),
-      tpRange = document.getElementById("tpRange"), tpStart = document.getElementById("tpStart"),
-      tpMid = document.getElementById("tpMid"), tpEnd = document.getElementById("tpEnd");
-let tpTicks = [], tpSorted = true, tpDirty = false, tpLive = false, tpSummary = null;
-// Hover preview state: tpSegs/tpRuns are rebuilt by every tpRender from the
-// same whitelisted ticks the bar uses; tpHoverX remembers the pointer so a
-// live rebuild keeps a resting cursor in sync.
-let tpSegs = [], tpRuns = [], tpHoverX = null;
-let tpViewMs = null;  // session ms one viewport width shows; null = auto (≤ 1 day)
-const tpTrack = document.getElementById("tpTrack"), tpCursor = document.getElementById("tpCursor"),
-      tpTip = document.getElementById("tpTip"), tpRuler = document.getElementById("tpRuler"),
-      tpScroll = document.getElementById("tpScroll");
-// Time dials: static SVG updated by attribute only. A gauge arc spans 270°
-// (135° -> 405°) with pathLength=100, so a 0..1 fraction maps straight onto
-// stroke-dasharray; the needle is the same fraction as a rotation. The
-// elapsed dial has no arc — its needle is a chronograph hand, one
-// revolution per hour, with the true duration in the figcaption.
-const tpDialEls = {
-  elapsed: document.getElementById("dialElapsed"), elapsedV: document.getElementById("dialElapsedV"),
-  silence: document.getElementById("dialSilence"), silenceV: document.getElementById("dialSilenceV"),
-  work: document.getElementById("dialWork"), workV: document.getElementById("dialWorkV"),
-};
-function tpArc(fig, frac) {
-  const arc = fig.querySelector(".arc"), needle = fig.querySelector(".needle");
-  const f = Math.max(0, Math.min(1, frac));
-  if (arc) {
-    arc.setAttribute("stroke-dasharray", (f * 100).toFixed(1) + " 100");
-    // round line caps draw a dot even at zero length — hide the empty arc
-    arc.style.visibility = f > 0.02 ? "visible" : "hidden";
-  }
-  needle.setAttribute("transform", "rotate(" + (arc ? 135 + 270 * f : 360 * frac) + " 32 32)");
-}
-function fmtSecs(ms) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return s >= 60 ? Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s" : s + "s";
-}
-function tpDialsRender(totalMs, upMs, silenceMs) {
-  tpArc(tpDialEls.elapsed, (totalMs % 3600000) / 3600000);
-  tpDialEls.elapsedV.textContent = fmtDur(totalMs);
-  tpDialEls.elapsed.querySelector("svg").setAttribute("aria-label", "session elapsed " + fmtDur(totalMs));
-  const share = totalMs > 0 ? upMs / totalMs : 0;
-  tpArc(tpDialEls.work, share);
-  tpDialEls.workV.textContent = Math.round(share * 100) + "%";
-  tpDialEls.work.querySelector("svg").setAttribute("aria-label",
-    "working share " + Math.round(share * 100) + " percent of the session");
-  // silence dial measures a live stream only; with no run open it rests "off"
-  let cls = "dial", txt = "—", aria = "stream silence: no run open";
-  if (silenceMs !== null) {
-    tpArc(tpDialEls.silence, silenceMs / TP_STALL_MS);
-    const state = silenceMs > TP_STALL_MS ? "stall" : silenceMs > TP_SLOW_MS ? "slow" : "ok";
-    if (state !== "ok") cls += " " + state;
-    txt = fmtSecs(silenceMs) + (state === "ok" ? "" : " · " + state);
-    aria = "stream silence " + fmtSecs(silenceMs) + " — " + state;
-  } else {
-    tpArc(tpDialEls.silence, 0);
-    cls += " off";
-  }
-  tpDialEls.silence.className = cls;  // assembled from fixed literals, never event text
-  tpDialEls.silenceV.textContent = txt;
-  tpDialEls.silence.querySelector("svg").setAttribute("aria-label", aria);
-}
-function tpReset() {
-  tpTicks = []; tpSorted = true; tpDirty = false; tpLive = false; tpSummary = null;
-  tpSegs = []; tpRuns = []; tpViewMs = null;
-  tpHoverEnd();
-  tpBar.textContent = "";
-  tpRuler.textContent = "";
-  tpTrack.style.width = "";
-  tpScroll.scrollLeft = 0;
-  tpEl.classList.remove("has");
-  tpArc(tpDialEls.elapsed, 0); tpArc(tpDialEls.silence, 0); tpArc(tpDialEls.work, 0);
-  tpDialEls.elapsedV.textContent = tpDialEls.silenceV.textContent = tpDialEls.workV.textContent = "—";
-  tpDialEls.silence.className = "dial off";
-}
-function tpNote(ev) {  // called for EVERY event, including quiet token ticks
-  const t = Date.parse(ev.ts || "");
-  if (isNaN(t)) return;
-  const tick = { t };
-  // run-open bookkeeping: per-plan "plan" events open/close a run; a run-level
-  // "complete" closes everything. The reserved orchestrator id never opens one.
-  if (ev.stage === "plan" && ev.plan && ev.plan !== "orchestrator") {
-    if (ev.state === "running" || ev.state === "queued") { tick.plan = ev.plan; tick.open = true; }
-    else if (ev.state === "done" || ev.state === "failed") { tick.plan = ev.plan; tick.open = false; }
-  } else if (ev.stage === "complete") tick.closeAll = true;
-  if (tpTicks.length && t < tpTicks[tpTicks.length - 1].t) tpSorted = false;
-  tpTicks.push(tick);
-  tpDirty = true;
-}
-// ---- measuring-unit ruler under the strip ----
-// Graduations sit on round wall-clock instants: a round step is chosen so at
-// most 12 labeled major lines fit the visible viewport, each major labeled in
-// 24-hour local time ("13:00", "14:00", …; seconds appear when the step is
-// sub-minute; a local midnight shows its date instead and wears the stronger
-// "day" line) and extending as a faint gridline through the bar; minor ticks
-// (step/5) stay unlabeled. Alignment happens in local-time space (epoch ms
-// shifted by the zone offset), so an hour step lands on :00 for the viewer.
-// Rebuilt together with the bar on every tpRender. Labels are self-formatted
-// times, never event text (FRONTEND-1 discipline).
-const TP_STEPS = [1e3, 2e3, 5e3, 10e3, 15e3, 30e3,                    // seconds
-                  6e4, 12e4, 3e5, 6e5, 9e5, 18e5,                     // minutes
-                  36e5, 72e5, 108e5, 216e5, 432e5, 864e5];            // hours
-const fmtClockS = d => d.toLocaleTimeString(undefined, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-const fmtDay = d => d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
-function tpRulerRender(t0, total) {
-  tpRuler.textContent = "";
-  // label density is judged against the visible viewport, not the whole track,
-  // so a slid multi-day track still shows at most ~12 labeled lines per screen
-  const frac = tpTrack.clientWidth > 0 ? Math.min(1, tpScroll.clientWidth / tpTrack.clientWidth) : 1;
-  const vis = Math.max(1, total * frac);
-  const step = TP_STEPS.find(st => vis / st <= 12) || Math.ceil(vis / 12);
-  const sub = step / 5;
-  const off = -new Date(t0).getTimezoneOffset() * 60000;
-  const end = t0 + total;
-  const g = total / sub > 600 ? step : sub;  // very long spans: majors only, keep the DOM bounded
-  // first grid instant strictly after t0 — an edge tick would sit on the border
-  for (let t = (Math.floor((t0 + off) / g) + 1) * g - off; t < end; t += g) {
-    const pos = ((t - t0) / total * 100).toFixed(3) + "%";
-    const i = document.createElement("i");
-    i.style.left = pos;
-    if ((t + off) % step) i.className = "min";  // minor graduation: short line, no time
-    else {
-      const midnight = (t + off) % 864e5 === 0;
-      i.className = midnight ? "maj day" : "maj";
-      const b = document.createElement("b");
-      b.textContent = midnight ? fmtDay(new Date(t))
-        : step < 6e4 ? fmtClockS(new Date(t)) : fmtClock(new Date(t));
-      i.appendChild(b);
-      const gr = document.createElement("i");  // major extends through the bar
-      gr.className = midnight ? "tpgrid day" : "tpgrid";
-      gr.style.left = pos;
-      tpBar.appendChild(gr);
-    }
-    tpRuler.appendChild(i);
-  }
-}
-function tpRender() {
-  tpDirty = false;
-  if (!tpTicks.length) { tpReset(); return; }
-  if (!tpSorted) { tpTicks.sort((a, b) => a.t - b.t); tpSorted = true; }
-  // `open` maps plan -> run-open instant, so closing a plan also records the
-  // finished run interval for the hover preview (tpRuns).
-  const open = new Map(), segs = [], runs = [];
-  const push = (kind, t0, t1) => {
-    if (t1 <= t0) return;
-    const last = segs[segs.length - 1];
-    if (last && last.kind === kind) last.t1 = t1;  // ticks are contiguous — merge runs of one kind
-    else segs.push({ kind, t0, t1 });
-  };
-  let prev = tpTicks[0].t;
-  for (const k of tpTicks) {
-    const gap = k.t - prev;
-    if (gap > 0) {
-      if (!open.size && gap > TP_IDLE_MS) push("idle", prev, k.t);
-      else if (open.size && gap > TP_STALL_MS) push("down", prev, k.t);
-      else push("up", prev, k.t);
-    }
-    if (k.plan !== undefined) {
-      if (k.open) { if (!open.has(k.plan)) open.set(k.plan, k.t); }
-      else if (open.has(k.plan)) { runs.push({ plan: k.plan, t0: open.get(k.plan), t1: k.t }); open.delete(k.plan); }
-    }
-    if (k.closeAll) {
-      for (const [pl, s] of open) runs.push({ plan: pl, t0: s, t1: k.t });
-      open.clear();
-    }
-    prev = k.t;
-  }
-  tpLive = open.size > 0;
-  const lastEvt = prev;  // last real event, before the synthetic live edge
-  let end = prev;
-  if (tpLive && Date.now() > prev) {  // live edge: the bar runs up to now
-    end = Date.now();
-    push(end - prev > TP_STALL_MS ? "down" : "up", prev, end);
-  }
-  for (const [pl, s] of open) runs.push({ plan: pl, t0: s, t1: end });  // still-open runs reach the bar's edge
-  tpSegs = segs; tpRuns = runs;
-  const t0 = tpTicks[0].t, total = Math.max(1, end - t0);
-  // View range: how much session time one viewport width shows (default: at
-  // most 1 day — longer sessions become a horizontally slidable track).
-  // Because width scales as total/view, a viewport keeps its absolute time
-  // window while the live edge grows. The track opens scrolled to its right
-  // edge (the most recent time), and a view at the right edge stays pinned
-  // there as the live edge grows; sliding away hands control to the user —
-  // the `pinned` slack check keeps us from yanking them back.
-  const vw = tpScroll.clientWidth || 0;
-  const view = Math.max(6e4, Math.min(total, tpViewMs || Math.min(total, 864e5)));
-  const wide = vw > 0 && view < total ? Math.min(Math.round(total / view * vw), 120000) + "px" : "";
-  if (tpTrack.style.width !== wide) {
-    const pinned = tpScroll.scrollLeft + vw >= (tpTrack.clientWidth || vw) - 40;
-    tpTrack.style.width = wide;
-    if (wide && pinned) tpScroll.scrollLeft = tpScroll.scrollWidth;
-  }
-  tpBar.textContent = "";
-  let stalls = 0, upMs = 0, idleMs = 0, downMs = 0, stallMax = 0;
-  for (const s of segs) {
-    const dms = s.t1 - s.t0;
-    if (s.kind === "up") upMs += dms;
-    else if (s.kind === "idle") idleMs += dms;
-    else { stalls++; downMs += dms; stallMax = Math.max(stallMax, dms); }
-    const i = document.createElement("i");
-    i.className = s.kind;  // whitelisted: a TP_KINDS key, never event text
-    i.style.flexGrow = Math.max(1, Math.round((s.t1 - s.t0) / 1000));
-    // no native title here — the hover preview popover carries the segment info
-    tpBar.appendChild(i);
-  }
-  tpRulerRender(t0, total);
-  tpBar.setAttribute("aria-label", "session timeplan " + fmtClock(new Date(t0)) + " to " +
-    (tpLive ? "now" : fmtClock(new Date(end))) +
-    (stalls ? " with " + stalls + " stall segment" + (stalls > 1 ? "s" : "") : ""));
-  // beyond a day the bare clock time is ambiguous — prefix the date
-  const lab = d => (total > 864e5 ? fmtDay(d) + " " : "") + fmtClock(d);
-  tpStart.textContent = lab(new Date(t0));
-  tpMid.textContent = lab(new Date(t0 + total / 2));
-  tpEnd.textContent = tpLive ? "now" : lab(new Date(end));
-  tpRange.textContent = fmtDur(total) + (wide ? " · view " + fmtDur(view) : "") + (tpLive ? " · live" : "");
-  tpSummary = { t0, end, total, upMs, idleMs, downMs, stallCount: stalls, stallMax, live: tpLive };
-  tpDialsRender(total, upMs, tpLive ? Math.max(0, Date.now() - lastEvt) : null);
-  tpEl.classList.add("has");
-  // rendered before layout existed (panel was display:none) or the window
-  // resized since: the width/ruler math used a stale viewport — one more pass
-  if (vw !== (tpScroll.clientWidth || 0)) tpDirty = true;
-  if (tpHoverX !== null) tpHoverApply(tpHoverX);  // live rebuild: keep a resting cursor's preview current
-}
-// ---- timeplan hover preview ----
-// A time-point line under the pointer plus a popover of what was mid-run at
-// that instant: the strip state (working/idle/stall) with its segment span,
-// and every agent whose start->finish interval covers the hovered time (from
-// the per-plan agent rows; a live row's interval runs to now). Plans known
-// only from plan open/close events preview as an open run via tpRuns. Agent
-// labels and plan ids are event text: the popover is createElement/
-// textContent only, and row classes pass the NODE_STATES whitelist
-// (FRONTEND-1 discipline).
-function tpSegAt(t) {
-  for (const s of tpSegs) if (t >= s.t0 && t < s.t1) return s;
-  const last = tpSegs[tpSegs.length - 1];
-  return last && t >= last.t1 ? last : null;  // the bar's right edge still belongs to the last segment
-}
-function tpAgentsAt(t) {
-  const out = [], nowMs = Date.now();
-  for (const [id, p] of plans) {
-    if (id === "orchestrator") continue;
-    for (const row of p.agents.values()) {
-      const st = Date.parse(row.started || "");
-      if (isNaN(st) || t < st) continue;
-      // stale rows never got a terminal event — their plan's last event bounds them
-      const fin = row.finishedMs || (row.state === "running" ? nowMs : (p.lastTs ? p.lastTs.getTime() : st));
-      if (t > fin) continue;
-      out.push({ plan: id, label: row.label || "agent", state: row.state, st });
-    }
-  }
-  for (const r of tpRuns) {
-    if (t < r.t0 || t >= r.t1 || out.some(a => a.plan === r.plan)) continue;
-    const pl = plans.get(r.plan);
-    out.push({ plan: r.plan, label: "run", state: pl ? pl.state : "running", st: r.t0 });
-  }
-  out.sort((a, b) => a.st - b.st);
-  return out;
-}
-function tpHoverApply(clientX) {
-  if (!tpSummary) return;
-  const rect = tpTrack.getBoundingClientRect();
-  const w = tpTrack.clientWidth || rect.width;
-  if (rect.width < 4 || w < 4) return;
-  // task-view CSS zoom: pointer coords are visual px, left/width are layout px —
-  // divide by the effective scale or cursor and popover drift right of the pointer
-  const scale = rect.width / w;
-  const x = Math.max(0, Math.min(w, (clientX - rect.left) / scale));
-  const t = tpSummary.t0 + (x / w) * tpSummary.total;
-  tpCursor.style.left = x + "px";
-  tpCursor.hidden = false;
-  tpTip.textContent = "";
-  const head = document.createElement("div");
-  head.className = "tth";
-  const tm = document.createElement("span");
-  tm.textContent = (tpSummary.total > 864e5 ? fmtDay(new Date(t)) + " " : "") + fmtClockS(new Date(t));
-  head.appendChild(tm);
-  const seg = tpSegAt(t);
-  if (seg) {
-    const k = document.createElement("span");
-    k.className = "kind " + seg.kind;  // whitelisted: a TP_KINDS key, never event text
-    k.textContent = TP_KINDS[seg.kind];
-    head.appendChild(k);
-  }
-  tpTip.appendChild(head);
-  if (seg) {
-    const sp = document.createElement("div");
-    sp.className = "seg";
-    sp.textContent = fmtClock(new Date(seg.t0)) + "–" + fmtClock(new Date(seg.t1)) + " · " + fmtDur(seg.t1 - seg.t0);
-    tpTip.appendChild(sp);
-  }
-  const acts = tpAgentsAt(t);
-  if (acts.length) {
-    const ul = document.createElement("ul");
-    for (const a of acts.slice(0, 10)) {
-      const li = document.createElement("li");
-      li.className = NODE_STATES.includes(a.state) ? a.state : "";
-      const dot = document.createElement("span"); dot.className = "dot";
-      const who = document.createElement("span"); who.className = "who";
-      who.textContent = a.plan + " · " + a.label;
-      const at = document.createElement("span"); at.className = "at";
-      at.textContent = fmtSecs(t - a.st) + " in";
-      li.append(dot, who, at);
-      ul.appendChild(li);
-    }
-    if (acts.length > 10) {
-      const more = document.createElement("li");
-      more.className = "none";
-      more.textContent = "+" + (acts.length - 10) + " more";
-      ul.appendChild(more);
-    }
-    tpTip.appendChild(ul);
-  } else {
-    const none = document.createElement("div");
-    none.className = "none";
-    none.textContent = "no agents at this instant";
-    tpTip.appendChild(none);
-  }
-  tpTip.hidden = false;
-  // the popover lives outside the scroll clip (it would summon a vertical
-  // scrollbar and get clipped inside it): position in strip coordinates just
-  // below the track, centered on the cursor line, clamped to the visible
-  // viewport (a multi-day track is wider than the screen)
-  tpTip.style.top = (tpScroll.offsetTop + tpScroll.offsetHeight + 6) + "px";
-  const half = tpTip.offsetWidth / 2;
-  const vw = tpScroll.clientWidth || w;
-  const xs = x - (tpScroll.scrollLeft || 0);
-  const pad = Math.min(half, vw / 2);
-  tpTip.style.left = Math.round(Math.max(pad, Math.min(xs, vw - pad))) + "px";
-}
-function tpHoverMove(e) { tpHoverX = e.clientX; tpHoverApply(tpHoverX); }
-function tpHoverEnd() { tpHoverX = null; tpCursor.hidden = true; tpTip.hidden = true; }
-tpTrack.addEventListener("pointermove", tpHoverMove);
-tpTrack.addEventListener("pointerdown", tpHoverMove);
-tpTrack.addEventListener("pointerleave", tpHoverEnd);
-tpTrack.addEventListener("pointercancel", tpHoverEnd);
-// ---- view-range resize ----
-// ctrl/⌘ + wheel (trackpad pinch) continuously resizes the visible time
-// range — 1 day, 4h, 2d, … — anchored at the instant under the pointer;
-// plain sideways scroll slides the track; double-click resets to the
-// 1-day default. No dropdown: the range is a direct-manipulation scale.
-tpScroll.addEventListener("wheel", (e) => {
-  if (!(e.ctrlKey || e.metaKey) || !tpSummary) return;
-  e.preventDefault();
-  const total = tpSummary.total;
-  const vw = tpScroll.clientWidth || 1;
-  const cur = Math.max(6e4, Math.min(total, tpViewMs || Math.min(total, 864e5)));
-  const next = Math.max(6e4, Math.min(total, cur * (e.deltaY > 0 ? 1.25 : 0.8)));
-  if (next === cur) return;
-  const rect = tpScroll.getBoundingClientRect();
-  const scale = rect.width / (tpScroll.clientWidth || rect.width);
-  const px = Math.max(0, Math.min(vw, (e.clientX - rect.left) / scale));
-  const anchor = (tpScroll.scrollLeft + px) / (tpTrack.clientWidth || vw);  // session fraction under the pointer
-  tpViewMs = next;
-  tpRender();
-  tpScroll.scrollLeft = anchor * (tpTrack.clientWidth || vw) - px;
-}, { passive: false });
-tpScroll.addEventListener("dblclick", () => { tpViewMs = null; tpRender(); });
-window.addEventListener("resize", () => { tpDirty = true; });  // re-fit the view scale on the next tick
-setInterval(() => {
-  if (tpDirty || tpLive) tpRender();
-  if (statsMode && (statsDirty || tpLive)) statsRender();
-}, 1000);
-
-// ---- statistics view ----
-// Large-figure statistics over the same accumulators the cards and timeplan
-// already build: tokens and plan states from `plans`, wall-clock shares from
-// the timeplan summary, agent counts and durations from the per-plan agent
-// rows. Tiles are built once from the STAT_TILES literals; updates only ever
-// touch textContent with self-formatted numbers (FRONTEND-1 discipline).
-let evCount = 0, quietCount = 0, planTotal = 0, statsDirty = false;
-const statsEl = document.getElementById("statsView");
-const STAT_TILES = [
-  { id: "tokens", label: "tokens in", hero: true },
-  { id: "flow", label: "flow", dot: "queued" },
-  { id: "elapsed", label: "elapsed" },
-  { id: "working", label: "working" },
-  { id: "deadair", label: "dead air" },
-  { id: "stalls", label: "stalls" },
-  { id: "plansDone", label: "plans green", dot: "done" },
-  { id: "plansFailed", label: "plans red", dot: "failed" },
-  { id: "agents", label: "agents" },
-  { id: "attempts", label: "attempts" },
-  { id: "avgAgent", label: "avg agent" },
-  { id: "tokOut", label: "tokens out" },
-  { id: "cacheHit", label: "cache hit" },
-  { id: "burn", label: "burn rate" },
-  { id: "events", label: "events" },
-];
-const statEls = {};
-for (const t of STAT_TILES) {
-  const tile = document.createElement("section");
-  tile.className = "stat" + (t.hero ? " hero" : "");
-  const sl = document.createElement("span");
-  sl.className = "sl";
-  let dotEl = null;
-  if (t.dot) {
-    dotEl = document.createElement("i");
-    dotEl.className = "dot " + t.dot;
-    sl.appendChild(dotEl);
-  }
-  sl.appendChild(document.createTextNode(t.label));
-  const sv = document.createElement("span"); sv.className = "sv"; sv.textContent = "—";
-  const ss = document.createElement("span"); ss.className = "ss";
-  tile.append(sl, sv, ss);
-  statsEl.appendChild(tile);
-  statEls[t.id] = { sv, ss, dot: dotEl };
-}
-// `dot` (optional) recolors the tile's label dot; callers pass one of the
-// fixed literals "queued"/"running"/"done"/"failed", never event text.
-function setStat(id, v, sub, dot) {
-  statEls[id].sv.textContent = v;
-  statEls[id].ss.textContent = sub || "";
-  if (dot && statEls[id].dot) statEls[id].dot.className = "dot " + dot;
-}
-function statsReset() {
-  evCount = 0; quietCount = 0; planTotal = 0; statsDirty = false;
-  for (const t of STAT_TILES) setStat(t.id, "—", "", t.dot);
-}
-function statsRender() {
-  statsDirty = false;
-  let tin = 0, tout = 0, tcached = 0, twrite = 0, done = 0, failed = 0, runningPlans = 0;
-  let agents = 0, runningAgents = 0, durSum = 0, durN = 0, durMax = 0, attempts = 0, retries = 0;
-  const now = Date.now();
-  for (const [id, p] of plans) {
-    tin += p.tokIn; tout += p.tokOut; tcached += p.tokCached; twrite += p.tokWrite;
-    if (id === "orchestrator") continue;
-    if (p.state === "done") done++; else if (p.state === "failed") failed++;
-    else if (p.state === "running") runningPlans++;
-    // a plan's loop count is the deepest attempt any of its roles reached
-    let planAttempts = 0;
-    for (const n of p.roles.values()) planAttempts = Math.max(planAttempts, n.attempt);
-    attempts += planAttempts;
-    if (planAttempts > 1) retries += planAttempts - 1;
-    for (const row of p.agents.values()) {
-      agents++;
-      const st = Date.parse(row.started || "");
-      if (isNaN(st)) continue;
-      if (row.state === "running") { runningAgents++; durMax = Math.max(durMax, now - st); }
-      else if (row.finishedMs && row.finishedMs > st) {
-        const d = row.finishedMs - st;
-        durSum += d; durN++; durMax = Math.max(durMax, d);
-      }
-    }
-  }
-  // Entire-flow status: running / done / failed for the whole run, same fold
-  // as the server's home-grid tile. LIVE ACTIVITY WINS — any running plan or
-  // agent means the flow is running: a loop that failed and was resumed
-  // (automatically or by the user) must never flag the whole run failed while
-  // later loops work. Idle, the reserved orchestrator card's run-level state
-  // decides; without one, a failed plan with nothing running IS the verdict
-  // (all loops settled, or a loop awaiting the user after its last attempt
-  // failed), and all-green folds to done. The rendered word and dot class are
-  // picked from fixed literals via === comparisons — orchestrator state is
-  // event text, i.e. untrusted input, and must never reach a className raw
-  // (FRONTEND-1 discipline).
-  const plansSeen = plans.size - (plans.has("orchestrator") ? 1 : 0);
-  // Denominator: the run's DECLARED plan-card total (plans_total events),
-  // floored by the cards the stream has actually shown — one phase's
-  // declaration must never hide cards another phase appended to the same
-  // stream, and an undeclared run degrades to plans-seen as before.
-  const plansAll = Math.max(plansSeen, planTotal);
-  const orch = plans.get("orchestrator");
-  const active = runningPlans > 0 || runningAgents > 0;
-  let flow = "queued";
-  if (plans.size) {
-    if (active) flow = "running";
-    else if (orch && orch.state === "done") flow = "done";
-    else if (orch && orch.state === "failed") flow = "failed";
-    else if (failed > 0) flow = "failed";
-    // all-green folds to done only when every DECLARED plan is green too —
-    // an idle run whose declared plans never started is not a finished run.
-    else if (plansSeen > 0 && done === plansAll) flow = "done";
-    else flow = "running";
-  }
-  // Sub-line: while the flow runs it reads as PROGRESS — settled/all plans,
-  // where settled counts green AND red (a failed loop is finished work too);
-  // the green/red verdict breakdown only appears once the run settled.
-  setStat("flow", plans.size ? flow : "—",
-    !plansSeen ? ""
-      : flow === "done" || flow === "failed"
-        ? done + "/" + plansAll + " plans green" + (failed ? " · " + failed + " red" : "")
-        : (done + failed) + "/" + plansAll + " plans done", flow);
-  setStat("tokens", fmtTok(tin),
-    tin ? fmtIn(tin, tcached, twrite) + " · out " + fmtTok(tout) : "");
-  setStat("tokOut", fmtTok(tout), agents ? "≈ " + fmtTok(Math.round(tout / agents)) + " per agent" : "");
-  setStat("cacheHit", tin ? Math.round(100 * tcached / tin) + "%" : "—",
-    tin ? "r:" + fmtTok(tcached) + " of in " + fmtTok(tin) : "");
-  setStat("plansDone", String(done), "of " + plansAll + " plans" +
-    (plansAll > plansSeen ? " · " + (plansAll - plansSeen) + " unstarted" : " seen"));
-  setStat("plansFailed", String(failed), runningPlans + " running");
-  setStat("agents", String(agents), runningAgents + " running now");
-  setStat("attempts", String(attempts), retries + (retries === 1 ? " retry" : " retries"));
-  setStat("avgAgent", durN ? fmtDur(durSum / durN) : "—", durMax ? "longest " + fmtDur(durMax) : "");
-  setStat("events", String(evCount), quietCount + " token ticks");
-  const s = tpSummary;
-  if (s) {
-    setStat("elapsed", fmtDur(s.total),
-      fmtClock(new Date(s.t0)) + "–" + (s.live ? "now" : fmtClock(new Date(s.end))));
-    setStat("working", Math.round(100 * s.upMs / s.total) + "%", fmtDur(s.upMs) + " of " + fmtDur(s.total));
-    setStat("deadair", fmtDur(s.idleMs + s.downMs),
-      "idle " + fmtDur(s.idleMs) + " · stall " + fmtDur(s.downMs));
-    setStat("stalls", String(s.stallCount), s.stallCount ? "longest " + fmtDur(s.stallMax) : "none seen");
-    const wh = s.upMs / 3600000;  // burn is per WORKING hour — idle time doesn't dilute it
-    setStat("burn", wh > 0.01 ? fmtTok(Math.round(tin / wh)) + "/h" : "—",
-      wh > 0.01 ? "out " + fmtTok(Math.round(tout / wh)) + "/h · per working hour" : "");
-  }
-}
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMd(); });
 
 // ---- routing ----
-let currentTask = null, ws = null, retry = 1000, tasksData = null, statsMode = false;
+let currentTask = null, ws = null, retry = 1000, tasksData = null;
 const qsTask = () => new URLSearchParams(location.search).get("task");
-const qsView = () => new URLSearchParams(location.search).get("view");
-function navigate(name, view, push = true) {
+function navigate(name, push = true) {
   if (push) history.pushState({}, "",
-    name ? "?task=" + encodeURIComponent(name) + (view === "stats" ? "&view=stats" : "")
-         : location.pathname);
+    name ? "?task=" + encodeURIComponent(name) : location.pathname);
   route();
 }
 function route() {
-  const name = qsTask(), view = qsView();
+  const name = qsTask();
   stopWs();
   currentTask = name;
-  statsMode = !!name && view === "stats";
-  document.body.className = name ? (statsMode ? "stats" : "task") : "home";
-  document.getElementById("crumb").textContent =
-    name ? "· " + name + (statsMode ? " · statistics" : "") : "";
+  document.body.className = name ? "task" : "home";
+  document.getElementById("crumb").textContent = name ? "· " + name : "";
   const h1 = document.getElementById("pageTitle");
   h1.textContent = name ? "⌂ orchestrator monitor" : "orchestrator monitor";
   if (name) { h1.tabIndex = 0; h1.setAttribute("role", "link"); h1.title = "back to all tasks"; }
   else { h1.removeAttribute("tabindex"); h1.removeAttribute("role"); h1.title = "all tasks"; }
-  document.title = name ? name + (statsMode ? " · statistics" : "") + " — orchestrator monitor"
-                        : "orchestrator monitor";
-  // stats link flips direction: task view -> statistics, statistics -> task view
-  const sl = document.getElementById("statsLink");
-  sl.hidden = !name;
-  if (name) {
-    sl.textContent = statsMode ? "← task view" : "statistics →";
-    sl.href = "?task=" + encodeURIComponent(name) + (statsMode ? "" : "&view=stats");
-  }
+  document.title = name ? name + " — orchestrator monitor" : "orchestrator monitor";
   closeMd();
   clearArtifacts();
   if (name) {
     selectTask(name);
     retry = 1000;
     connect();
-    if (!statsMode) refreshArtifacts();
+    refreshArtifacts();
   } else {
     refreshTasks();
   }
 }
-document.getElementById("statsLink").onclick = (e) => {
-  e.preventDefault();
-  if (currentTask) navigate(currentTask, statsMode ? undefined : "stats");
-};
 // FRONTEND-5: select the routed task in the dropdown. Assigning <select>.value
 // to a name with no matching <option> silently blanks the control (selectedIndex
 // -1) while the socket still streams the server's STATE_DIR fallback for the
@@ -1549,8 +622,6 @@ function stopWs() {
   if (ws) { ws.onclose = null; ws.onmessage = null; ws.onopen = null; try { ws.close(); } catch (e) {} ws = null; }
   document.getElementById("cards").innerHTML = "";
   plans.clear();
-  tpReset();
-  statsReset();
 }
 
 // ---- home grid ----
@@ -1630,8 +701,6 @@ function connect() {
     // server replays full history on every connect — rebuild from scratch, no double counting
     document.getElementById("cards").innerHTML = "";
     plans.clear();
-    tpReset();
-    statsReset();
     replaying = true; noteReplay();
   };
   ws.onmessage = (m) => { noteReplay(); try { onEvent(JSON.parse(m.data)); } catch (e) {} };
@@ -1661,15 +730,6 @@ rateSel.value = localStorage.getItem("orchRefreshRate") || "0";
 if (rateSel.selectedIndex < 0) rateSel.value = "0";
 rateSel.onchange = () => { localStorage.setItem("orchRefreshRate", rateSel.value); applyRate(+rateSel.value); };
 applyRate(+rateSel.value);
-// Task-view zoom: writes the --zoom custom property consumed by the
-// body.task/body.stats CSS rule above — the value is one of the fixed
-// option literals, never free text. Choice persists in localStorage.
-const zoomSel = document.getElementById("zoomSel");
-function applyZoom(z) { document.documentElement.style.setProperty("--zoom", z); }
-zoomSel.value = localStorage.getItem("orchZoom") || "1";
-if (zoomSel.selectedIndex < 0) zoomSel.value = "1";  // stored value no longer an option -> default
-zoomSel.onchange = () => { localStorage.setItem("orchZoom", zoomSel.value); applyZoom(zoomSel.value); };
-applyZoom(zoomSel.value);
 refreshTasks();
 route();
 setInterval(() => { refreshTasks(); refreshArtifacts(); }, 5000);
