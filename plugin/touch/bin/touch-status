@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# touch-status — append ONE orchestration event to a task's events.jsonl.
+#
+#   touch-status <plan> <stage> <state> [detail...]
+#
+# Thin front for shared/monitoring/status.sh, which owns the format, the 1 KB
+# detail cap, the flock and the writer attribution. This file exists so skills
+# and agents can call a bare command name instead of a path: a PATH lookup
+# survives a plugin update, a baked cache path does not.
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (the plugin root, the plugin data dir and the project
+# directory are all measured EMPTY here — GD-T4, probe C2/P10). So:
+#
+#   * code location comes from $0, which IS absolute in a bin/ launch;
+#   * the project signal is $PWD and nothing else. The earlier design had each
+#     wrapper export the tasks root "from the project-directory variable when
+#     present"; that variable is never present in bin/, so the branch was
+#     unreachable dead code. It is deleted, not ported.
+#
+# Deliberately NOT set here: ORCH_STATE_DIR. The caller names the task folder
+# it is reporting into; a wrapper guessing that is how events land in the wrong
+# stream.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-status: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    echo "touch-status: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+# The plugin root is a version-stamped cache that is re-copied on update: never
+# leave .pyc droppings in it.
+export PYTHONDONTWRITEBYTECODE=1
+
+# The tasks root is deliberately NOT resolved here. status.sh resolves it
+# itself, in the four rungs both daemons use — $ORCH_TASKS_ROOT > the harness's
+# project-directory variable (the one named in prose above, EMPTY here but not
+# in a hook) > a $PWD walk-up to a .claude/ marker > a module-relative legacy
+# path kept only if it already exists (in a payload it does not, so that rung is
+# inert). A wrapper that computed the same answer and exported it would
+# pin the callee's FIRST rung, so every later correction to that resolver would
+# be unreachable for anyone who came in through bin/. One resolver, living in
+# the code that owns it.
+
+# `bash <script>` rather than executing it: a copy that lost its exec bit
+# somewhere in a zip/unzip round trip still writes events instead of failing
+# every status call with "permission denied" (CM-13). The arguments are
+# forwarded unsplit — status.sh takes `detail` as ${*} after `shift 3`, so the
+# quoting has to survive this hop intact — and through `${1+"$@"}` rather than a
+# bare `"$@"`, because bash before 4.4 treats `"$@"` as an unset variable under
+# `set -u` when there are no positional parameters, and stock macOS ships
+# /bin/bash 3.2.57, which `#!/usr/bin/env bash` finds without Homebrew.
+WRITER="$ROOT/shared/monitoring/status.sh"
+[ -f "$WRITER" ] || {
+    echo "touch-status: $WRITER is missing; this payload is incomplete" >&2
+    exit 1
+}
+exec bash "$WRITER" ${1+"$@"}

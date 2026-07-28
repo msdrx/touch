@@ -26,16 +26,51 @@ sub-plans (SD-2):
 
 The two Mongo modules land in later sub-plans (sp-05/sp-06); this guard passes
 before they exist and tightens automatically when they appear.
+
+SCOPE (item 10). "The ingest and serve critical path" stopped being one
+directory the day Touch grew a shipping subtree: `plugin/touch/` carries a
+pinned copy of `aggregator/`, the two monitoring daemons, the scope-guard hook
+and the `bin/` wrappers, and a consumer runs THOSE bytes. A guard that only
+looked at `aggregator/` would be green while the payload grew a dependency, so
+the AST arm walks a list of SCAN_ROOTS covering the canonical sources and the
+payload alike. Two arms stay narrower on purpose and say why at their
+definition: the subprocess import arm (only `aggregator/` is an importable
+package) and the pymongo exception (pinned to two file NAMES inside a
+directory named `aggregator`, so no `hooks/mirror.py` inherits it by analogy).
 """
 
 import ast
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+
+#: The one importable Python package, and the only root the subprocess arm can
+#: use: `plugin/touch/` has no `__init__.py` chain and `.claude/shared/` is not
+#: a package at all — both are run as scripts, never imported.
 PKG = REPO / "aggregator"
+
+#: (root, recursive) — every tree whose Python must import with nothing
+#: third-party installed. `.claude/shared/monitoring/` is NON-recursive: its
+#: `tests/` subtree is dev-only, never ships (GD-T2), and is not on the
+#: critical path. Roots that do not exist yet are skipped, so this guard is
+#: green before `plugin/touch/` is built and tightens the moment it appears.
+SCAN_ROOTS = (
+    (REPO / "aggregator", True),
+    (REPO / ".claude" / "shared" / "monitoring", False),
+    (REPO / "plugin" / "touch", True),
+)
+
+#: The shipped shell entry points. GD-21 binds them too: a wrapper that shells
+#: out to `jq` has added a runtime dependency the manifest cannot declare and
+#: the consumer may not have. (`test_package.py` asserts the same thing over
+#: the git-built stage; this arm runs in the working tree, without git, and is
+#: about the dependency law rather than the payload gate.)
+BIN_ROOT = REPO / "plugin" / "touch" / "bin"
+FOREIGN_INTERPRETERS = re.compile(r"\b(jq|node|npx|deno|bun|ruby|perl|php|Rscript)\b")
 
 #: GD-21's single exception. File name -> the top-level module names it may
 #: import. `dns` is dnspython's import name (needed for `mongodb+srv://` URIs).
@@ -59,8 +94,37 @@ def check(cond, msg):
         failures.append(msg)
 
 
-def module_files():
-    return sorted(p for p in PKG.rglob("*.py") if "__pycache__" not in p.parts)
+def _is_scannable(path):
+    return "__pycache__" not in path.parts and "tests" not in path.parts
+
+
+def scan_files():
+    """Every `*.py` under SCAN_ROOTS — the AST arm's subject."""
+    files = []
+    for root, recursive in SCAN_ROOTS:
+        if not root.is_dir():
+            continue
+        found = root.rglob("*.py") if recursive else root.glob("*.py")
+        files.extend(p for p in found if _is_scannable(p))
+    return sorted(set(files))
+
+
+def package_modules():
+    """Every `*.py` in the importable `aggregator/` package."""
+    return sorted(p for p in PKG.rglob("*.py") if _is_scannable(p))
+
+
+def pymongo_allowance(path):
+    """What `path` may import beyond the stdlib.
+
+    Keyed by file NAME *and* by the directory it sits in: `mirror.py` earns the
+    exception because it is `aggregator/mirror.py` (or the payload's pinned
+    copy of it), never because of what it is called. GD-21 says the exception
+    is never widened by analogy — this is the line that enforces it.
+    """
+    if path.parent.name != "aggregator":
+        return set()
+    return PYMONGO_ALLOWED.get(path.name, set())
 
 
 _FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
@@ -134,19 +198,20 @@ def test_the_guard_detects_an_eager_import_beside_a_lazy_one():
 
 def test_no_third_party_imports():
     print("test_no_third_party_imports")
-    files = module_files()
-    check(bool(files), f"found {len(files)} module(s) under aggregator/")
+    files = scan_files()
+    check(bool(files), f"found {len(files)} module(s) across {len(SCAN_ROOTS)} scan root(s)")
     stdlib = set(sys.stdlib_module_names) | {"aggregator", "__future__"}
     for path in files:
+        rel = path.relative_to(REPO).as_posix()
         top, lazy = imports_of(ast.parse(path.read_text()))
-        allowed = PYMONGO_ALLOWED.get(path.name, set())
+        allowed = pymongo_allowance(path)
         offenders = sorted((top | lazy) - stdlib - allowed)
         check(not offenders,
-              f"{path.name}: no third-party imports{'' if not offenders else f' — {offenders}'}")
-        if path.name in PYMONGO_ALLOWED:
+              f"{rel}: no third-party imports{'' if not offenders else f' — {offenders}'}")
+        if allowed:
             eager = sorted(top & allowed)
             check(not eager,
-                  f"{path.name}: pymongo is imported lazily, not at module level "
+                  f"{rel}: pymongo is imported lazily, not at module level "
                   f"(GD-21){'' if not eager else f' — eager: {eager}'}")
 
 
@@ -154,6 +219,15 @@ def test_the_exception_is_named_and_narrow():
     print("test_the_exception_is_named_and_narrow")
     check(set(PYMONGO_ALLOWED) == {"mongo_store.py", "mirror.py"},
           "exactly two files may import pymongo (GD-21) — no third by analogy")
+    # The name alone must not be enough. With the payload subtree in the scan
+    # set there are now two files called `mirror.py` that legitimately qualify
+    # and any number of directories where one would not.
+    check(pymongo_allowance(REPO / "aggregator" / "mirror.py"),
+          "aggregator/mirror.py earns the exception")
+    check(pymongo_allowance(REPO / "plugin" / "touch" / "aggregator" / "mirror.py"),
+          "the payload's pinned copy earns it too (same package directory)")
+    check(not pymongo_allowance(REPO / "plugin" / "touch" / "hooks" / "mirror.py"),
+          "a same-named file outside an aggregator/ directory does NOT (GD-21)")
     for name in PYMONGO_ALLOWED:
         path = PKG / name
         state = "present" if path.exists() else "not written yet (sp-05/sp-06)"
@@ -162,7 +236,11 @@ def test_the_exception_is_named_and_narrow():
 
 def test_every_module_imports_without_third_party_packages():
     print("test_every_module_imports_without_third_party_packages")
-    for path in module_files():
+    # `aggregator/` only, and deliberately: this arm PROVES the claim by
+    # importing, which needs an importable package. The payload's copy is
+    # byte-equal to what is imported here (`tests/test_plugin_tree.py` is the
+    # pin), so proving it once proves it for both.
+    for path in package_modules():
         rel = path.relative_to(REPO).with_suffix("")
         dotted = ".".join(rel.parts)
         if dotted.endswith(".__init__"):
@@ -186,6 +264,26 @@ def test_every_module_imports_without_third_party_packages():
                          f"{'' if not extra else f' — {extra}'}")
 
 
+def test_shipped_wrappers_add_no_dependency():
+    print("test_shipped_wrappers_add_no_dependency")
+    if not BIN_ROOT.is_dir():
+        print("  skip: plugin/touch/bin/ does not exist yet (item 08) — "
+              "no shipped wrapper to check")
+        return
+    wrappers = sorted(p for p in BIN_ROOT.iterdir() if p.is_file())
+    check(bool(wrappers), f"found {len(wrappers)} shipped wrapper(s)")
+    for path in wrappers:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # Full-line comments are stripped first: a wrapper's header is allowed
+        # to explain why it uses no `jq`, and a naive substring search would
+        # flag its own rationale (the `sync_plugin.sh` precedent).
+        code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+        found = sorted({m.group(0) for m in FOREIGN_INTERPRETERS.finditer(code)})
+        check(not found,
+              f"bin/{path.name}: no non-stdlib interpreter (GD-21)"
+              f"{'' if not found else f' — {found}'}")
+
+
 def test_pymongo_absence_is_the_tested_condition():
     print("test_pymongo_absence_is_the_tested_condition")
     # Not a requirement — a fact worth printing, because the guard above means
@@ -202,6 +300,7 @@ def main():
     for t in (test_no_third_party_imports, test_the_exception_is_named_and_narrow,
               test_the_guard_detects_an_eager_import_beside_a_lazy_one,
               test_every_module_imports_without_third_party_packages,
+              test_shipped_wrappers_add_no_dependency,
               test_pymongo_absence_is_the_tested_condition):
         t()
     print()

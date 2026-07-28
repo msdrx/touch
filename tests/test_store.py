@@ -368,8 +368,13 @@ def test_state_root_resolution():
                 os.environ.pop("TOUCH_STATE_DIR", None)
             else:
                 os.environ["TOUCH_STATE_DIR"] = old
-        check(state_root() == str(REPO / ".touch"),
-              "the default is <repo>/.touch, never under .claude/local-orchestrators/")
+        # The default is project-anchored since item 03 (CM-2/GD-T5), so the
+        # project is pinned explicitly rather than left to whatever
+        # `CLAUDE_PROJECT_DIR`/cwd the suite happens to run under — an
+        # unpacked-archive run has both pointing somewhere else, and the
+        # provenance of each root is asserted in full by tests/test_paths.py.
+        check(state_root(env={"CLAUDE_PROJECT_DIR": str(REPO)}) == str(REPO / ".touch"),
+              "the default is <project>/.touch, never under .claude/local-orchestrators/")
 
 
 # --- durability: torn tails, oversize, concurrency ------------------------

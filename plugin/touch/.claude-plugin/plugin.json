@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "touch",
+  "displayName": "Touch",
+  "version": "0.1.0",
+  "description": "See what the subagents in a Claude Code session are doing: a read-only, loopback-only, token-gated dashboard over the live agent tree, plus deterministic research and implement orchestration skills. It reads your transcripts under ~/.claude/projects/, keeps its own state inside the project you run it in (the optional Mongo mirror in docs/mongo.md is off by default), and installs one PreToolUse hook that stays inert unless an orchestration run is active.",
+  "author": {
+    "name": "Michael Sadradze",
+    "url": "https://github.com/msdrx"
+  },
+  "homepage": "https://github.com/msdrx/touch-plugin",
+  "repository": "https://github.com/msdrx/touch-plugin",
+  "license": "MIT",
+  "keywords": [
+    "subagents",
+    "orchestration",
+    "monitoring",
+    "dashboard",
+    "observability",
+    "transcripts"
+  ],
+  "defaultEnabled": false,
+  "userConfig": {
+    "run_scope_guard": {
+      "type": "boolean",
+      "title": "Run the orchestration scope guard",
+      "default": true,
+      "description": "Run the PreToolUse run-scope guard. It is already inert unless .claude/local-orchestrators/ACTIVE exists in your project; set this to false to disable the hook outright."
+    }
+  }
+}

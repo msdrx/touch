@@ -16,8 +16,8 @@ emphasize, "then implement it").
 
 ## Contract (what this skill produces)
 
-A plan at `.claude/local-orchestrators/<task-name>/plan/<name>-plan.md` plus a
-structured return `{ plan_file, item_count, summary }`. The plan is ONE
+A plan at `<project>/.claude/local-orchestrators/<task-name>/plan/<name>-plan.md`
+plus a structured return `{ plan_file, item_count, summary }`. The plan is ONE
 complete, self-contained document — never divided into sub-plans (that
 divide-and-conquer belongs to `implement-plan`'s Fable divider). It carries:
 
@@ -33,55 +33,63 @@ file ownership without re-research.
 
 ## Procedure
 
-`templates/research.workflow.js` (next to this file) is the NORMATIVE
-protocol — prompts, schemas, models, monitor markers, status.sh calls, phase
-structure. Adapt it into
-`.claude/local-orchestrators/<task-name>/orch-scripts/research.workflow.js`
-(all task state lives under the task folder), deciding only:
+`${CLAUDE_PLUGIN_ROOT}/skills/execute-research/templates/research.workflow.js`
+is the NORMATIVE protocol — prompts, schemas, models, monitor markers,
+`touch-status` calls, phase structure. Adapt it into
+`<project>/.claude/local-orchestrators/<task-name>/orch-scripts/research.workflow.js`
+(all task state lives under the task folder, inside the user's project),
+deciding only:
 
-1. SUBJECT — the exact files / dirs / sources to study.
-2. PERSPECTIVES — a deterministic list that partitions the subject (per module
+1. The two path constants at the top of the copy. Nothing substitutes
+   placeholders inside a template file, so fill them in yourself:
+   `PROJECT_DIR` = the project root (the absolute path this session is working
+   in), `PLUGIN_ROOT` = `${CLAUDE_PLUGIN_ROOT}` — the value that literal
+   expands to right here, in this instruction.
+2. SUBJECT — the exact files / dirs / sources to study.
+3. PERSPECTIVES — a deterministic list that partitions the subject (per module
    / layer / concern / source); the fan-out and prompts must be a pure function
    of it.
-3. Task name, RESEARCH_CONTEXT, and how `<research_hints>` slot in.
+4. Task name, RESEARCH_CONTEXT, and how `<research_hints>` slot in.
 
 Run it, keeping the template's invariants:
 
 - Research fan-out is parallel with a barrier (synthesis needs all reports);
   synthesis is ONE agent reading all findings files from disk.
 - All agents are READ-ONLY for source; findings/plan files are task state and
-  MUST be written. Empirical checks only in a throwaway dir under
-  `/tmp/claude-1000`; web research may use WebSearch / WebFetch.
+  MUST be written. Empirical checks only in a throwaway directory outside the
+  project (this session's scratchpad, or one under `$TMPDIR`); web research may
+  use WebSearch / WebFetch.
 - Models: research = `opus` (effort by complexity, never above xhigh);
   synthesizer = `fable` — the only Fable role here (the others are
   `implement-plan`'s divider and final-gate reviewer). Brand-new subagent every
   time; never resume / continue / SendMessage a prior one.
 - Keep the `[monitor] plan=… stage=… role=research|synth attempt=…` markers and
-  the status.sh calls exactly as templated.
+  the `touch-status` calls exactly as templated.
 
 ## Monitoring
 
-Per the `m-orchestrator` skill (scripts in `.claude/shared/monitoring/`) — if
-that skill does not exist, STOP and notify the caller instead of improvising.
-Seed one card per phase-stream (`research`, `synthesis`) before launching and
-start the daemons, writing the `ACTIVE` run-scope sentinel (m-orchestrator §4)
-so research subagents stay out of other tasks' state. When synthesis finishes, the plan card closes via the
-templated status calls; the driver closes the badge with
-`status.sh orchestrator complete done "<run summary>"`.
+Per the `m-orchestrator` skill (the `touch-status` / `touch-monitor` /
+`touch-watcher` commands) — if that skill does not exist, STOP and notify the
+caller instead of improvising. Seed one card per phase-stream (`research`,
+`synthesis`) before launching and start the daemons, writing the `ACTIVE`
+run-scope sentinel (m-orchestrator §4) so research subagents stay out of other
+tasks' state. When synthesis finishes, the plan card closes via the templated
+status calls; the driver closes the badge with
+`touch-status orchestrator complete done "<run summary>"`.
 
 ## Completion
 
 Present the plan's item summary and the plan-file path. Build an HTML final
 report via the artifact flow: load the `artifact-design` skill FIRST (design
 guidance), write the page to
-`.claude/local-orchestrators/<task-name>/report/research-report.html`
+`<project>/.claude/local-orchestrators/<task-name>/report/research-report.html`
 (named so an auto-chained `implement-plan` run's `final-report.html` cannot
 overwrite it), then publish that file with the Artifact tool. The task-folder
 file is the required local copy — the dashboard auto-links artifacts inside
 the task folder, so it must live there, not in /tmp, and stays even after
 publishing. KEEP the task state folder (including `events.jsonl`) — completed
 runs are monitor history; never delete or truncate. Clear the run scope by
-removing this task's line from `.claude/local-orchestrators/ACTIVE`
+removing this task's line from `<project>/.claude/local-orchestrators/ACTIVE`
 (m-orchestrator §4) — unless auto-chaining, where `implement-plan` keeps the
 same task's line armed.
 

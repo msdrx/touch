@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# touch-monitor — serve the orchestrator monitoring dashboard.
+#
+#   touch-monitor [port] [--allow-origin O] [--allow-host H]
+#
+# Front for shared/monitoring/monitor_server.py: one HTTP + WebSocket server
+# for every task under the project's tasks root. It prints its own per-boot
+# token and the URL to open.
+#
+# It binds loopback, always: `--open` is refused and a non-loopback $ORCH_BIND
+# is refused, because the daemon resolves its bind from BOTH of them and no
+# wrapper opens a port on a user's behalf (GD-T8).
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (plugin root, plugin data dir, project directory — all
+# measured EMPTY here, GD-T4 / probe C2). Code location comes from $0, which is
+# absolute in a bin/ launch; the only project signal is $PWD. The earlier
+# design's "export the tasks root from the project-directory variable when
+# present" clause was therefore unreachable dead code and is deleted, not
+# ported.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-monitor: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    echo "touch-monitor: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+export PYTHONDONTWRITEBYTECODE=1
+
+# GD-T8, first spelling. The daemon's own resolve_host() tests for this flag by
+# literal membership anywhere in argv, so scanning every word here — value
+# positions included — is exact parity with the thing being fronted, not
+# over-reach: whatever this loop would let through is precisely what would open
+# the port downstream.
+#
+# `${1+"$@"}`, never a bare `"$@"`: bash before 4.4 treats `"$@"` as an unset
+# variable under `set -u` when there are no positional parameters, and stock
+# macOS ships /bin/bash 3.2.57 — which `#!/usr/bin/env bash` finds on a machine
+# without Homebrew. Zero arguments is the NORMAL way to run this command.
+for arg in ${1+"$@"}; do
+    if [ "$arg" = "--open" ]; then
+        echo "touch-monitor: refusing to forward --open; a wrapper never opens a port for you (GD-T8)." >&2
+        echo "touch-monitor: to bind a reachable interface deliberately, run the daemon itself:" >&2
+        echo "  python3 \"$ROOT/shared/monitoring/monitor_server.py\" --open --allow-origin http://HOST:8931" >&2
+        exit 2
+    fi
+done
+
+# GD-T8, second spelling — and the one that arrives without anybody typing it.
+# The daemon resolves its bind as --open > $ORCH_BIND > loopback, so an
+# inherited ORCH_BIND (a previous shell, a direnv, an earlier orchestration run)
+# would publish /file to the network through a wrapper whose header promises the
+# opposite. It is refused rather than quietly unset: the export meant something
+# to whoever wrote it, and a wrapper that disagrees in silence is worse than one
+# that says so.
+#
+# Stripped first, because the daemon strips: monitor_server.resolve_host reads
+# `(os.environ.get("ORCH_BIND") or "").strip()`, so `ORCH_BIND=" 127.0.0.1"`
+# and `ORCH_BIND="  "` — both easy to get out of a sourced .env or a `read` —
+# bind loopback there and would be refused here. Parity with the thing being
+# fronted is this file's whole standard; an over-refusal is still a divergence.
+BIND="${ORCH_BIND:-}"
+BIND="${BIND#"${BIND%%[![:space:]]*}"}"          # leading whitespace
+BIND="${BIND%"${BIND##*[![:space:]]}"}"          # trailing whitespace
+
+refuse_bind() {
+    echo "touch-monitor: refusing to start with ORCH_BIND=$ORCH_BIND; a wrapper never opens a port for you (GD-T8) — loopback addresses only." >&2
+    echo "touch-monitor: unset ORCH_BIND, or run the daemon itself to bind that interface deliberately:" >&2
+    echo "  python3 \"$ROOT/shared/monitoring/monitor_server.py\" --allow-origin http://HOST:8931" >&2
+    exit 2
+}
+
+# The 127/8 arm is a SHAPE test, in two stages, not a prefix test. A `case`
+# pattern is a glob, so any single-stage `127.…*` spelling admits a HOSTNAME
+# that merely begins that way — `127.evil.example`, and equally
+# `127.0.0.1.evil.example`, which is the canonical shape of this attack
+# precisely because it READS as a loopback address (wildcard DNS hands out
+# `<anything>.<domain>` for free). socket.bind() then feeds that name to
+# getaddrinfo and binds whatever DNS answered: a public interface, admitted by a
+# list whose whole purpose is "loopback only" — and, this being the variable
+# nobody types, admitted without anyone having looked at it. Narrowing the glob
+# cannot close that class; only rejecting every character a dotted quad cannot
+# contain can. So: empty, or three exact literals, or `127.` followed by digits
+# and dots and nothing else. That is the accepted set, in full.
+case "$BIND" in
+    ''|localhost|::1|'[::1]') ;;                 # loopback, or unset → daemon default
+    127.*)
+        case "$BIND" in
+            *[!0-9.]*) refuse_bind ;;            # a NAME wearing a loopback prefix
+            *) ;;                                # a dotted quad in 127/8
+        esac
+        ;;
+    *) refuse_bind ;;
+esac
+
+# The tasks root is deliberately NOT resolved here. monitor_server.py resolves
+# it itself — $ORCH_TASKS_ROOT > the harness's project-directory variable (the
+# one named in prose above, EMPTY here but not in a hook) > a cwd walk-up to a
+# .claude/ marker > a module-relative legacy path kept only if it already exists
+# (in a payload it does not, so that rung is inert). A wrapper that computed the
+# same answer and exported it would pin the callee's FIRST rung, and every later
+# correction to that resolver would then be unreachable for anyone who came in
+# through bin/. One resolver, living in the code that owns it.
+#
+# The target is checked before python3 is handed it, and LAST so that neither
+# GD-T8 refusal above can be shadowed by a payload complaint. Without this an
+# incomplete payload — or a wrapper pointed one directory wrong — dies with
+# python3's own "can't open file '<path>'", whose text quotes the path it was
+# given and therefore contains the module name: a message that reads, to any
+# grep, exactly like the daemon having been reached and having spoken.
+DAEMON="$ROOT/shared/monitoring/monitor_server.py"
+[ -f "$DAEMON" ] || {
+    echo "touch-monitor: $DAEMON is missing; this payload is incomplete" >&2
+    exit 1
+}
+exec python3 "$DAEMON" ${1+"$@"}

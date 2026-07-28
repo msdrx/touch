@@ -6,6 +6,7 @@ No pytest, no omnigent imports. Uses an ephemeral throwaway state dir under
 loudly (AssertionError -> non-zero exit).
 """
 import asyncio
+import base64
 import hashlib
 import importlib.util
 import json
@@ -340,7 +341,10 @@ def test_health_parse_failure_counter():
     out = ms.task_status(path)
     health = ms.health_payload()
     assert health["status"] == "ok", health
-    assert health["parse_failures"].get(path) == 2, health
+    # The counter is published under the path's DIGEST, never the path (F2 /
+    # AUDIT-15 parity): /health is the one route with no token in front of it.
+    assert health["parse_failures"].get(ms.path_digest(path)) == 2, health
+    assert path not in health["parse_failures"], health
     assert health["parse_failures_total"] == base + 2, (base, health)
     # The good lines still render — a poisoned line degrades, never blocks.
     assert out["status"] == "done", out
@@ -350,7 +354,8 @@ def test_health_parse_failure_counter():
     with open(clean, "wb") as f:
         f.write((good + "\n").encode())
     ms.task_status(clean)
-    assert clean not in ms.health_payload()["parse_failures"], ms.PARSE_FAILURES
+    assert ms.path_digest(clean) not in ms.health_payload()["parse_failures"], \
+        ms.PARSE_FAILURES
 
     # m-2: so does a stream that DISAPPEARS (deleted or rotated after a poisoned
     # scan). The early return on stat failure used to skip the pop, so a gone
@@ -360,7 +365,8 @@ def test_health_parse_failure_counter():
     os.remove(path)
     gone = ms.task_status(path)
     assert gone["status"] == "empty", gone
-    assert path not in ms.health_payload()["parse_failures"], ms.PARSE_FAILURES
+    assert ms.path_digest(path) not in ms.health_payload()["parse_failures"], \
+        ms.PARSE_FAILURES
     assert ms.health_payload()["parse_failures_total"] == base, ms.PARSE_FAILURES
     ms.PARSE_FAILURES.pop(path, None)
 
@@ -527,13 +533,554 @@ def test_r58_genuine_failure_is_not_a_fabrication():
 
 
 def test_no_root_events_shortcircuit():
-    """resolve_state_dir has no ROOT events.jsonl short-circuit (SHELL-5 / D6)."""
+    """resolve_state_dir never resolves onto the module dir (SHELL-5 / D6 / CM-3).
+
+    Two generations of this rule. The first said "no ROOT short-circuit": a
+    stray ``ROOT/events.jsonl`` must not hijack auto-discovery. Item 04 took the
+    remaining half — ROOT was still the FALLBACK when nothing else resolved, and
+    in a packaged copy that is a write into a version-stamped cache. Now the
+    daemon exits instead, so ``ROOT`` must not appear in the resolver at all.
+    """
     import inspect
     src = inspect.getsource(ms.resolve_state_dir)
-    assert "return ROOT" in src  # only the final empty fallback
-    # the abandoned short-circuit pattern must be gone
-    assert "events.jsonl\")):\n        return ROOT" not in src
-    assert src.count("return ROOT") == 1, src
+    assert "return ROOT" not in src, src
+    assert "sys.exit(" in src, "an unresolvable state dir must exit, not fall back"
+    for var in ("ORCH_STATE_DIR", "ORCH_TASKS_ROOT", "CLAUDE_PROJECT_DIR"):
+        assert var in src, f"the exit message must name {var}"
+
+
+# --------------------------------------------------------------------------
+# Item 04 — one tasks-root resolver, duplicated verbatim in both daemons.
+# --------------------------------------------------------------------------
+
+WATCHER_PATH = os.path.abspath(os.path.join(HERE, "..", "decision_watcher.py"))
+
+
+def _function_source(path, name):
+    """One top-level def's source text, read from the FILE (never imported).
+
+    Reading the text is the point: importing decision_watcher would run its
+    module body, and the two copies are pinned as *text*, so text is what this
+    compares.
+    """
+    src = open(path, encoding="utf-8").read()
+    start = src.index(f"\ndef {name}(") + 1
+    end = src.index("\n\n\n", start)
+    return src[start:end]
+
+
+def test_the_two_daemons_ship_the_same_resolver_byte_for_byte():
+    """CM-3: module independence forbids a shared import, so the copies are pinned.
+
+    Same contract as FOLD_GEN's twin literal: one behaviour, two files, and a
+    test that fails the moment they disagree by a single byte.
+    """
+    for name in ("resolve_tasks_root", "in_plugin_cache"):
+        mine = _function_source(MODULE_PATH, name)
+        theirs = _function_source(WATCHER_PATH, name)
+        assert mine == theirs, f"{name}() has drifted between the two daemons"
+        assert "ROOT" not in mine.replace("TASKS_ROOT", ""), \
+            f"{name}() must be self-contained (no module-level ROOT reference)"
+
+
+def _tasks_root(env, cwd, as_file=WATCHER_PATH):
+    """Run the daemons' own resolver in a subprocess with a controlled env/cwd.
+
+    ``as_file`` is the ``__file__`` the function believes it has — that is what
+    the legacy rung measures ``../../local-orchestrators`` from, so pointing it
+    somewhere outside a repo is how the "only if it already exists" arm is
+    exercised without moving the real file. Only the function is exec'd, never
+    the module body (which would tail a journal); it is self-contained by the
+    byte-equality test above.
+    """
+    import subprocess
+    clean = {k: v for k, v in os.environ.items()
+             if k not in ("ORCH_TASKS_ROOT", "CLAUDE_PROJECT_DIR", "ORCH_STATE_DIR")}
+    clean.update(env)
+    code = (
+        "import os\n"
+        f"src = open({WATCHER_PATH!r}, encoding='utf-8').read()\n"
+        "body = src[src.index('\\ndef resolve_tasks_root('):"
+        "src.index('\\ndef in_plugin_cache(')]\n"
+        f"ns = {{'os': os, '__file__': {as_file!r}}}\n"
+        "exec(body, ns)\n"
+        "print(ns['resolve_tasks_root']())\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], env=clean, cwd=cwd,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _nearest_claude_marker(start):
+    """The nearest ancestor of ``start`` holding a `.claude/`, or None.
+
+    The resolver's third rung walks up looking for exactly this, so a test that
+    wants "nothing resolves" has to know whether the temp tree it just built is
+    actually isolated — under $TMPDIR that is an assumption, not a fact.
+    """
+    here = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(here, ".claude")):
+            return os.path.join(here, ".claude")
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def test_tasks_root_resolution_order():
+    """env > $CLAUDE_PROJECT_DIR > cwd walk-up > legacy-only-if-it-exists."""
+    import shutil
+    base = tempfile.mkdtemp(prefix="tasksroot-", dir=_TMP_BASE)
+    try:
+        explicit = os.path.join(base, "explicit")
+        project = os.path.join(base, "project")
+        deep = os.path.join(project, "a", "b")
+        os.makedirs(explicit)
+        os.makedirs(os.path.join(project, ".claude"))
+        os.makedirs(deep)
+        # 1. $ORCH_TASKS_ROOT wins over everything, including the project.
+        assert _tasks_root({"ORCH_TASKS_ROOT": explicit,
+                            "CLAUDE_PROJECT_DIR": project}, deep) == explicit
+        # 2. $CLAUDE_PROJECT_DIR beats the cwd walk-up (and does NOT need to
+        #    exist: the anchor is the project, not a directory listing).
+        assert _tasks_root({"CLAUDE_PROJECT_DIR": project}, deep) == \
+            os.path.join(project, ".claude", "local-orchestrators")
+        # 3. cwd walk-up finds the nearest .claude/ marker.
+        assert _tasks_root({}, deep) == \
+            os.path.join(project, ".claude", "local-orchestrators")
+        # 4a. the legacy rung, from a daemon that DOES have a sibling tasks dir.
+        legacy_home = os.path.join(base, "pkg", "shared", "monitoring")
+        os.makedirs(legacy_home)
+        os.makedirs(os.path.join(base, "pkg", "local-orchestrators"))
+        orphan = os.path.join(base, "orphan")
+        os.makedirs(orphan)
+        # Arms 4a and 4b both need `orphan` to be genuinely marker-free: the cwd
+        # walk-up is rung 3 and would answer before either of them.
+        marker = _nearest_claude_marker(orphan)
+        if marker:
+            _skip(f"tasks-root arms 4a/4b: an ancestor of the temp tree holds {marker}")
+            return
+        assert _tasks_root({}, orphan,
+                           as_file=os.path.join(legacy_home, "decision_watcher.py")) == \
+            os.path.join(base, "pkg", "local-orchestrators")
+        # 4b. ...and nothing at all: no env, no project, no marker above cwd, no
+        #     legacy dir -> "" (the caller exits 1; it never invents a root).
+        #     This arm only means what it says while NO ancestor of the throwaway
+        #     tree holds a `.claude/`: one anywhere above $TMPDIR (this session's
+        #     own scratchpad lives at /tmp/claude-1000/-home-laniakea-Projects-
+        #     touch/…, one directory away from being exactly that) turns the cwd
+        #     walk-up into a hit and flips "" to a real path. Assert the premise
+        #     rather than assume it, and say so instead of failing on it.
+        lonely = os.path.join(base, "lonely", "shared", "monitoring")
+        os.makedirs(lonely)
+        assert _tasks_root({}, orphan,
+                           as_file=os.path.join(lonely, "decision_watcher.py")) == "", \
+            "an unresolvable root must be empty"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_legacy_rung_is_taken_only_when_the_directory_exists():
+    """The `../../local-orchestrators` rung is in-repo compatibility, not a guess.
+
+    A packaged copy sits at `<plugin>/shared/monitoring`, so `../..` is the
+    plugin root — globbing there would sweep sibling plugins looking for other
+    people's task folders.
+    """
+    src = _function_source(MODULE_PATH, "resolve_tasks_root")
+    assert 'return legacy if os.path.isdir(legacy) else ""' in src, src
+
+
+def test_in_plugin_cache_walks_up_to_a_plugin_manifest():
+    base = tempfile.mkdtemp(prefix="plugincache-", dir=_TMP_BASE)
+    try:
+        root = os.path.join(base, "cache", "msdrx-tools", "touch", "0.1.0")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as f:
+            f.write('{"name":"touch"}')
+        deep = os.path.join(root, "shared", "monitoring", "does-not-exist-yet")
+        assert ms.in_plugin_cache(deep) is True
+        assert ms.in_plugin_cache(root) is True
+        assert ms.in_plugin_cache(base) is False
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_token_file_is_refused_inside_a_plugin_cache():
+    base = tempfile.mkdtemp(prefix="tokrefuse-", dir=_TMP_BASE)
+    try:
+        root = os.path.join(base, "0.1.0")
+        state = os.path.join(root, "state")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        os.makedirs(state)
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as f:
+            f.write('{"name":"touch"}')
+        assert ms.write_token_file(state) is None
+        assert not os.path.exists(os.path.join(state, "monitor.json"))
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Item 05 — security parity with the aggregator: loopback, token, Origin.
+# --------------------------------------------------------------------------
+
+
+def test_the_default_bind_is_loopback_and_open_is_an_explicit_opt_in():
+    """GD-T8: reaching 0.0.0.0 takes a flag or an env var, never a default."""
+    src = open(MODULE_PATH, encoding="utf-8").read()
+    assert 'DEFAULT_HOST = "127.0.0.1"' in src
+    assert 'OPEN_HOST = "0.0.0.0"' in src
+    # the ONE place the open literal may appear is that constant
+    assert src.count('"0.0.0.0"') == 1, "a stray 0.0.0.0 bind literal is back"
+    assert 'start_server(handle, HOST, PORT)' in src
+    assert ms.HOST == "127.0.0.1", ms.HOST
+    # and the resolver honours both opt-ins without touching the default
+    saved = list(sys.argv)
+    try:
+        sys.argv = [saved[0], "--open"]
+        assert ms.resolve_host() == "0.0.0.0"
+        sys.argv = [saved[0]]
+        os.environ["ORCH_BIND"] = "10.1.2.3"
+        assert ms.resolve_host() == "10.1.2.3"
+    finally:
+        os.environ.pop("ORCH_BIND", None)
+        sys.argv = saved
+
+
+def test_a_flag_argument_is_not_mistaken_for_the_port():
+    """`monitor_server.py --open` must not read '--open' as argv's port.
+
+    The assertion is about PARSING, so it must not depend on the ambient
+    `orch-config.json`: `resolve_port()`'s third rung reads one from the state
+    dir, and any task folder that pins a `port` would turn a green flag parse
+    into a red "flag mistaken for the port" that is nothing of the sort. So:
+    assert the flag never becomes the answer, and that an explicit numeric
+    positional still wins outright.
+    """
+    saved = list(sys.argv)
+    try:
+        sys.argv = [saved[0], "--open", "--allow-origin", "http://x.example"]
+        port = ms.resolve_port()
+        assert isinstance(port, int), port
+        assert port not in (0,) and str(port) not in ("--open", "--allow-origin"), port
+        assert not ms.positional_args(), ms.positional_args()
+        sys.argv = [saved[0], "9999", "--open"]
+        assert ms.resolve_port() == 9999
+        # the equals spelling is a flag too, and is likewise not a positional
+        sys.argv = [saved[0], "--allow-origin=http://x.example", "9001"]
+        assert ms.positional_args() == ["9001"], ms.positional_args()
+        assert ms.resolve_port() == 9001
+    finally:
+        sys.argv = saved
+
+
+def test_both_allowlist_flags_read_the_space_and_equals_spellings_and_the_env():
+    """F11: a flag that parses and then silently does nothing is the worst case."""
+    saved = list(sys.argv)
+    try:
+        sys.argv = [saved[0], "--allow-origin", "http://a.example",
+                    "--allow-origin=http://b.example"]
+        os.environ["ORCH_ALLOW_ORIGIN"] = "http://c.example, http://d.example"
+        got = ms.flag_values("--allow-origin", "ORCH_ALLOW_ORIGIN")
+        assert got == ["http://a.example", "http://b.example",
+                       "http://c.example", "http://d.example"], got
+        # ...and the same helper serves --allow-host, so neither can rot alone.
+        sys.argv = [saved[0], "--allow-host=mybox"]
+        os.environ["ORCH_ALLOW_HOST"] = "otherbox"
+        assert ms.flag_values("--allow-host", "ORCH_ALLOW_HOST") == \
+            ["mybox", "otherbox"]
+    finally:
+        os.environ.pop("ORCH_ALLOW_ORIGIN", None)
+        os.environ.pop("ORCH_ALLOW_HOST", None)
+        sys.argv = saved
+
+
+def _boot_probe(env, argv, expr):
+    """Import monitor_server.py in a subprocess under a controlled env/argv.
+
+    `HOST`, `HOSTS` and `ORIGINS` are import-time module constants — deliberately,
+    since the posture must not be reconfigurable at runtime — so NO in-process
+    test can exercise a non-default configuration. That is exactly how the
+    unreachable-escape-hatch bug (F1) shipped past a suite that only tested the
+    refusal side. A fresh interpreter is the only honest probe.
+    """
+    import subprocess
+    clean = {k: v for k, v in os.environ.items()
+             if not k.startswith(("ORCH_", "CLAUDE_"))}
+    clean["ORCH_STATE_DIR"] = _STATE_DIR
+    clean.update(env)
+    code = (
+        "import importlib.util, json, sys\n"
+        f"sys.argv = {[sys.executable] + list(argv)!r}\n"
+        f"spec = importlib.util.spec_from_file_location('probe', {MODULE_PATH!r})\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(m)\n"
+        f"print(json.dumps({expr}))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], env=clean,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_an_allow_listed_origin_and_host_are_accepted_on_a_reachable_bind():
+    """F1: the documented escape hatch out of the 403 must actually work.
+
+    An operator who binds a reachable address and browses the box BY NAME sends
+    a Host header nothing derived can predict. Before the fix the Host gate
+    returned before `ORIGINS` was ever consulted, so `--allow-origin` could not
+    take effect and `--allow-host` was accepted-and-inert: the only way out of
+    the new 403 was closed. Both halves are asserted here, on a real import.
+    """
+    env = {"ORCH_BIND": "192.168.1.5"}
+    argv = ["--allow-origin", "http://mybox:8931"]
+    head = {"host": "mybox:8931", "origin": "http://mybox:8931"}
+    # 1. an explicitly allow-listed Origin satisfies the whole gate
+    assert _boot_probe(env, argv, f"m.origin_refusal({head!r})") is None
+    # 2. --allow-host extends the Host allowlist (and is no longer a dead flag)
+    assert _boot_probe(env, ["--allow-host=mybox"],
+                       f"m.origin_refusal({head!r})") is None
+    assert "mybox" in _boot_probe(env, ["--allow-host=mybox"], "sorted(m.HOSTS)")
+    # 3. ...and nothing was loosened: an un-listed foreign page is still refused
+    assert _boot_probe(env, [], f"m.origin_refusal({head!r})") is not None
+    evil = {"host": "192.168.1.5:8931", "origin": "http://evil.example"}
+    assert _boot_probe(env, argv, f"m.origin_refusal({evil!r})") is not None
+    # 4. an --open bind keeps its empty Host allowlist: the operator reaches it
+    #    through whatever address was published, so a derived list is a guess.
+    assert _boot_probe({}, ["--open"], "sorted(m.HOSTS)") == []
+
+
+def test_health_publishes_no_filesystem_path_and_no_home_directory():
+    """F2/AUDIT-15: /health is the one untokened route — it hashes every path.
+
+    An events path spells out the machine's username, the project directory and
+    the task roster. The aggregator hashes them on its own /health for this
+    exact reason; item 05 is written as parity with that posture.
+    """
+    poisoned = os.path.join(_STATE_DIR, "health-hygiene.jsonl")
+    good = json.dumps({"ts": "1", "plan": "sp-a", "stage": "plan", "state": "done"})
+    with open(poisoned, "wb") as f:
+        f.write((good + "\n").encode())
+        f.write(b"{not json at all\n")
+    ms.task_status(poisoned)
+    try:
+        blob = json.dumps(ms.health_payload())
+        # The literal the critique named. Skipped only if the throwaway state
+        # dir itself lives under /home, where the string would be the TEST's
+        # own doing rather than a leak — the two structural checks below still
+        # run, and they are the ones that actually decide it.
+        if not _STATE_DIR.startswith("/home"):
+            assert "/home" not in blob, blob
+        assert _STATE_DIR not in blob, blob
+        assert ".jsonl" not in blob, blob
+        for key in ms.health_payload()["parse_failures"]:
+            assert os.sep not in key, key
+            assert len(key) == 12, key
+        for key in ms.health_payload()["streams"]:
+            assert os.sep not in key, key
+    finally:
+        ms.PARSE_FAILURES.pop(poisoned, None)
+        os.remove(poisoned)
+
+
+def test_the_token_is_per_boot_and_required_on_every_route_but_health():
+    assert len(ms.TOKEN) >= 40, "expected a 256-bit urlsafe token"
+    assert ms.OPEN_ROUTES == frozenset({"/health"}), ms.OPEN_ROUTES
+    for route in ("/tasks", "/artifacts", "/file", "/ws"):
+        assert ms.token_ok(route, {}, "") is False, route
+        assert ms.token_ok(route, {}, f"token={ms.TOKEN}") is True, route
+        assert ms.token_ok(route, {"x-orch-token": ms.TOKEN}, "") is True, route
+        assert ms.token_ok(route, {"authorization": f"Bearer {ms.TOKEN}"}, "") is True, route
+        assert ms.token_ok(route, {}, "token=" + "x" * len(ms.TOKEN)) is False, route
+    assert ms.token_ok("/health", {}, "") is True
+
+
+def test_the_token_comparison_is_constant_time():
+    """A missing token and a wrong one must take the same path (no short-circuit)."""
+    import inspect
+    src = inspect.getsource(ms.token_ok)
+    assert "hmac.compare_digest" in src, src
+    assert 'presented = presented_token(headers, query) or ""' in src, src
+
+
+def test_the_ws_origin_allowlist_refuses_a_foreign_page():
+    """A page on evil.example that resolves to 127.0.0.1 fails by NAME."""
+    same = {"host": f"127.0.0.1:{ms.PORT}", "origin": f"http://127.0.0.1:{ms.PORT}"}
+    assert ms.origin_refusal(same) is None
+    # no Origin at all: a non-browser client, which still had to present a token
+    assert ms.origin_refusal({"host": f"127.0.0.1:{ms.PORT}"}) is None
+    foreign = {"host": f"127.0.0.1:{ms.PORT}", "origin": "http://evil.example"}
+    assert "not allowed" in (ms.origin_refusal(foreign) or "")
+    rebind = {"host": "evil.example", "origin": "http://evil.example"}
+    assert "allowlist" in (ms.origin_refusal(rebind) or "")
+
+
+def _serve_once(route, headers=(), query=""):
+    """Drive ms.handle over a real loopback socket; return (status line, body)."""
+    async def run():
+        server = await asyncio.start_server(ms.handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            head = [f"GET {route}{query} HTTP/1.1", f"Host: 127.0.0.1:{port}",
+                    "Connection: close", *headers]
+            writer.write(("\r\n".join(head) + "\r\n\r\n").encode())
+            await writer.drain()
+            raw = await asyncio.wait_for(reader.read(-1), 5)
+            writer.close()
+            top, _, body = raw.partition(b"\r\n\r\n")
+            return top.split(b"\r\n")[0].decode(), body
+        finally:
+            server.close()
+            await server.wait_closed()
+    return _run(run())
+
+
+def test_an_untokened_request_is_401_on_every_gated_route():
+    for route in ("/tasks", "/artifacts", "/file"):
+        status, body = _serve_once(route)
+        assert status.startswith("HTTP/1.1 401"), (route, status)
+        assert b"token" in body, (route, body)
+    # ...and /health answers without one, so a supervisor can still probe.
+    status, body = _serve_once("/health")
+    assert status.startswith("HTTP/1.1 200"), status
+    assert json.loads(body), body
+    # ...and the page itself is open: it is what CARRIES the token.
+    status, body = _serve_once("/")
+    assert status.startswith("HTTP/1.1 200"), status
+
+
+def test_a_tokened_request_passes_and_a_foreign_origin_upgrade_is_403():
+    status, body = _serve_once("/tasks", query=f"?token={ms.TOKEN}")
+    assert status.startswith("HTTP/1.1 200"), status
+    assert "tasks" in json.loads(body), body
+    # WS upgrade, correct token, foreign Origin -> 403 before any 101.
+    status, body = _serve_once(
+        "/ws", query=f"?token={ms.TOKEN}",
+        headers=["Upgrade: websocket", "Connection: Upgrade",
+                 "Sec-WebSocket-Key: " + base64.b64encode(b"0123456789abcdef").decode(),
+                 "Sec-WebSocket-Version: 13", "Origin: http://evil.example"])
+    assert status.startswith("HTTP/1.1 403"), status
+    # ...and an untokened upgrade never even learns the Origin policy: 401.
+    status, _ = _serve_once(
+        "/ws", headers=["Upgrade: websocket", "Connection: Upgrade",
+                        "Sec-WebSocket-Key: " + base64.b64encode(b"0123456789abcdef").decode(),
+                        "Sec-WebSocket-Version: 13"])
+    assert status.startswith("HTTP/1.1 401"), status
+
+
+def test_the_token_file_is_written_0600():
+    import stat
+    base = tempfile.mkdtemp(prefix="tokfile-", dir=_TMP_BASE)
+    try:
+        path = ms.write_token_file(base)
+        assert path == os.path.join(base, "monitor.json"), path
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o600, oct(mode)
+        payload = json.loads(open(path).read())
+        assert payload["token"] == ms.TOKEN
+        assert payload["host"] == ms.HOST and payload["port"] == ms.PORT
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_page_plumbs_the_token_through_every_gated_url():
+    """monitor.html is never executed here — the assertion is on source text."""
+    html = open(os.path.join(HERE, "..", "monitor.html"), encoding="utf-8").read()
+    assert 'const TOKEN = new URLSearchParams(location.search).get("token") || "";' in html
+    assert 'withToken("/tasks")' in html
+    assert 'withToken("/artifacts?task="' in html
+    assert 'withToken("/file?task="' in html
+    assert 'tokenParam("&")' in html, "the WS url must carry the token"
+    # navigate() rewrites the query string; dropping the token there would 401
+    # the page out of its own next route.
+    nav = html[html.index("function navigate("):html.index("function route(")]
+    assert "tokenParam(" in nav, nav
+    # F4: an <a href> is a gated URL too. onclick/preventDefault only covers a
+    # plain left-click — ctrl/cmd-click, middle-click, "open in new tab" and
+    # "copy link address" all hand the browser the raw href. Assert no href
+    # assignment anywhere carries a bare task query, so the NEXT one cannot
+    # repeat it either.
+    hrefs = [ln.strip() for ln in html.splitlines() if ".href = " in ln]
+    assert hrefs, "no href assignments found — has the page been restructured?"
+    for line in hrefs:
+        assert "withToken(" in line or "fileUrl(" in line, line
+    assert 'sl.href = withToken("?task="' in html, "the stats link lost its token"
+    # ...and fileUrl is only a pass because it tokens the URL itself.
+    assert 'return withToken("/file?task="' in html
+
+
+def test_the_page_says_token_instead_of_failing_silently():
+    """F3: a 401 must not render as an empty dashboard that reconnects forever.
+
+    Both halves are asserted, because each alone is still silent: `/tasks` has
+    to branch on the RESPONSE before `.json()` (a 401 body is not JSON, so the
+    old code threw straight into an empty `catch`), and a `/ws` upgrade the
+    server never accepted has to STOP — the browser hands JS no status code for
+    a rejected handshake, so "never opened + no token" is the only evidence
+    there is, and without it the page opens a fresh socket every 1-10 s forever.
+    """
+    html = open(os.path.join(HERE, "..", "monitor.html"), encoding="utf-8").read()
+    assert 'id="authBanner"' in html, "no banner element to put the reason in"
+    assert "function showAuthBanner(" in html
+    assert "TOKEN_HINT" in html and "monitor.json" in html, \
+        "the hint must name where the token actually lives"
+    tasks = html[html.index("async function refreshTasks("):
+                 html.index('document.getElementById("taskSel").onchange')]
+    assert "res.status === 401" in tasks, tasks
+    assert "showAuthBanner(" in tasks, tasks
+    assert tasks.index("res.status === 401") < tasks.index("res.json()"), \
+        "the status must be checked BEFORE .json() throws into the catch"
+    close = html[html.index("  ws.onclose = () => {"):html.index("  ws.onerror = ")]
+    assert "everOpened" in close and "authRefused" in close, close
+    assert "refused = true" in close, close
+    assert close.index("refused = true") < close.index("armReconnect(retry)"), \
+        "the stop must come before the retry, or it never stops"
+
+
+def test_report_html_from_file_is_sandboxed_without_scripts():
+    """F8: the report tab is served at a URL that CONTAINS the per-boot token.
+
+    An opaque origin stops it reading same-origin responses; it does not stop a
+    script reading its own `location.search` and posting it out. Reports here
+    are static, so scripts are what gets given up.
+    """
+    src = open(MODULE_PATH, encoding="utf-8").read()
+    assert r'b"Content-Security-Policy: sandbox\r\n"' in src, "sandbox header gone"
+    # the header itself, not the prose explaining why it is gone
+    for line in src.splitlines():
+        assert not (line.lstrip().startswith(("b\"", "b'")) and "allow-scripts" in line), \
+            f"a script in a report can lift the token: {line.strip()}"
+    assert r'b"Referrer-Policy: no-referrer\r\n"' in src, src
+
+
+def test_the_startup_line_does_not_print_the_token_into_a_0644_log():
+    """F6: drivers redirect stdout into `<task-dir>/daemon.log`, mode 0644.
+
+    Printing the secret there undoes the 0600 `write_token_file()` takes care to
+    create. A TTY is a human reading a terminal; a log gets a fingerprint —
+    unless the token file could not be written at all, in which case stdout is
+    the only copy there is and printing it is the lesser failure.
+    """
+    import inspect
+    src = inspect.getsource(ms.main)
+    assert "sys.stdout.isatty() or not token_path" in src, src
+    assert src.index("token_path = write_token_file(") < src.index("isatty()"), \
+        "the token file must be written before the print decides what to say"
+
+
+def test_token_is_not_reported_as_an_unhonoured_ws_parameter():
+    """The page always sends `&token=` on /ws; a false "ignored" note on every
+    connection would train the operator to ignore the note that matters."""
+    src = open(MODULE_PATH, encoding="utf-8").read()
+    marker = 'if k not in ("task", "v", "snap", "from", "sig", "token")'
+    assert marker in src, "token must be a KNOWN /ws query parameter"
 
 
 # --------------------------------------------------------------------------
@@ -1492,8 +2039,11 @@ def test_health_keeps_every_stream_when_two_folders_share_a_basename():
         await sb.refresh()
         assert sa.task == sb.task, (sa.task, sb.task)   # same parent folder
         streams = ms.health_payload()["streams"]
-        rows = [r for k, r in streams.items() if k in (sa.task, sa.path, sb.path)]
+        # The collision tie-breaker is the path DIGEST, not the path (F2).
+        keys = (sa.task, ms.path_digest(sa.path), ms.path_digest(sb.path))
+        rows = [r for k, r in streams.items() if k in keys]
         assert len(rows) >= 2, sorted(streams)
+        assert sa.path not in streams and sb.path not in streams, sorted(streams)
         events = {r["events"] for r in rows}
         assert {sa.fold.ev_count, sb.fold.ev_count} <= events, (events, rows)
 

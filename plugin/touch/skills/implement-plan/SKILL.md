@@ -12,8 +12,8 @@ the upstream research — if no usable plan exists, stop and point the caller at
 `execute-research`.
 
 **Argument**: `<user_prompt>` — which plan (a
-`.claude/local-orchestrators/<task-name>/` folder, a `plan/*.md` path, or the
-`{ plan_file }` from an execute-research auto-chain) and how (strategy
+`<project>/.claude/local-orchestrators/<task-name>/` folder, a `plan/*.md`
+path, or the `{ plan_file }` from an execute-research auto-chain) and how (strategy
 override). Everything after an optional `Test hints:` marker is `<test_hints>`
 and extends the test gate (e.g. installer / e2e requirements).
 
@@ -24,14 +24,18 @@ file ownership.
 
 ## Procedure
 
-`templates/implement.workflow.js` (next to this file) is the NORMATIVE
-protocol — prompts, schemas, models, the Divide phase, monitor markers,
-status.sh calls, findings handoff, isolation guard. Adapt it into
-`.claude/local-orchestrators/<task-name>/orch-scripts/implement.workflow.js`,
+`${CLAUDE_PLUGIN_ROOT}/skills/implement-plan/templates/implement.workflow.js`
+is the NORMATIVE protocol — prompts, schemas, models, the Divide phase, monitor
+markers, `touch-status` calls, findings handoff, isolation guard. Adapt it into
+`<project>/.claude/local-orchestrators/<task-name>/orch-scripts/implement.workflow.js`,
 invoked with `args = { plan_file, parallel }` (all task state lives under the
-task folder), deciding only:
+task folder, inside the user's project), deciding only:
 
-1. Task name, REPO/TASK paths, TASK_SPECIFIC_CONTEXT.
+1. Task name, TASK_SPECIFIC_CONTEXT, and the two path constants at the top of
+   the copy. Nothing substitutes placeholders inside a template file, so fill
+   them in yourself: `PROJECT_DIR` = the project root (the absolute path this
+   session is working in), `PLUGIN_ROOT` = `${CLAUDE_PLUGIN_ROOT}` — the value
+   that literal expands to right here, in this instruction.
 2. TARGETED_TEST_COMMAND / FULL_SUITE_COMMAND / BASELINE_NOTES, folding in
    `<test_hints>`.
 3. REVIEW_CHECKLIST for the critique.
@@ -63,21 +67,22 @@ Run it, keeping the template's invariants:
 - **Models**: everything `opus` (effort by complexity, never above xhigh)
   EXCEPT the two `fable` agents — the DIVIDER and the FINAL-GATE REVIEWER (the
   final-gate fixer is an implementer: opus).
-- Keep the `[monitor]` markers and status.sh calls exactly as templated.
+- Keep the `[monitor]` markers and `touch-status` calls exactly as templated.
 
 ## Monitoring
 
-Per the `m-orchestrator` skill (scripts in `.claude/shared/monitoring/`) — if
-that skill does not exist, STOP and notify the caller instead of improvising.
-Seed the `divide` card before launching; per-sub-plan cards are created by
-each loop's first status.sh call (the partition exists only after Divide
-returns). Roles: `synth` (the divider), `impl`, `test`, `critique`
-(`gate:run`/`gate:fix` are reserved for standalone gate→fixer loops, not used
-here). The decision watcher reads attempt caps from `orch-config.json`
-(`max_plan_attempts` 4 / `max_gate_attempts` 3 / `max_e2e_attempts` 3) —
-publish your MAX_ATTEMPTS there if different. Start the daemons and write the
-`ACTIVE` run-scope sentinel (m-orchestrator §4) so loop subagents stay out of
-other tasks' state; dashboard at `http://<host>:8931/`.
+Per the `m-orchestrator` skill (the `touch-status` / `touch-monitor` /
+`touch-watcher` commands) — if that skill does not exist, STOP and notify the
+caller instead of improvising. Seed the `divide` card before launching;
+per-sub-plan cards are created by each loop's first `touch-status` call (the
+partition exists only after Divide returns). Roles: `synth` (the divider),
+`impl`, `test`, `critique` (`gate:run`/`gate:fix` are reserved for standalone
+gate→fixer loops, not used here). The decision watcher reads attempt caps from
+`orch-config.json` (`max_plan_attempts` 4 / `max_gate_attempts` 3 /
+`max_e2e_attempts` 3) — publish your MAX_ATTEMPTS there if different. Start the
+daemons and write the `ACTIVE` run-scope sentinel (m-orchestrator §4) so loop
+subagents stay out of other tasks' state; open the tokened dashboard URL
+`touch-monitor` prints at startup.
 
 ## Cycle reports and the user-decision protocol
 
@@ -90,12 +95,12 @@ word) and MUST answer WHY — on failure *and* on success: the gate/critique
 verdict summaries plus the full findings files embedded as the evidence.
 
 The reports are rendered DETERMINISTICALLY (never by an LLM scribe) by
-`templates/cycle_reporter.py`: adapt it into the task's `orch-scripts/` and
-launch it as a third daemon next to the watcher — it tails the run's
+`touch-cycle-reporter`: launch it as a third daemon next to the watcher — it
+carries no placeholders, so run the command, never a copy. It tails the run's
 `journal.jsonl`, correlates each structured result to (plan, stage, attempt)
 via the `[monitor]` markers in the agent transcripts (zero LLM cooperation,
-same technique as decision_watcher), reads the caps and `extra_attempts` from
-`orch-config.json`, renders the pages, and emits the loop-terminal
+same technique as the decision watcher), reads the caps and `extra_attempts`
+from `orch-config.json`, renders the pages, and emits the loop-terminal
 `plan done|failed` status event when a loop closes on a REAL verdict at the
 published cap. The workflow script cannot do any of this itself: the runtime
 has no filesystem or Node API (`import()` throws; the template's try/catch'd
@@ -103,14 +108,18 @@ has no filesystem or Node API (`import()` throws; the template's try/catch'd
 daemon fulfills).
 
 ```bash
-TASK=$PWD/.claude/local-orchestrators/<task-name>
-ORCH_STATE_DIR="$TASK" nohup python3 "$TASK/orch-scripts/cycle_reporter.py" "<wf_dir>" \
-  >> "$TASK/cycle_reporter.log" 2>&1 &
+# Same tasks root the other daemons and the run-scope guard resolve
+# (m-orchestrator SKILL.md step 1) — anchoring on a bare $PWD splits the run's
+# state across two directories.
+ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.claude/local-orchestrators}"
+TASK="$ORCH/<task-name>"
+ORCH_STATE_DIR="$TASK" nohup touch-cycle-reporter "<wf_dir>" \
+  >> "$TASK/cycle-reporter.log" 2>&1 &
 echo $! > "$TASK/cycle-reporter.pid"
 ```
 
-`cycle_reporter.py --once <wf_dir> --no-status` renders a finished/foreign run's
-pages without emitting status events (backfill mode).
+`touch-cycle-reporter --once <wf_dir> --no-status` renders a finished/foreign
+run's pages without emitting status events (backfill mode).
 
 Loop-failure policy (enforced by the template; acted on by you, the driver):
 
@@ -136,13 +145,14 @@ Loop-failure policy (enforced by the template; acted on by you, the driver):
 
 ## Completion
 
-Emit `status.sh <plan> plan done "..."` for any still-open card, then
-`status.sh orchestrator complete done "<run summary>"`, and clear the run
-scope by removing this task's line from `.claude/local-orchestrators/ACTIVE`
+Emit `touch-status <plan> plan done "..."` for any still-open card, then
+`touch-status orchestrator complete done "<run summary>"`, and clear the run
+scope by removing this task's line from
+`<project>/.claude/local-orchestrators/ACTIVE`
 (m-orchestrator §4 — never `rm` the whole file; another run may be active). Build the HTML final
 report via the artifact flow: load the `artifact-design` skill FIRST (design
 guidance), write the page to
-`.claude/local-orchestrators/<task-name>/report/final-report.html`, then
+`<project>/.claude/local-orchestrators/<task-name>/report/final-report.html`, then
 publish that file with the Artifact tool. The task-folder file is the required
 local copy — the dashboard auto-links artifacts inside the task folder, so it
 must live there, not in /tmp, and stays even after publishing. KEEP the task

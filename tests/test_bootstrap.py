@@ -56,8 +56,6 @@ MUST_IGNORE = (
     "mongo-dump/x",
     "dump.bson",
     # pre-existing rules that must survive an additive edit
-    ".claude/shared/monitoring/events.jsonl",
-    ".claude/shared/monitoring/.watcher-state.json",
     f"{ORCH}/x/daemon.log",
     # 2026-07-27 amendment: the whole run-state tree is ignored now.
     f"{ORCH}/x/events.jsonl",
@@ -68,6 +66,18 @@ MUST_IGNORE = (
 # What must never become ignored by a careless rule.
 MUST_NOT_IGNORE = (
     ".gitignore",
+)
+
+# Entries that must NOT be in .gitignore (item 04, 2026-07-28). These two lines
+# used to sanction the monitoring module's state leak: status.sh spooled
+# events.jsonl into the shared module dir when ORCH_STATE_DIR was unset, and
+# both daemons fell back to it, so the repo ignored the droppings. The
+# behaviour is gone — status.sh exits 2, the daemons exit 1 — and the ignore
+# rules go with it, because an ignore rule is exactly what would let the
+# behaviour return unnoticed.
+GITIGNORE_FORBIDDEN = (
+    ".claude/shared/monitoring/events.jsonl",
+    ".claude/shared/monitoring/.watcher-state.json",
 )
 
 failures = []
@@ -119,6 +129,29 @@ def test_gitignore_entries():
     lines = [ln.strip() for ln in GITIGNORE.read_text().splitlines()]
     for entry in GITIGNORE_ENTRIES:
         check(entry in lines, f".gitignore has a line exactly `{entry}`")
+
+
+# --- item 04: the two sanctioned-leak lines are gone and cannot come back.
+# Asserted on the whole text (not just exact lines) so a re-added rule cannot
+# sneak back in as a prefix/suffix variant of the same path, and paired with a
+# behavioural half below: git must NOT ignore those paths any more.
+def test_gitignore_has_no_module_dir_state_lines():
+    print("test_gitignore_has_no_module_dir_state_lines")
+    text = GITIGNORE.read_text()
+    for entry in GITIGNORE_FORBIDDEN:
+        # The explanatory comment names both paths on purpose; only a real rule
+        # (a line that is not a comment) counts as a re-added ignore.
+        rules = [ln.strip() for ln in text.splitlines()
+                 if ln.strip() and not ln.lstrip().startswith("#")]
+        check(not any(entry in ln for ln in rules),
+              f".gitignore no longer sanctions `{entry}`")
+    if not GIT:
+        skip("not a git checkout; skipping the check-ignore half")
+        return
+    for entry in GITIGNORE_FORBIDDEN:
+        proc = git("check-ignore", "--", entry)
+        check(proc.returncode == 1 and proc.stdout == "",
+              f"git no longer ignores {entry} (rc={proc.returncode})")
 
 
 # --- R-01/R-42 behaviour: what git actually ignores
@@ -217,6 +250,8 @@ def test_run_state_not_tracked():
 
 def main():
     test_gitignore_entries()
+    # Its git half skips itself, so it runs in both worlds.
+    test_gitignore_has_no_module_dir_state_lines()
     needs_git = (test_check_ignore_positive, test_check_ignore_negative,
                  test_head_exists, test_branch_is_main, test_commit_identity,
                  test_no_tracked_watcher_state, test_run_state_not_tracked)

@@ -4,8 +4,9 @@ How to detect, ride out, and manually restart orchestrator loops when the
 network drops (mobile uplink, proxy flap, API outage). Everything monitored
 (daemons, dashboard, `events.jsonl`, the Workflow `journal.jsonl`) is LOCAL
 and survives any uplink loss — only in-flight agent API calls are at risk.
-Proven on the 2026-07-25 touch-mongo-live implement run (two real incidents,
-zero lost work).
+Proven in the field on a long implement run in 2026 (two real incidents, zero
+lost work) — the procedures below are what that run actually did, not a design
+sketch.
 
 ## The three failure layers
 
@@ -54,7 +55,8 @@ zero lost work).
 ## Detect: was there an outage / is the run alive?
 
 ```bash
-TASK=.claude/local-orchestrators/<task-name>
+ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.claude/local-orchestrators}"
+TASK="$ORCH/<task-name>"            # the tasks root of SKILL.md step 1
 tail -3 "$TASK/events.jsonl"        # token ticks seconds old => alive
 tail -2 "<wf_dir>/journal.jsonl"    # a started with no result + long silence => stalled
 ```
@@ -67,7 +69,7 @@ distinguish by the signatures in layer 1):
 python3 - <<'EOF'
 import json; from datetime import datetime
 prev=None
-for line in open(".claude/local-orchestrators/<task-name>/events.jsonl"):
+for line in open("<project>/.claude/local-orchestrators/<task-name>/events.jsonl"):
     r=json.loads(line); ts=datetime.fromisoformat(r["ts"])
     if prev and (ts-prev).total_seconds()>90:
         print(prev.strftime("%H:%M:%S"),"->",ts.strftime("%H:%M:%S"),
@@ -120,13 +122,13 @@ watcher checkpoint prevents double-counting.
 
 **E. Run completed while offline:** the completion notification died with the
 session, but the journal's final record holds the return value. Read it, close
-any still-open cards (`status.sh <plan> plan done "…"`), emit
-`status.sh orchestrator complete done "<summary>"`, then build/publish the
+any still-open cards (`touch-status <plan> plan done "…"`), emit
+`touch-status orchestrator complete done "<summary>"`, then build/publish the
 final report.
 
 ## After restarting
 
 - Verify: `/health` on the monitor port, fresh ticks in `events.jsonl`, the
   resumed loop's card back to `running`.
-- Append corrective `status.sh` events for any card a dead agent left stuck
+- Append corrective `touch-status` events for any card a dead agent left stuck
   in `running` — the stream is append-only; never rewrite it.

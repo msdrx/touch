@@ -16,15 +16,39 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[4]
 STATUS_SH = REPO / ".claude/shared/monitoring/status.sh"
 WATCHER_PY = REPO / ".claude/shared/monitoring/decision_watcher.py"
-TEMPLATE = REPO / ".claude/skills/implement-plan/templates/implement.workflow.js"
-RESEARCH_TEMPLATE = REPO / ".claude/skills/execute-research/templates/research.workflow.js"
+# The skills MOVED into the shipping subtree (item 09, GD-T2): one canonical
+# copy, in the payload. These constants follow them — the assertions below are
+# about the reference protocol's text, wherever that text now lives.
+SKILLS = REPO / "plugin/touch/skills"
+TEMPLATE = SKILLS / "implement-plan/templates/implement.workflow.js"
+RESEARCH_TEMPLATE = SKILLS / "execute-research/templates/research.workflow.js"
 MONITORING_MD = REPO / ".claude/shared/monitoring/monitoring.md"
-M_SKILL = REPO / ".claude/skills/m-orchestrator/SKILL.md"
-D_SKILL = REPO / ".claude/skills/implement-plan/SKILL.md"
+M_SKILL = SKILLS / "m-orchestrator/SKILL.md"
+D_SKILL = SKILLS / "implement-plan/SKILL.md"
 GITIGNORE = REPO / ".gitignore"
 
 TMP_ROOT = "/tmp/claude-1000"
 os.makedirs(TMP_ROOT, exist_ok=True)
+
+
+def nearest_claude_marker(start):
+    """The nearest ancestor of ``start`` holding a `.claude/`, or None.
+
+    status.sh's third resolver rung walks up looking for exactly this, so any
+    arm that means "nothing resolves" has to KNOW its throwaway cwd is isolated.
+    Under TMP_ROOT that is an assumption, not a fact — this session's own
+    scratchpad already lives at `/tmp/claude-1000/-home-laniakea-Projects-touch/…`,
+    one directory away from being a marker — and a silently-flipped arm is worse
+    than a skipped one.
+    """
+    here = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(here, ".claude")):
+            return os.path.join(here, ".claude")
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
 
 failures = []
 
@@ -37,15 +61,18 @@ def check(cond, msg):
         failures.append(msg)
 
 
-def run_status(state_dir, args, extra_env=None, unset_state_dir=False, script=None):
-    env = {k: v for k, v in os.environ.items() if k not in ("ORCH_STATE_DIR", "ORCH_TITLE")}
+def run_status(state_dir, args, extra_env=None, unset_state_dir=False, script=None,
+               cwd=None):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("ORCH_STATE_DIR", "ORCH_TITLE", "ORCH_TASKS_ROOT",
+                        "CLAUDE_PROJECT_DIR")}
     if not unset_state_dir:
         env["ORCH_STATE_DIR"] = str(state_dir)
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
         ["bash", str(script or STATUS_SH), *args],
-        env=env, capture_output=True, text=True,
+        env=env, cwd=cwd, capture_output=True, text=True,
     )
 
 
@@ -93,20 +120,138 @@ def test_status_injection_safe():
         shutil.rmtree(base, ignore_errors=True)
 
 
-# --- status.sh: ORCH_STATE_DIR unset warns on stderr (SHELL-5). Use a COPY of the
-#     script in a throwaway dir so the fallback write never touches the real module dir.
-def test_status_unset_warns():
-    print("test_status_unset_warns")
+# --- status.sh: ORCH_STATE_DIR unset no longer spools into the module dir
+#     (item 04 / CM-3). The old behaviour — exit 0, warn, write `events.jsonl`
+#     beside the script — was data loss with extra steps, and in a packaged copy
+#     it is a write into a version-stamped cache that gets swept. Now: resolve
+#     the project's tasks root and use its newest task folder, or exit 2.
+#     A COPY of the script in a throwaway dir, and an isolated cwd, so no arm of
+#     this test can reach the real module dir or the repo's own task folders.
+def test_status_unset_hard_errors():
+    print("test_status_unset_hard_errors")
     base = tempfile.mkdtemp(dir=TMP_ROOT)
     try:
         script_copy = os.path.join(base, "status.sh")
         shutil.copy(STATUS_SH, script_copy)
-        proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True, script=script_copy)
-        check(proc.returncode == 0, "status.sh still exits 0 when ORCH_STATE_DIR unset")
-        check("ORCH_STATE_DIR unset" in proc.stderr, "warning emitted to stderr when unset")
-        # Fallback write lands next to the copied script, NOT the real module dir.
-        check(os.path.isfile(os.path.join(base, "events.jsonl")),
-              "fallback wrote events.jsonl next to the (copied) script")
+        isolated = os.path.join(base, "cwd")           # no .claude/ marker above it
+        os.makedirs(isolated)
+        marker = nearest_claude_marker(isolated)
+        if marker:
+            print(f"  skip: an ancestor of {TMP_ROOT} holds {marker} — the cwd "
+                  "walk-up would resolve and this arm would not mean what it says")
+            return
+        proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True,
+                          script=script_copy, cwd=isolated)
+        check(proc.returncode == 2,
+              f"status.sh exits 2 when nothing resolves (got {proc.returncode})")
+        check("ORCH_STATE_DIR" in proc.stderr,
+              "the error names ORCH_STATE_DIR as the fix")
+        check(not os.path.isfile(os.path.join(base, "events.jsonl")),
+              "NOTHING was written beside the script")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# --- status.sh: the resolved fallback — $ORCH_TASKS_ROOT's newest task folder,
+#     with a loud warning. This is the "project resolution succeeds" arm.
+def test_status_unset_resolves_tasks_root():
+    print("test_status_unset_resolves_tasks_root")
+    base = tempfile.mkdtemp(dir=TMP_ROOT)
+    try:
+        script_copy = os.path.join(base, "status.sh")
+        shutil.copy(STATUS_SH, script_copy)
+        isolated = os.path.join(base, "cwd")
+        os.makedirs(isolated)
+        tasks_root = os.path.join(base, "tasks")
+        older = os.path.join(tasks_root, "old-task")
+        newer = os.path.join(tasks_root, "new-task")
+        for d in (older, newer):
+            os.makedirs(d)
+            Path(d, "events.jsonl").write_text("")
+        # make the newest unambiguous regardless of filesystem timestamp
+        # granularity: `ls -t` orders by mtime.
+        os.utime(os.path.join(older, "events.jsonl"), (1000, 1000))
+        os.utime(os.path.join(newer, "events.jsonl"), (2000, 2000))
+        proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True,
+                          script=script_copy, cwd=isolated,
+                          extra_env={"ORCH_TASKS_ROOT": tasks_root})
+        check(proc.returncode == 0,
+              f"status.sh exits 0 once a tasks root resolves (got {proc.returncode})")
+        check("ORCH_STATE_DIR unset" in proc.stderr,
+              "the fallback still warns loudly on stderr")
+        lines = Path(newer, "events.jsonl").read_text().splitlines()
+        check(len(lines) == 1, "the event landed in the NEWEST task folder")
+        check(Path(older, "events.jsonl").read_text() == "",
+              "the older task folder was left alone")
+        check(not os.path.isfile(os.path.join(base, "events.jsonl")),
+              "nothing was written beside the script")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# --- status.sh: unconditional refusal to write inside an installed plugin.
+#     The plugin root is version-stamped, re-copied on update and swept ~14 days
+#     later, so a stream written there is a stream that silently disappears.
+def test_status_refuses_a_plugin_cache():
+    print("test_status_refuses_a_plugin_cache")
+    base = tempfile.mkdtemp(dir=TMP_ROOT)
+    try:
+        plugin_root = os.path.join(base, "cache", "msdrx-tools", "touch", "0.1.0")
+        os.makedirs(os.path.join(plugin_root, ".claude-plugin"))
+        Path(plugin_root, ".claude-plugin", "plugin.json").write_text('{"name":"touch"}')
+        state_dir = os.path.join(plugin_root, "shared", "monitoring")
+        proc = run_status(state_dir, ["p", "s", "running", "hi"])
+        check(proc.returncode == 2,
+              f"status.sh exits 2 inside a plugin cache (got {proc.returncode})")
+        check("plugin cache" in proc.stderr, "the refusal says why")
+        check(not os.path.exists(os.path.join(state_dir, "events.jsonl")),
+              "no events.jsonl was created inside the plugin cache")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# --- status.sh: the two walk-up loops take the parent with parameter expansion,
+#     not a `dirname` fork. status.sh is the hottest script in the module (every
+#     agent, several times per stage) and both loops run to "/", so a fork per
+#     ancestor level was ~7 processes on EVERY call for a string operation bash
+#     already does. Behaviour is asserted alongside the source-text rule: a
+#     rewrite that broke the walk-up would otherwise pass by deleting dirname.
+def test_status_walk_up_is_forkless_and_still_walks():
+    print("test_status_walk_up_is_forkless_and_still_walks")
+    src = STATUS_SH.read_text()
+    # the two resolver FUNCTIONS only. The one `dirname` left in the file sits
+    # on the unset-ORCH_STATE_DIR fallback path, runs once, and already follows
+    # an `ls -t` fork — that is not the hot loop this rule is about.
+    body = src[src.index("resolve_tasks_root()"):src.index('if [ -n "${ORCH_STATE_DIR:-}" ]')]
+    # code only — the comment above the loops NAMES the fork it replaced, and a
+    # prose mention must not read as the fork itself
+    code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+    check("$(dirname" not in code,
+          "no dirname subshell survives in either walk-up loop")
+    check(code.count('p="${d%/*}"; [ -z "$p" ] && p=/') == 2,
+          "both loops take the parent by parameter expansion")
+    base = tempfile.mkdtemp(dir=TMP_ROOT)
+    try:
+        # ...and it still reaches a marker several levels up (the walk-up rung),
+        deep = os.path.join(base, "proj", "a", "b", "c", "d")
+        os.makedirs(deep)
+        tasks = os.path.join(base, "proj", ".claude", "local-orchestrators", "t")
+        os.makedirs(tasks)
+        Path(tasks, "events.jsonl").write_text("")
+        proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True,
+                          cwd=deep)
+        check(proc.returncode == 0,
+              f"the cwd walk-up still finds a .claude/ 5 levels up ({proc.stderr})")
+        check(len(Path(tasks, "events.jsonl").read_text().splitlines()) == 1,
+              "the event landed in the resolved task folder")
+        # ...and the plugin-cache walk-up still refuses several levels down.
+        plugin = os.path.join(base, "cache", "touch", "0.1.0")
+        os.makedirs(os.path.join(plugin, ".claude-plugin"))
+        Path(plugin, ".claude-plugin", "plugin.json").write_text('{"name":"touch"}')
+        state = os.path.join(plugin, "a", "b", "c", "state")
+        proc = run_status(state, ["p", "s", "running", "hi"])
+        check(proc.returncode == 2,
+              f"the plugin-cache walk-up still refuses (got {proc.returncode})")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -146,9 +291,14 @@ def test_template_static():
     # SHELL-2 / D2: Test marker is role=test, and no gate:run remains in the reference loop.
     check("stage=test role=test attempt=" in src, "Test marker line reads role=test")
     check("role=gate:run" not in src, "no role=gate:run remains in the reference loop")
-    # SHELL-10: statusCmd quotes the path interpolations.
-    check('ORCH_STATE_DIR="${TASK}" bash "${S}" "${plan}"' in src,
-          "statusCmd quotes ${TASK}/${S}/${plan}")
+    # SHELL-10: statusCmd quotes the path interpolations. Item 09 replaced the
+    # baked `bash "${S}"` writer path with the bare command name `${STATUS}`
+    # (`touch-status`) — a PATH lookup survives a plugin update, a path into the
+    # version-stamped plugin cache does not. The QUOTING is what this arm is
+    # about, and it is unchanged: ${TASK} and ${plan} still carry agent-authored
+    # text into a shell.
+    check('ORCH_STATE_DIR="${TASK}" ${STATUS} "${plan}"' in src,
+          "statusCmd quotes ${TASK}/${plan} around the bare writer command")
     # SHELL-8: died-gate fallback findings_file is NOT the empty string.
     check("findings_file: ''" not in src and 'findings_file: ""' not in src,
           "no empty-string findings_file fallback remains")
@@ -656,8 +806,14 @@ def test_templates_emit_terminal_events():
         # plan id / detail can be agent-authored (divider output, file paths).
         check("['-c'" not in src and '["-c"' not in src,
               f"{name}: no `bash -c` execution of a status command")
-        check(re.search(r"(spawnSync|execFileSync)\('bash', \[S,", src),
-              f"{name}: status.sh is invoked with argv, not a shell string")
+        # Item 09 turned the writer into the bare command `STATUS`
+        # (`touch-status`), with an absolute-wrapper fallback for a runtime
+        # whose PATH lacks the plugin's bin/. BOTH spawns must stay argv —
+        # the fallback is the easy one to forget.
+        check(re.search(r"(spawnSync|execFileSync)\(STATUS, argv", src),
+              f"{name}: the writer is invoked with argv, not a shell string")
+        check(re.search(r"(spawnSync|execFileSync)\('bash', \[STATUS_FALLBACK, \.\.\.argv\]", src),
+              f"{name}: the PATH-less fallback is argv too")
         check("ORCH_STATE_DIR: TASK" in src,
               f"{name}: the state dir travels in the child env, not in a shell string")
         # n1: status.sh warns on stderr and still exits 0 — the warning must be
@@ -727,10 +883,16 @@ def test_templates_emit_terminal_events():
 def test_gitignore():
     print("test_gitignore")
     gi = GITIGNORE.read_text()
-    check(".claude/shared/monitoring/events.jsonl" in gi,
-          ".gitignore ignores the module-dir events.jsonl")
-    check(".claude/shared/monitoring/.watcher-state.json" in gi,
-          ".gitignore ignores the module-dir .watcher-state.json")
+    # Item 04 (2026-07-28) INVERTED these two: the module dir no longer receives
+    # state at all (status.sh exits 2, the daemons exit 1), so an ignore rule
+    # for it would only be a licence for the behaviour to return. Comments may
+    # still name the paths — only a live rule counts.
+    rules = [ln.strip() for ln in gi.splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    check(not any(".claude/shared/monitoring/events.jsonl" in ln for ln in rules),
+          ".gitignore no longer sanctions a module-dir events.jsonl")
+    check(not any(".claude/shared/monitoring/.watcher-state.json" in ln for ln in rules),
+          ".gitignore no longer sanctions a module-dir .watcher-state.json")
     # SD-3: the verbatim entry list, asserted here and written by the bootstrap.
     for entry in (".touch/", ".touch*/", ".claude/settings.local.json", "*.pid",
                   ".claude/local-orchestrators/*/.watcher-state.json",
@@ -757,12 +919,14 @@ def test_gitignore():
 
 def main():
     for t in (test_status_creates_state_dir, test_status_injection_safe,
-              test_status_unset_warns, test_status_writer_attribution,
+              test_status_unset_hard_errors, test_status_unset_resolves_tasks_root,
+              test_status_refuses_a_plugin_cache, test_status_writer_attribution,
               test_status_detail_cap, test_status_bad_state_warns_but_writes,
               test_status_concurrent_appends_are_atomic,
               test_status_append_waits_for_the_lock,
               test_append_sites_take_lock_ex,
               test_status_argv_call_is_injection_safe, test_status_plans_total,
+              test_status_walk_up_is_forkless_and_still_walks,
               test_template_static, test_templates_emit_terminal_events,
               test_docs_static, test_gitignore):
         t()

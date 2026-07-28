@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# touch-watcher — derive orchestrator decisions from a workflow journal.
+#
+#   ORCH_STATE_DIR=<task-dir> touch-watcher [<wf_dir>]
+#
+# Front for shared/monitoring/decision_watcher.py: tails a run's journal.jsonl
+# and appends the spawn / verdict / retry / advance events plus per-agent token
+# accounting that the dashboard draws. One watcher per task; it self-exits
+# after the journal goes quiet and a terminal orchestrator event lands.
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (plugin root, plugin data dir, project directory — all
+# measured EMPTY here, GD-T4 / probe C2). Code location comes from $0, which is
+# absolute in a bin/ launch; the only project signal is $PWD. The earlier
+# design's "export the tasks root from the project-directory variable when
+# present" clause was therefore unreachable dead code and is deleted, not
+# ported.
+#
+# ORCH_STATE_DIR is left to the caller on purpose: the watcher writes into ONE
+# task's stream, and a wrapper guessing which one is how a run's history ends
+# up in a neighbour's file.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-watcher: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    echo "touch-watcher: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+export PYTHONDONTWRITEBYTECODE=1
+
+# The tasks root is deliberately NOT resolved here. decision_watcher.py
+# resolves it itself — $ORCH_TASKS_ROOT > the harness's project-directory
+# variable (the one named in prose above, EMPTY here but not in a hook) > a cwd
+# walk-up to a .claude/ marker > a module-relative legacy path kept only if it
+# already exists (in a payload it does not, so that rung is inert). A wrapper that
+# computed the same answer and exported it would pin the callee's FIRST rung,
+# and every later correction to that resolver would be unreachable for anyone
+# who came in through bin/. One resolver, living in the code that owns it.
+#
+# The target is checked before python3 is handed it: an incomplete payload — or
+# a wrapper pointed one directory wrong — otherwise dies with python3's own
+# "can't open file '<path>'", whose text quotes the path it was given and
+# therefore contains the module name, so it reads to any grep exactly like the
+# daemon having been reached and having spoken.
+DAEMON="$ROOT/shared/monitoring/decision_watcher.py"
+[ -f "$DAEMON" ] || {
+    echo "touch-watcher: $DAEMON is missing; this payload is incomplete" >&2
+    exit 1
+}
+# `${1+"$@"}`, never a bare `"$@"`: bash before 4.4 treats `"$@"` as an unset
+# variable under `set -u` when there are no positional parameters, and stock
+# macOS ships /bin/bash 3.2.57 — which `#!/usr/bin/env bash` finds on a machine
+# without Homebrew. This command is routinely run with no arguments.
+exec python3 "$DAEMON" ${1+"$@"}

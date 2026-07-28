@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+# touch-selfcheck — verify this installation, one PASS/FAIL line per check.
+#
+#   cd <your project> && touch-selfcheck
+#
+# This is the consumer-facing half of "does it work here". The plugin ships no
+# test suite (GD-T6): the dev repo's tests need fixtures, a git checkout and a
+# runner, none of which belong in a payload — but the eight things that actually
+# break on someone else's machine are cheap to check, so they are checked here:
+#
+#   1. python3 clears the 3.11 floor (its absence is not a check but a refusal:
+#      with no interpreter there is nothing left to report on)
+#   2. the aggregator imports FROM THIS TREE (not from a same-named directory
+#      in the project you happen to be standing in)
+#   3. the web assets shipped alongside it
+#   4. the project root resolves to a real project
+#   5. task state resolves INTO that project, never into this (version-stamped,
+#      swept-on-update) plugin directory — asked of BOTH shipping resolvers,
+#      the monitoring one and the aggregator one, which must agree
+#   6. a loopback port can be bound
+#   7. every wrapper in bin/ kept its exec bit — the one thing a zip round trip
+#      silently destroys (CM-13)
+#   8. one event survives a real write/read round trip through touch-status
+#
+# Exits 0 when every check passes, 1 otherwise. Writes nothing except one
+# throwaway event in a temporary directory that it removes on the way out.
+#
+# A REPORT IS ONLY BELIEVABLE IF IT IS COMPLETE
+# ---------------------------------------------
+# Checks 1-6 all come out of ONE python3 process, so "the probe crashed at
+# check 3" and "the probe only had three checks in it" look identical from
+# here unless the probe says which it was. It says: it ends its report with an
+# `END <n>` sentinel written in a `finally`, and the loop below refuses to
+# summarize a report that is missing the sentinel, is short of the promised
+# count, or came from a process that exited non-zero — with the first line of
+# its stderr, which is otherwise thrown away. A verifier that can print a green
+# summary having skipped half its checks is worse than no verifier, because the
+# README sends people here as the install proof.
+#
+# The count in the sentinel is what the probe PROMISED, not a constant: its two
+# deliberate full stops (an interpreter below the floor, a package that will not
+# import) shorten it as they stop, because a run that correctly reports "this
+# install has no aggregator" is a complete report of a short list, and blaming
+# the verifier underneath a line that already named the real fault is how a good
+# diagnosis reads like a Touch bug. A crash never shortens it, so the shapes
+# that matter still cannot summarize.
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (plugin root, plugin data dir, project directory — all
+# measured EMPTY here, GD-T4 / probe C2). Code location comes from $0, which is
+# absolute in a bin/ launch; the only project signal is $PWD.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-selfcheck: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    # Not reported as a failed check: with no interpreter there is nothing to
+    # check, so this is the same one-line refusal every other wrapper gives.
+    echo "touch-selfcheck: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+export PYTHONDONTWRITEBYTECODE=1
+
+CHECKS=0
+FAILS=0
+
+report() {  # report PASS|FAIL <text>
+    CHECKS=$((CHECKS + 1))
+    [ "$1" = "PASS" ] || FAILS=$((FAILS + 1))
+    printf '%s  %s\n' "$1" "$2"
+}
+
+echo "touch selfcheck — $ROOT"
+echo
+
+# A TEMPLATE, not a bare `mktemp -d`: BSD `mktemp` (stock macOS) takes
+# `[-d] [-q] [-t prefix] [-u] template …` and treats a template-less call as a
+# usage error, which under `set -eu` would kill this script here — before the
+# first PASS/FAIL line, on the one command the README offers as the install
+# proof, on the platform every other wrapper in this directory spends a
+# paragraph supporting (`readlink -f` pins the floor at macOS 12.3, whose
+# `mktemp` is still BSD). The templated form is what both implementations
+# accept, and it is what `tests/run_all.sh` already uses.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/touch-selfcheck.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/scratch"
+
+# --- checks 1-6 run inside ONE interpreter: everything after the floor check
+# depends on the import, and re-launching python3 per check would make the
+# report slower than the server it is checking.
+PY_RC=0
+python3 -c '
+import os
+import socket
+import sys
+
+#: How many PASS/FAIL lines a COMPLETE run emits. Declared to the caller in the
+#: END sentinel below, because the caller cannot otherwise tell a short report
+#: from a short list of checks.
+EXPECTED = 6
+
+DONE = []
+
+
+def report(ok, text):
+    DONE.append(text)
+    sys.stdout.write(("PASS " if ok else "FAIL ") + text + "\n")
+
+
+def stop_early():
+    """Shorten the promised count to what has already been reported.
+
+    Two checks below are deliberate full stops: on a 3.9 interpreter, and
+    without the package, NOTHING after them is measurable. Those runs are
+    complete reports of a short list — not truncated reports of a long one —
+    and the caller must be able to tell the difference, or a correctly
+    diagnosed broken install gets a second, wrong line blaming the verifier.
+    Only the two `return`s call this; the crash handler never does, so a real
+    death still leaves END short of the lines that arrived.
+    """
+    global EXPECTED
+    EXPECTED = len(DONE)
+
+
+def run_checks(root, scratch):
+    v = sys.version_info
+    report(v[:2] >= (3, 11),
+           "python3 %d.%d.%d (needs 3.11+) at %s" % (v[0], v[1], v[2], sys.executable))
+    if v[:2] < (3, 11):
+        stop_early()
+        return
+
+    # The cwd is the users project and may hold its own aggregator/ — for -c it
+    # sits FIRST on sys.path, ahead of anything we prepend, so it comes off.
+    sys.path[:] = [p for p in sys.path if p not in ("", ".", os.getcwd())]
+    sys.path.insert(0, root)
+    try:
+        import aggregator
+        from aggregator import legacy, paths
+    except Exception as exc:
+        report(False, "aggregator imports from this tree (%s: %s)"
+                      % (type(exc).__name__, exc))
+        stop_early()
+        return
+
+    here = os.path.abspath(aggregator.__file__)
+    # getattr, not attribute access: a pinned copy built from an older tree, or
+    # one assembled by hand, may have no __version__ — and a MISSING VERSION
+    # STRING must not be able to abort the six checks that come after it.
+    report(here.startswith(root + os.sep),
+           "aggregator %s imported from this tree (%s)"
+           % (getattr(aggregator, "__version__", "unknown"), here))
+
+    assets = os.path.join(paths.plugin_root(), "touch-visual", "index.html")
+    report(os.path.isfile(assets), "web assets present (%s)" % assets)
+
+    project = paths.project_root()
+    # Kept, not just reported: check 5 below depends on it. When the cwd is not
+    # in a project at all, EVERY answer the two state resolvers can give is a
+    # consequence of that, and saying so twice — once truthfully, once as a
+    # Touch-internals disagreement — sends the reader off to debug the resolvers
+    # over a wrong `cd`.
+    in_project = os.path.isdir(os.path.join(project, ".claude"))
+    report(in_project,
+           "project root %s holds .claude/ (run this from your project)" % project)
+
+    # Ask the two resolvers that actually ship, not a third one written here — a
+    # verifier checking a code path nobody runs is how a green report and a
+    # broken install coexist. The monitoring half lives in
+    # monitor_server.resolve_tasks_root (status.sh mirrors it rung for rung in
+    # bash, and decision_watcher.py carries the same order); the aggregator half
+    # is legacy.orchestrator_root(). They must agree, or the dashboard and the
+    # API list different tasks for one cwd.
+    sys.path.insert(1, os.path.join(root, "shared", "monitoring"))
+    os.environ["ORCH_STATE_DIR"] = scratch             # see below
+    argv, sys.argv = sys.argv, sys.argv[:1]            # ditto
+    try:
+        # Importing the daemon runs its startup resolution: it reads argv for a
+        # port and a bind flag, and exits when no state dir resolves. Neither is
+        # what is being measured, so it gets an empty argv and a throwaway state
+        # dir — the tasks root comes from $ORCH_TASKS_ROOT, the harness
+        # project-directory variable (empty in a bin/ launch) or the cwd
+        # walk-up, and no substitution here touches any of the three.
+        import monitor_server
+        mon = monitor_server.resolve_tasks_root()
+        agg = legacy.orchestrator_root()
+    # `SystemExit` is named DELIBERATELY and is not redundant with `Exception`
+    # (it derives from BaseException): importing the daemon runs
+    # `TASKS_ROOT = resolve_tasks_root()` at module level, and that call exits
+    # rather than raises when nothing resolves. Dropping this arm as a tidy-up
+    # would end the whole report at the exact moment it has something to say.
+    except (SystemExit, Exception) as exc:            # never abort the report
+        report(False, "task state resolver loaded (%s: %s)"
+                      % (type(exc).__name__, exc))
+    else:
+        override = bool(os.environ.get("ORCH_TASKS_ROOT")
+                        or os.environ.get("TOUCH_LEGACY_ROOT"))
+
+        def inside_plugin(p):
+            return bool(p) and os.path.abspath(p).startswith(root + os.sep)
+
+        agree = bool(mon) and bool(agg) and (
+            os.path.abspath(mon) == os.path.abspath(agg))
+
+        if inside_plugin(mon) or inside_plugin(agg):
+            # The severe one, and the only fault here that a correct `cd` cannot
+            # cure — state aimed at a version-stamped directory that gets swept.
+            # Reported first, and in its own words, whatever check 4 said.
+            report(False, "task state resolves into the project, not the plugin "
+                          "(inside this tree: %s / %s)" % (mon, agg))
+        elif agree or (mon and override):
+            report(True, "task state resolves into the project, not the plugin (%s)" % mon)
+        elif not in_project:
+            # Check 4, one line above, has already named the true fault. Anything
+            # the resolvers say from a non-project cwd is downstream of it — most
+            # visibly a "the two halves disagree" line, because
+            # `paths._marker_walk_up` skips $HOME and the monitoring resolver does
+            # not, so any directory under $HOME produces one. That is a real gap
+            # in Touch, but it is not what is wrong with THIS run, and a first-run
+            # user reading it debugs the wrong thing.
+            report(False, "task state cannot resolve until you run this from a "
+                          "project (see above)")
+        elif not mon:
+            report(False, "task state resolves into the project, not the plugin "
+                          "(no project with a .claude/ marker above %s)" % os.getcwd())
+        else:
+            report(False, "task state resolves into the project, not the plugin — but "
+                          "the two halves disagree: monitoring %s vs aggregator %s"
+                          % (mon, agg))
+    finally:
+        sys.argv = argv
+
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        bound = sock.getsockname()[1]
+    except OSError as exc:
+        report(False, "loopback bind (%s)" % exc)
+    else:
+        report(True, "loopback bind works (127.0.0.1:%d)" % bound)
+    finally:
+        sock.close()
+
+
+try:
+    run_checks(sys.argv[1], sys.argv[2])
+except BaseException as exc:
+    # Nothing above is allowed to end the report silently: an unguarded
+    # attribute, a resolver raising on a half-built payload, a MemoryError.
+    # Name what blew up and where, then let the sentinel below tell the caller
+    # how much of the report is missing.
+    report(False, "every check ran (crashed after %d of %d — %s: %s)"
+                  % (len(DONE), EXPECTED, type(exc).__name__, exc))
+finally:
+    sys.stdout.write("END %d\n" % EXPECTED)
+' "$ROOT" "$TMP/scratch" > "$TMP/py.out" 2> "$TMP/py.err" || PY_RC=$?
+
+# `IFS= read -r line` + one string strip, rather than `read -r status text`:
+# the two-field read collapses runs of spaces inside a message (a resolver path
+# is not obliged to be whitespace-free), and a report that rewrites what it
+# reports is a report nobody can grep.
+WANT=""
+GOT=0
+while IFS= read -r line; do
+    case "$line" in
+        "PASS "*) report PASS "${line#* }"; GOT=$((GOT + 1)) ;;
+        "FAIL "*) report FAIL "${line#* }"; GOT=$((GOT + 1)) ;;
+        "END "*)  WANT="${line#* }" ;;
+        *) ;;   # not part of the report (a chatty import, a warning) — ignored
+    esac
+done < "$TMP/py.out"
+
+# The expected count is the probe's to declare (it owns the checks), so it is
+# read out of the sentinel rather than duplicated here — a second copy of "6" in
+# this file is a second thing to forget when a seventh check is added.
+if [ -z "$WANT" ]; then
+    WHY="the report never ended, so it died during check $((GOT + 1))"
+elif [ "$GOT" != "$WANT" ]; then
+    WHY="only $GOT of $WANT lines arrived"
+else
+    WHY="the probe exited $PY_RC"
+fi
+# The first stderr line is the only thing that says WHAT went wrong, and it is
+# otherwise discarded — a crash with no message is how this failure stayed
+# invisible in the first place.
+ERR1="$(head -n 1 "$TMP/py.err" 2>/dev/null || true)"
+if [ "$GOT" != "$WANT" ] || [ "$PY_RC" -ne 0 ]; then
+    report FAIL "the python probe reported every check ($WHY${ERR1:+; $ERR1})"
+fi
+
+# --- check 7: exec bits. git records the bit and `git archive` preserves it,
+# but a zip built without -X, or any copy through a mode-dropping filter,
+# produces a bin/ nobody can run — and status.sh failures are stderr-only, so
+# the dashboard would just stay empty. The loop reads the directory instead of a
+# hardcoded list of six: a mode dropped on a SEVENTH wrapper added later is the
+# identical failure, and a list would report PASS without ever looking at it.
+NOEXEC=""
+NWRAP=0
+for w in "$ROOT"/bin/*; do
+    [ -f "$w" ] || continue
+    NWRAP=$((NWRAP + 1))
+    [ -x "$w" ] || NOEXEC="$NOEXEC ${w##*/}"
+done
+if [ "$NWRAP" -eq 0 ]; then
+    report FAIL "the wrappers are present ($ROOT/bin holds no file at all)"
+elif [ -n "$NOEXEC" ]; then
+    report FAIL "every wrapper in bin/ is executable ($NWRAP checked; not executable:$NOEXEC — chmod +x them)"
+else
+    report PASS "every wrapper in bin/ is executable ($NWRAP checked)"
+fi
+
+# --- check 8: the full write path, end to end, into a throwaway task folder.
+mkdir -p "$TMP/task"
+if ORCH_STATE_DIR="$TMP/task" "$ROOT/bin/touch-status" \
+        touch-selfcheck check info "selfcheck probe" >/dev/null 2>"$TMP/status.err" \
+   && python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+if not lines:
+    raise SystemExit(1)
+event = json.loads(lines[-1])
+raise SystemExit(0 if event.get("plan") == "touch-selfcheck"
+                 and event.get("stage") == "check" else 1)
+' "$TMP/task/events.jsonl" >/dev/null 2>&1; then
+    report PASS "event written and read back through touch-status"
+else
+    report FAIL "event written and read back through touch-status ($(head -n 1 "$TMP/status.err" 2>/dev/null))"
+fi
+
+echo
+# `command -v` proves that A touch-serve is first on PATH, not that it is THIS
+# one — and two installed versions at once is precisely the situation a
+# version-stamped plugin cache produces. Compare the resolved paths, so the
+# reassuring line can only be printed when it is true.
+MINE="$ROOT/bin/touch-serve"
+MINE_REAL="$(readlink -f "$MINE" 2>/dev/null || printf '%s' "$MINE")"
+FIRST="$(command -v touch-serve 2>/dev/null || true)"
+[ -z "$FIRST" ] || FIRST="$(readlink -f "$FIRST" 2>/dev/null || printf '%s' "$FIRST")"
+if [ -n "$FIRST" ] && [ "$FIRST" = "$MINE_REAL" ]; then
+    echo "note: the wrappers are on PATH (bare command names work)"
+elif [ -n "$FIRST" ]; then
+    echo "note: a DIFFERENT touch-serve is first on PATH ($FIRST); the one this"
+    echo "      report is about is $MINE — call it by path, or put its bin/"
+    echo "      ahead on PATH"
+else
+    echo "note: bin/ is not on PATH — inside a Claude Code session it is; from a"
+    echo "      plain shell, call the wrappers by path ($ROOT/bin/…)"
+fi
+echo
+
+if [ "$FAILS" -eq 0 ]; then
+    echo "$CHECKS checks: all passed"
+    echo
+    echo "Next, from your project directory:"
+    echo "  touch-serve"
+    echo "It prints a loopback URL carrying a per-boot token, e.g."
+    echo "  http://127.0.0.1:8932/?token=<per-boot token>"
+    exit 0
+fi
+
+echo "$CHECKS checks: $((CHECKS - FAILS)) passed, $FAILS failed"
+exit 1

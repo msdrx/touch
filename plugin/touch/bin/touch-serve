@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# touch-serve — run the Touch aggregator (the read/serve side).
+#
+#   touch-serve [--port P] [--tasks-root DIR] [--assets DIR]
+#               [--allow-origin O] [--allow-host H]
+#
+# Binds 127.0.0.1:8932 and prints the URL WITH the per-boot token; that URL is
+# also written to <project>/.touch/server.json (0600). `touch-serve --help`
+# lists everything the module accepts.
+#
+# Two of the module's flags are NOT offered here: `--open` is refused outright
+# and `--host` is accepted only for loopback addresses, because both spell the
+# same request — bind an interface a stranger can reach — and no wrapper does
+# that on a user's behalf (GD-T8). The refusal below prints the exact command
+# that does it deliberately. (`--help` shows the MODULE's usage, which still
+# lists both — it is one program away from here. The refusal, not that text, is
+# what this command does.)
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (plugin root, plugin data dir, project directory — all
+# measured EMPTY here, GD-T4 / probe C2). Code location comes from $0, which is
+# absolute in a bin/ launch; the project is $PWD (the aggregator resolves it
+# itself, by walking up for a .claude/ marker). The earlier design's "export
+# the roots from the project-directory variable when present" clause was
+# therefore unreachable dead code and is deleted, not ported.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-serve: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    echo "touch-serve: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+export PYTHONDONTWRITEBYTECODE=1
+
+# GD-T8: no wrapper opens a network port on a user's behalf, and that includes
+# forwarding either flag that does it. In aggregator/server.py the two are the
+# same statement — `--open` sets the bind address to the all-interfaces literal,
+# `--host` sets it to whatever you name — so a guard that knew only the shorter
+# spelling would be a speed bump with a documented way round it. Refusing
+# loudly beats dropping the flag silently: a user who typed it and got a
+# loopback server would believe the opposite of what happened.
+#
+# The 127/8 arm is a SHAPE test, in two stages, not a prefix test. A `case`
+# pattern is a glob, so any single-stage `127.…*` spelling admits a HOSTNAME
+# that merely begins that way — `127.evil.example`, and equally
+# `127.0.0.1.evil.example`, which is the canonical shape of this attack
+# precisely because it READS as a loopback address (wildcard DNS hands out
+# `<anything>.<domain>` for free). The module then feeds that name to
+# getaddrinfo and binds whatever DNS answered: a public interface, admitted by a
+# list whose whole purpose is "loopback only". Narrowing the glob cannot close
+# that class — only rejecting every character a dotted quad cannot contain can.
+# So: three exact literals, or `127.` followed by digits and dots and nothing
+# else. That is the accepted set, in full.
+refuse_bind() {  # refuse_bind <address-as-typed>
+    case "$1" in
+        localhost|::1|'[::1]') return 0 ;;              # loopback: nothing to refuse
+        127.*)
+            case "$1" in
+                *[!0-9.]*) ;;                          # a NAME wearing a loopback
+                                                       # prefix — falls through, refused
+                *) return 0 ;;                         # a dotted quad in 127/8
+            esac
+            ;;
+    esac
+    echo "touch-serve: refusing --host $1; a wrapper never opens a port for you (GD-T8) — loopback addresses only." >&2
+    echo "touch-serve: to bind a reachable interface deliberately, run the module itself:" >&2
+    echo "  PYTHONPATH=\"$ROOT\" python3 -P -m aggregator.server --host $1 --allow-origin http://HOST:8932" >&2
+    exit 2
+}
+
+# The scan mirrors the module's own parser: server.py consumes the argument
+# AFTER each value-taking flag, so in `--allow-origin --open` the second word is
+# an origin string there and must not be read as a bind request here. A blanket
+# "does --open appear anywhere" test would refuse a command the module accepts
+# safely, which teaches users to work around the guard.
+#
+# `${1+"$@"}`, never a bare `"$@"`: bash before 4.4 treats `"$@"` as an unset
+# variable under `set -u` when there are no positional parameters, and stock
+# macOS ships /bin/bash 3.2.57 — which `#!/usr/bin/env bash` finds on a machine
+# without Homebrew. `touch-serve` with no flags is the documented invocation.
+value_of=""
+for arg in ${1+"$@"}; do
+    if [ -n "$value_of" ]; then
+        if [ "$value_of" = "--host" ]; then
+            refuse_bind "$arg"
+        fi
+        value_of=""
+        continue
+    fi
+    case "$arg" in
+        --open)
+            echo "touch-serve: refusing to forward --open; a wrapper never opens a port for you (GD-T8)." >&2
+            echo "touch-serve: to bind a reachable interface deliberately, run the module itself:" >&2
+            echo "  PYTHONPATH=\"$ROOT\" python3 -P -m aggregator.server --open --allow-origin http://HOST:8932" >&2
+            exit 2
+            ;;
+        # The joined spelling is an unknown argument to the current parser, so
+        # this arm exists for the day it is not: a guard that a parser change
+        # can silently open is not a guard.
+        --host=*) refuse_bind "${arg#--host=}" ;;
+        --host|--port|--touch-root|--tasks-root|--claude-root|--assets|--allow-origin|--allow-host)
+            value_of="$arg" ;;
+    esac
+done
+
+# The printed escape hatches above use `python3 -P` (3.11+, which is this
+# wrapper's floor anyway): -P is what keeps the cwd off sys.path, and without it
+# the suggested command would hit the very shadowing bug the launcher below
+# exists to prevent — a user pastes it inside their own project, and their own
+# aggregator/ wins the import.
+
+# Exported for anything the server itself spawns. It is NOT what makes the
+# import below safe: for `python3 -m`/-c the current directory comes FIRST on
+# sys.path, ahead of every PYTHONPATH entry, and the current directory is the
+# user's own project — which may perfectly well contain an `aggregator/`. The
+# launcher below drops the cwd and verifies where the package actually came
+# from; this variable is convenience, the guard is the protection.
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# The version floor is checked BEFORE the package is imported, so an old
+# interpreter says "Touch needs Python 3.11+" instead of raising a SyntaxError
+# from whichever module happened to be read first.
+exec python3 -c '
+import os
+import sys
+
+root = sys.argv[1]
+if sys.version_info[:2] < (3, 11):
+    sys.stderr.write("touch-serve: Touch needs Python 3.11+ (found %d.%d)\n"
+                     % sys.version_info[:2])
+    raise SystemExit(1)
+
+sys.path = [p for p in sys.path if p not in ("", ".", os.getcwd())]
+sys.path.insert(0, root)
+
+try:
+    import aggregator
+except ImportError as exc:
+    # A payload assembled without the package (a partial unzip, a broken build)
+    # would otherwise print a bare traceback. Name the directory that is
+    # missing: it is the only thing a user can act on.
+    sys.stderr.write("touch-serve: no aggregator package at %s (%s)\n"
+                     % (os.path.join(root, "aggregator"), exc))
+    raise SystemExit(1)
+
+here = os.path.abspath(aggregator.__file__)
+if not here.startswith(root + os.sep):
+    sys.stderr.write("touch-serve: refusing to run a foreign aggregator package "
+                     "found at %s; expected one under %s\n" % (here, root))
+    raise SystemExit(1)
+
+from aggregator import server
+
+raise SystemExit(server.main(sys.argv[2:]))
+' "$ROOT" ${1+"$@"}

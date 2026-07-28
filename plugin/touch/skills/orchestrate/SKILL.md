@@ -1,9 +1,9 @@
 ---
-name: touch-orchestrate
+name: orchestrate
 description: Spawn and control subagents to Touch's standards — hierarchical names derived from one root name, background spawns for stoppability, state files, and a control-file loop — so the Touch UI can display, join, and stop every agent. Use whenever spawning subagents in a session Touch monitors, or when asked to run agents "with Touch naming".
 ---
 
-# touch-orchestrate — spawn subagents Touch can see and stop
+# orchestrate — spawn subagents Touch can see and stop
 
 Makes every subagent this session spawns *nameable before creation*,
 *joinable at spawn*, and *stoppable from the Touch UI*. It layers on top of
@@ -69,9 +69,10 @@ at spawn instant, joined to the `agentId` by the aggregator.
 
 - **Fresh agent every attempt** — never resume / continue / SendMessage a
   prior agent. Handoff between attempts is file paths, never inlined text.
-- When the run also uses the existing monitoring stack, keep its
-  `[monitor] plan=… stage=… role=… attempt=…` marker and `status.sh` calls as
-  the second line / as templated — the two markers coexist.
+- When the run also uses the monitoring stack (the `m-orchestrator` skill),
+  keep its `[monitor] plan=… stage=… role=… attempt=…` marker and
+  `touch-status` calls as the second line / as templated — the two markers
+  coexist.
 
 ## 3. State standard
 

@@ -70,7 +70,11 @@ skipped = []
 MODULE = REPO / "aggregator" / "custom_state.py"
 SOURCE = MODULE.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
-SKILL = REPO / ".claude" / "skills" / "touch-orchestrate" / "SKILL.md"
+# The skill MOVED into the shipping subtree and lost its `touch-` prefix (item
+# 09: a plugin skill invokes as `/<plugin>:<skill>`, so `touch-orchestrate`
+# inside a plugin named `touch` read `/touch:touch-orchestrate`). One canonical
+# copy, in the payload — this constant follows it.
+SKILL = REPO / "plugin" / "touch" / "skills" / "orchestrate" / "SKILL.md"
 FINDINGS = REPO / ".claude" / "local-orchestrators" / "touch-mongo-live" / "findings"
 DEVIATION = FINDINGS / "sp-custom-state-head-driver-deviation.md"
 SET_FIELDS_DEVIATION = FINDINGS / "sp-custom-state-slots-set-fields-deviation.md"

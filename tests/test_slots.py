@@ -19,8 +19,8 @@ Plus the two invariants only a test can hold in place: the state machine is
 **monotone**, so replaying evidence in any order lands on the same document
 (GD-25); and the ledger line the skill file tells agents to write actually
 carries the fields this arm keys on (`root`, `sessionKey`) — the R-53 amendment
-to `touch-orchestrate/SKILL.md`, asserted here so the code and the instruction
-cannot drift apart.
+to the `orchestrate` skill's `SKILL.md`, asserted here so the code and the
+instruction cannot drift apart.
 
 The **live arm** creates the real unique sparse `{agentId:1}` index on a mongod
 and proves the collision comes back as a tolerated duplicate rather than an
@@ -66,7 +66,11 @@ failures = []
 skipped = []
 
 MODULE = REPO / "aggregator" / "custom_state.py"
-SKILL = REPO / ".claude" / "skills" / "touch-orchestrate" / "SKILL.md"
+# The skill MOVED into the shipping subtree and lost its `touch-` prefix (item
+# 09: a plugin skill invokes as `/<plugin>:<skill>`, so `touch-orchestrate`
+# inside a plugin named `touch` read `/touch:touch-orchestrate`). One canonical
+# copy, in the payload — this constant follows it.
+SKILL = REPO / "plugin" / "touch" / "skills" / "orchestrate" / "SKILL.md"
 AGENT = "a2fc883c96ff7b837"
 AGENT2 = "b1de44f0c1e2a3b45"
 SESSION = "622-10028"                 # <pid>-<procStart>, the live session key

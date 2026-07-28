@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# touch-cycle-reporter — render one report per implement->test->critique cycle.
+#
+#   ORCH_STATE_DIR=<task-dir> touch-cycle-reporter <wf_dir> [...] \
+#       [--once] [--no-status] [--interval=N]
+#
+# Front for the implement-plan skill's cycle_reporter.py: the deterministic
+# per-cycle renderer that also emits each loop-terminal verdict. It lives with
+# the skill it serves (skills/implement-plan/templates/), and this wrapper is
+# how anything outside that directory reaches it by name.
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (plugin root, plugin data dir, project directory — all
+# measured EMPTY here, GD-T4 / probe C2). Code location comes from $0, which is
+# absolute in a bin/ launch; the only project signal is $PWD. The earlier
+# design's "export the tasks root from the project-directory variable when
+# present" clause was therefore unreachable dead code and is deleted, not
+# ported.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-cycle-reporter: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    echo "touch-cycle-reporter: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+export PYTHONDONTWRITEBYTECODE=1
+
+REPORTER="$ROOT/skills/implement-plan/templates/cycle_reporter.py"
+[ -f "$REPORTER" ] || {
+    echo "touch-cycle-reporter: $REPORTER is missing; it ships with the implement-plan skill" >&2
+    exit 1
+}
+
+# No tasks-root resolution here, and none is wanted: cycle_reporter.py works
+# from $ORCH_STATE_DIR — the one task folder it reports on — which the caller
+# names, exactly as it does for touch-status and touch-watcher. Exporting a
+# guessed tasks root would pin the FIRST rung of the resolver in every status.sh
+# the reporter spawns, for no gain here at all.
+#
+# `${1+"$@"}`, never a bare `"$@"`: bash before 4.4 treats `"$@"` as an unset
+# variable under `set -u` when there are no positional parameters, and stock
+# macOS ships /bin/bash 3.2.57 — which `#!/usr/bin/env bash` finds on a machine
+# without Homebrew. The reporter's own usage message is the right answer to a
+# bare invocation; an "unbound variable" from the wrapper is not.
+exec python3 "$REPORTER" ${1+"$@"}

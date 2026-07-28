@@ -1,8 +1,11 @@
 # --- Orchestrator monitoring ---------------------------------------------
-# The shared monitoring module is stateless: state written there means someone
-# forgot ORCH_STATE_DIR.
-.claude/shared/monitoring/events.jsonl
-.claude/shared/monitoring/.watcher-state.json
+# The shared monitoring module is stateless, and as of 2026-07-28 it is
+# ENFORCED rather than tolerated: status.sh exits 2 instead of spooling into
+# the module dir, and both daemons exit 1 rather than falling back to it. The
+# two ignore lines that used to sanction that leak
+# (.claude/shared/monitoring/{events.jsonl,.watcher-state.json}) are gone on
+# purpose — tests/test_bootstrap.py asserts they stay gone, so the behaviour
+# cannot quietly return under cover of an ignore rule.
 
 # Per-task orchestration run state is local working data, kept on disk for
 # monitor replay and the Mongo legacy keyspace but no longer versioned

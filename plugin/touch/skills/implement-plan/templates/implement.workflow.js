@@ -11,6 +11,13 @@
 //   * once new findings land, prior-attempt agents are stale — never reuse or resume them
 //     (serial: they have already exited; parallel: drop/stop them before the successor)
 // args = { plan_file?, parallel? } — sub-plans are DERIVED here, never handed in
+//
+// HISTORY OF THIS DESIGN. The bracketed ids in the comments below (R-nn, GD-nn,
+// D-n, M-n, SHELL-n, n-n) are the finding and decision ids of the plans this
+// protocol was derived from, in the project that produced it. They are kept
+// because each one marks a rule that a real run broke once, and a reader who
+// removes the rule should know a defect is on the other side of it. They are
+// NOT files you have, and nothing here reads them — treat them as footnotes.
 export const meta = {
   name: 'TASK_NAME-implement',
   description: 'ONE_LINE_DESCRIPTION — implement feature-sub-plans via gated loops',
@@ -23,10 +30,34 @@ export const meta = {
   ],
 }
 
-const REPO = '/ABS/PATH/TO/REPO'
-const TASK = REPO + '/.claude/local-orchestrators/TASK_NAME'
+// TWO roots, never one. The project this run works in and the installed plugin
+// that carries the monitoring commands are different directories on every
+// machine but the one a template like this was first written on — and the
+// plugin root is a version-stamped cache re-copied on each update, so nothing
+// durable may live under it (task state is project-anchored, always).
+//
+// Nothing substitutes a placeholder inside a SUPPORTING file: this template is
+// handed to you verbatim. The SKILL.md that sent you here IS substituted, and
+// it carries the value to paste into PLUGIN_ROOT.
+const PROJECT_DIR = '/ABS/PATH/TO/PROJECT'      // FILL IN: this run's project root
+const PLUGIN_ROOT = '/ABS/PATH/TO/PLUGIN_ROOT'  // FILL IN: the installed plugin root
+const TASK = PROJECT_DIR + '/.claude/local-orchestrators/TASK_NAME'
 const FINDINGS = TASK + '/findings'
-const S = REPO + '/.claude/shared/monitoring/status.sh'
+
+// The event writer is a COMMAND NAME, not a path: the plugin puts its bin/ on
+// PATH, and a name survives an update that moves the file behind it while a
+// baked cache path does not. PLUGIN_ROOT exists for exactly one reason — the
+// fallback below, for a runtime whose PATH does not carry that bin/. Be honest
+// about what that is worth today: the CURRENT workflow runtime has no Node API
+// (the `import('node:child_process')` inside runStatus throws — see the
+// cycle-report note further down), so neither the command nor the fallback is
+// ever reached from here, and the driver emits the terminal events instead.
+// The constant is here for a runtime that gains one. If yours has not, leave
+// PLUGIN_ROOT exactly as it is — an unfilled placeholder costs nothing, while
+// a real path baked into a version-stamped plugin cache is swept out from
+// under this file by the next update.
+const STATUS = 'touch-status'
+const STATUS_FALLBACK = PLUGIN_ROOT + '/bin/touch-status'
 const MAX_ATTEMPTS = 4
 // Final aggregate gate: gate -> fixer -> re-gate. Published to orch-config.json
 // so the watcher's decision text quotes this cap, not its own default (R-09).
@@ -44,11 +75,11 @@ const PARALLEL_MODE = ARGS.parallel === true   // never shadow the parallel() gl
 // loop" is granted — never by editing MAX_ATTEMPTS for everyone.
 const EXTRA_ATTEMPTS = ARGS.extra_attempts || {}
 
-// Quote every path interpolation so a REPO/TASK/S path with a space cannot split
-// the env assignment / arg list. Keep agent-filled <summary> text single-line,
-// no double quotes (see m-orchestrator SKILL.md).
+// Quote every path interpolation so a PROJECT_DIR/TASK path with a space cannot
+// split the env assignment / arg list. Keep agent-filled <summary> text
+// single-line, no double quotes (see m-orchestrator SKILL.md).
 const statusCmd = (plan, stage, state, msg) =>
-  `ORCH_STATE_DIR="${TASK}" bash "${S}" "${plan}" ${stage} ${state} "${msg}"`
+  `ORCH_STATE_DIR="${TASK}" ${STATUS} "${plan}" ${stage} ${state} "${msg}"`
 
 // SCRIPT-emitted status event (R-09). Terminal plan/run events must not depend on
 // an agent remembering its LAST-run line: the script emits them at a fixed
@@ -57,26 +88,33 @@ const statusCmd = (plan, stage, state, msg) =>
 // NEVER route this through a shell: `plan` is the DIVIDER AGENT's `sp.id` and
 // `msg` can carry an agent-authored file path, so a shell string would let a
 // stray `"` mangle the event — or execute arbitrary commands in the driver
-// process. argv + env go straight to status.sh; `statusCmd` stays for PROMPT
+// process. argv + env go straight to the writer; `statusCmd` stays for PROMPT
 // TEXT only (where the agent runs it itself, in its own shell).
-// status.sh is a best-effort writer that reports problems on STDERR (an
-// out-of-enum state, an unwritable state dir) and still exits 0, so stderr is
-// captured and logged — a discarded warning is the one way this call can fail
-// silently. spawnSync (not execFileSync) because only spawnSync hands back the
-// child's stderr on SUCCESS.
+// The writer is best-effort: it reports problems on STDERR (an out-of-enum
+// state, an unwritable state dir) and still exits 0, so stderr is captured and
+// logged — a discarded warning is the one way this call can fail silently.
+// spawnSync (not execFileSync) because only spawnSync hands back the child's
+// stderr on SUCCESS.
 let statusProbed = false
-// `extraEnv` (optional) carries additive status.sh env keys — e.g.
+// `extraEnv` (optional) carries additive writer env keys — e.g.
 // ORCH_PLANS_TOTAL, the declared plan-card total — as env, never argv, so the
-// argv contract above stays five fixed strings.
+// argv contract above stays four fixed strings after the command name.
 const runStatus = async (plan, stage, state, msg, extraEnv) => {
   try {
     const cp = await import('node:child_process')
     if (!statusProbed) { statusProbed = true; log('status emitter ready (node:child_process)') }
-    const r = cp.spawnSync('bash', [S, String(plan), String(stage), String(state), String(msg)],
-      { env: { ...process.env, ORCH_STATE_DIR: TASK, ...(extraEnv || {}) }, encoding: 'utf8' })
+    const argv = [String(plan), String(stage), String(state), String(msg)]
+    const opts = { env: { ...process.env, ORCH_STATE_DIR: TASK, ...(extraEnv || {}) }, encoding: 'utf8' }
+    let r = cp.spawnSync(STATUS, argv, opts)
+    // ENOENT means this runtime's PATH does not carry the plugin's bin/ — take
+    // the absolute wrapper instead, ONCE, and through `bash` so a copy that lost
+    // its exec bit in a zip round trip still writes its event.
+    if (r.error && r.error.code === 'ENOENT') {
+      r = cp.spawnSync('bash', [STATUS_FALLBACK, ...argv], opts)
+    }
     if (r.error) throw r.error
     const warn = (r.stderr || '').trim()
-    if (warn) log(`status.sh warned on ${plan}/${stage}/${state}: ${warn.split('\n')[0]}`)
+    if (warn) log(`${STATUS} warned on ${plan}/${stage}/${state}: ${warn.split('\n')[0]}`)
   } catch (e) {
     log(`status event ${plan}/${stage}/${state} not written: ${e}`)
   }
@@ -126,11 +164,14 @@ const publishConfig = async () => {
 // pid really is a decision_watcher — a stale pid file is the same wrong-target
 // hazard as a name-matched kill (pids get reused, and other tasks' watchers are
 // live processes; GD-12's invariant, GD-1's gate). The launch side must record
-// the pid — `python3 decision_watcher.py & echo $! > "$TASK/watcher.pid"`, the
-// form monitoring.md's run block documents; without that line this block is a
-// no-op and the watcher's own self-exit does the work. monitor_server.py is
-// deliberately NOT touched: ONE server serves ALL tasks, so a per-task epilogue
-// SIGTERMing it would take the dashboard down for every other live run.
+// the pid — `touch-watcher & echo $! > "$TASK/watcher.pid"`, the form
+// monitoring.md's run block documents; without that line this block is a
+// no-op and the watcher's own self-exit does the work. `decision_watcher` is
+// what the /proc check below looks for because that is the PROGRAM the
+// touch-watcher wrapper execs — the wrapper name never reaches the argv it
+// verifies. The dashboard server is deliberately NOT touched: ONE server
+// serves ALL tasks, so a per-task epilogue SIGTERMing it would take the
+// dashboard down for every other live run.
 //
 // The signal is sent IMMEDIATELY after the terminal event, which is only safe
 // because decision_watcher.py handles SIGTERM by DRAINING (one more tail+emit
@@ -199,7 +240,7 @@ const CRIT_SCHEMA = {
 }
 
 const CONTEXT = `
-Repo: ${REPO}. TASK_SPECIFIC_CONTEXT (goal, constraints, out-of-scope areas).
+Project: ${PROJECT_DIR}. TASK_SPECIFIC_CONTEXT (goal, constraints, out-of-scope areas).
 Working tree may hold unrelated in-flight changes — never revert/commit/stash;
 touch only files owned by THIS sub-plan.
 `
@@ -305,9 +346,9 @@ Return structured output only: approved, summary (short), findings_file (${file}
 `
 
 // ---- Per-cycle visual report: ONE artifact after EVERY impl->test->critique cycle ----
-// Rendered DETERMINISTICALLY by the cycle reporter daemon (templates/
-// cycle_reporter.py next to this file, adapted into the task's orch-scripts/
-// and launched by the driver alongside decision_watcher — see SKILL.md). The
+// Rendered DETERMINISTICALLY by the cycle reporter daemon (`touch-cycle-reporter`,
+// launched by the driver alongside the watcher — see SKILL.md; it carries no
+// placeholders, so it is run by name and never copied). The
 // workflow runtime has NO filesystem or Node API access (import() throws in
 // scripts; the try/catch'd runStatus/closeRun helpers above are the documented
 // contract but silently no-op at runtime), so the script CANNOT write pages

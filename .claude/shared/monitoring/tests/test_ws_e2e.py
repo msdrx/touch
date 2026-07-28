@@ -135,6 +135,10 @@ class WsProbe:
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         key = base64.b64encode(b"0123456789abcdef").decode()
         head = [f"GET /ws{query} HTTP/1.1", f"Host: 127.0.0.1:{port}",
+                # The upgrade is token-gated (item 05 / GD-T8). The header
+                # carrier is used rather than `?token=` so the query strings the
+                # protocol cases assert on stay exactly what they were.
+                f"X-Orch-Token: {ms.TOKEN}",
                 "Upgrade: websocket", "Connection: Upgrade"]
         if send_key:
             head.append(f"Sec-WebSocket-Key: {key}")
@@ -726,6 +730,7 @@ async def _http(port: int, path: str) -> tuple:
     """Minimal HTTP/1.1 GET; returns (status_line, body_bytes)."""
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     writer.write(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                 f"X-Orch-Token: {ms.TOKEN}\r\n"
                  f"Connection: close\r\n\r\n".encode())
     await writer.drain()
     raw = await asyncio.wait_for(reader.read(-1), 8)

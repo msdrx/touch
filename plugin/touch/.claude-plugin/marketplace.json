@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "msdrx-tools",
+  "description": "Michael Sadradze's Claude Code tooling.",
+  "owner": {
+    "name": "Michael Sadradze",
+    "url": "https://github.com/msdrx"
+  },
+  "plugins": [
+    {
+      "name": "touch",
+      "source": "./"
+    }
+  ]
+}
