@@ -1112,7 +1112,7 @@ def test_the_head_and_the_bind_have_a_named_driver_handoff():
     have_note(DEVIATION,
               f"…with the same handoff recorded where the run's other deviations are: "
               f"{DEVIATION.name}")
-    drivers ={"head_write", "bind_slot", "rebuild_heads", "apply_guarded"}
+    drivers = {"head_write", "bind_slot", "rebuild_heads", "apply_guarded"}
     callers = []
     for module in sorted((REPO / "aggregator").glob("*.py")):
         if module.name == "custom_state.py":

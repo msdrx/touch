@@ -11,6 +11,12 @@ the bytes are frozen, and the bytes are still the right bytes.
 
 Everything here is read-only. See tests/fixtures/PROVENANCE.md for what each
 fixture is, where it came from, and how to regenerate the manifest deliberately.
+
+The fixtures are TRACKED, so every hash/shape arm runs in a clean checkout too.
+The one exception is `test_fixtures_are_trackable`, which asks git whether any
+fixture is ignored: outside a git checkout (an unpacked `git archive`, a
+packaged copy) git answers rc=128 and the check SKIPs with a printed reason
+rather than reporting a fixture problem it did not find (RENAME-SCOPE-15).
 """
 import hashlib
 import json
@@ -43,6 +49,7 @@ MIRROR = FIX / "mirror"
 ATTRIBUTING_KEYS = {"agent", "tokens", "title", "w"}
 
 failures = []
+skips = []
 
 
 def check(cond, msg):
@@ -51,6 +58,32 @@ def check(cond, msg):
     else:
         print(f"  FAIL: {msg}")
         failures.append(msg)
+
+
+def skip(msg):
+    print(f"  SKIP: {msg}")
+    skips.append(msg)
+
+
+def is_git_checkout():
+    """True when REPO is the working tree of a git repo (not just inside one).
+
+    The toplevel is compared against REPO rather than merely asking "did git
+    find *a* repo": an archive unpacked inside some other checkout would
+    otherwise interrogate that stranger's history and answer about its
+    `.gitignore`, not ours.
+    """
+    proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(REPO),
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False
+    try:
+        return Path(proc.stdout.strip()).resolve() == REPO
+    except OSError:
+        return False
+
+
+GIT = is_git_checkout()
 
 
 def records(path):
@@ -110,8 +143,17 @@ def test_manifest_complete_and_stable():
 
 
 # --- the corpus must survive a clone: nothing here may be gitignored --------
+# Only a git checkout can answer this: `git check-ignore` exits 128 in a tree
+# with no `.git` (an unpacked `git archive`, a packaged copy), which is not a
+# finding about the fixtures at all. Skip with a printed reason there — the
+# manifest, newline and JSONL arms below need no git and keep running
+# unconditionally, so the freeze itself is still asserted on tracked bytes.
 def test_fixtures_are_trackable():
     print("test_fixtures_are_trackable")
+    if not GIT:
+        skip(f"test_fixtures_are_trackable: {REPO} is not a git checkout "
+             f"(unpacked archive / packaged copy) — git check-ignore cannot answer")
+        return
     paths = [str(p.relative_to(REPO)) for p in fixture_files()]
     proc = subprocess.run(["git", "check-ignore", "--stdin"], cwd=str(REPO),
                           input="\n".join(paths), capture_output=True, text=True)
@@ -524,12 +566,14 @@ def main():
               test_no_credentials):
         t()
     print()
+    for message in skips:
+        print(f"skipped: {message}")
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    print("all sp-fixtures-freeze tests passed")
+    print(f"all sp-fixtures-freeze tests passed ({len(skips)} skipped)")
 
 
 if __name__ == "__main__":

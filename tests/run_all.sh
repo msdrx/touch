@@ -40,8 +40,11 @@
 #     tests/run_all.sh --keep-going)
 #
 # That tree has no `.git`, no `.claude/local-orchestrators/` and no untracked
-# anything, which is exactly what a fresh clone and a packaged copy look like.
-# Files that read those SKIP there; nothing crashes.
+# anything, which is what a packaged copy looks like, and — apart from `.git`,
+# which a clone of course has — what a fresh clone looks like. That difference
+# is exactly why the git-dependent guards are written as "is THIS tree the git
+# checkout" rather than "do these files exist". Files that read the absent
+# things SKIP there; nothing crashes.
 #
 # usage: tests/run_all.sh [--keep-going] [--list] [-h]
 #   default        stop at the first failing file (fail fast)

@@ -69,7 +69,29 @@ def skip(name):
     SKIPS.append(name)
 
 
-def find_repo_fixtures():
+def is_repo_corpus(fixtures):
+    """True when `fixtures` is the repo's FROZEN corpus, not a lookalike.
+
+    Identity is the corpus's own manifest (GD-P4): `MANIFEST.sha256` present
+    and naming `legacy/` paths. That is deliberately not a repo-layout test —
+    the rename may move directories, but the frozen bytes and their manifest
+    are exactly what may not change. It also separates the repo corpus from
+    this module's own `tests/fixtures/`, whose manifest lists only
+    `snapshot-gold.json`.
+    """
+    if not os.path.isdir(os.path.join(fixtures, "legacy")):
+        return False
+    manifest = os.path.join(fixtures, "MANIFEST.sha256")
+    if not os.path.isfile(manifest):
+        return False
+    try:
+        with open(manifest, encoding="utf-8", errors="replace") as fh:
+            return any(" legacy/" in line or "\tlegacy/" in line for line in fh)
+    except OSError:
+        return False
+
+
+def find_repo_fixtures(start=None):
     """`<repo>/tests/fixtures`, found by walking up — or None.
 
     Walking up rather than counting `..` hops: the module sits at
@@ -78,14 +100,17 @@ def find_repo_fixtures():
     directory in the other. None means "not in a repo checkout" and every arm
     below skips.
 
-    The `legacy/` child is the discriminator, not `tests/fixtures` itself: this
-    module has its own `tests/fixtures/` (the golden snapshot), which the walk
-    passes through first and must not mistake for the repo corpus.
+    The walk is ANCHORED by is_repo_corpus(): an unanchored walk installed under
+    an unrelated project would accept the first `tests/fixtures/legacy` it met
+    and replay a stranger's JSONL against Touch's R-58 invariants — a confusing
+    red, or a coincidental green. `start` exists so the resolver itself is
+    testable against synthetic trees.
     """
-    d = os.path.dirname(os.path.abspath(__file__))
+    d = os.path.dirname(os.path.abspath(__file__)) if start is None \
+        else os.path.abspath(start)
     while True:
         cand = os.path.join(d, "tests", "fixtures")
-        if os.path.isdir(os.path.join(cand, "legacy")):
+        if is_repo_corpus(cand):
             return cand
         parent = os.path.dirname(d)
         if parent == d:
@@ -94,6 +119,32 @@ def find_repo_fixtures():
 
 
 REPO_FIXTURES = find_repo_fixtures() or os.path.join(BASE, "no-repo-fixtures")
+
+# The resolver itself, against synthetic trees. Without this the None branch is
+# dead code in every gate: `tests/fixtures/**` is TRACKED, so it is present in
+# the working tree and in a `git archive` checkout alike, and both resolve.
+_res = os.path.join(BASE, "resolver")
+os.makedirs(os.path.join(_res, "bare", "a", "b"), exist_ok=True)
+check("resolver: a tree with nothing above it does not resolve",
+      find_repo_fixtures(os.path.join(_res, "bare", "a", "b")) is None)
+
+_fake = os.path.join(_res, "stranger")
+_fake_fix = os.path.join(_fake, "tests", "fixtures")
+_fake_start = os.path.join(_fake, "shared", "monitoring", "tests")
+os.makedirs(os.path.join(_fake_fix, "legacy"), exist_ok=True)
+os.makedirs(_fake_start, exist_ok=True)
+check("resolver: a stranger's tests/fixtures/legacy with no frozen manifest is refused",
+      find_repo_fixtures(_fake_start) is None)
+
+with open(os.path.join(_fake_fix, "MANIFEST.sha256"), "w") as _fh:
+    _fh.write("0" * 64 + "  snapshot-gold.json\n")
+check("resolver: a manifest naming no legacy/ path is refused (this module's own shape)",
+      find_repo_fixtures(_fake_start) is None)
+
+with open(os.path.join(_fake_fix, "MANIFEST.sha256"), "a") as _fh:
+    _fh.write("1" * 64 + "  legacy/touch-full-recon-events.jsonl\n")
+check("resolver: the frozen-corpus shape resolves, from any depth below it",
+      find_repo_fixtures(_fake_start) == _fake_fix)
 
 
 # ---------------------------------------------------------------------------

@@ -199,17 +199,23 @@ def main():
     # no finding corpus to compare it against. Skip the whole file with a
     # printed reason rather than crash. If the tree IS there, every guard runs
     # — including `test_register_exists`, which then fails honestly.
+    needs_history = (test_register_exists,
+                     test_every_finding_registered_exactly_once,
+                     test_dispositions_are_meaningful,
+                     test_d8_is_never_cited_bare,
+                     test_skills_namespace_collision_is_kept_apart,
+                     test_r58_aliases_are_registered,
+                     test_register_explains_itself)
     if not ORCH.is_dir():
-        skip(f"{ORCH.relative_to(REPO)} is gitignored and absent on this "
-             f"checkout — the register and its finding corpus with it")
+        # One skip line PER guard, not one for the file: `run_all.sh` reports
+        # the count so a reader can see how much of the suite is dark in a
+        # clean checkout, and collapsing seven into one under-reports that.
+        for t in needs_history:
+            skip(f"{t.__name__}: {ORCH.relative_to(REPO)} is gitignored and "
+                 f"absent on this checkout — the register and its finding "
+                 f"corpus with it")
     else:
-        for t in (test_register_exists,
-                  test_every_finding_registered_exactly_once,
-                  test_dispositions_are_meaningful,
-                  test_d8_is_never_cited_bare,
-                  test_skills_namespace_collision_is_kept_apart,
-                  test_r58_aliases_are_registered,
-                  test_register_explains_itself):
+        for t in needs_history:
             t()
     print()
     for message in skips:

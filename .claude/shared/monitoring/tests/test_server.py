@@ -405,6 +405,16 @@ def test_plan_states_last_event_wins():
 # a plugin, and a hop count that is right for one layout silently points at a
 # stranger's directory in the other. When the walk finds nothing, every read
 # skips with a printed reason and `run_all.sh` reports the count.
+#
+# The walk must not accept just any `tests/fixtures/legacy` it passes, though:
+# installed under an unrelated project (or a home directory that happens to
+# hold one), an unanchored walk would replay a STRANGER'S JSONL and assert
+# Touch's R-58 invariants against it — a confusing red, or worse a coincidental
+# green. So a candidate counts only when it carries the frozen corpus's OWN
+# manifest (GD-P4) and that manifest names `legacy/` paths. That identifies the
+# corpus by its own frozen bytes rather than by a repo layout the rename may
+# move, and it also tells this module's `tests/fixtures/` (whose manifest lists
+# only `snapshot-gold.json`) apart from the repo's.
 SKIPS = []
 
 
@@ -413,12 +423,27 @@ def _skip(msg):
     SKIPS.append(msg)
 
 
-def _find_repo_fixtures():
-    d = HERE
+def _is_repo_corpus(fixtures):
+    """True when `fixtures` is the repo's frozen corpus, not a lookalike."""
+    if not os.path.isdir(os.path.join(fixtures, "legacy")):
+        return False
+    manifest = os.path.join(fixtures, "MANIFEST.sha256")
+    if not os.path.isfile(manifest):
+        return False
+    try:
+        with open(manifest, encoding="utf-8", errors="replace") as fh:
+            return any(" legacy/" in line or "\tlegacy/" in line for line in fh)
+    except OSError:
+        return False
+
+
+def _find_repo_fixtures(start=None):
+    """`<repo>/tests/fixtures/legacy` at or above `start`, or None."""
+    d = HERE if start is None else os.path.abspath(start)
     while True:
-        cand = os.path.join(d, "tests", "fixtures", "legacy")
-        if os.path.isdir(cand):
-            return cand
+        cand = os.path.join(d, "tests", "fixtures")
+        if _is_repo_corpus(cand):
+            return os.path.join(cand, "legacy")
         parent = os.path.dirname(d)
         if parent == d:
             return None
@@ -1781,6 +1806,50 @@ def test_the_cold_fold_reads_a_long_stream_in_bounded_windows():
             ms.SCAN_WINDOW = real_window
 
     _run(go())
+
+
+def test_repo_fixture_resolution_is_anchored():
+    """The walk-up finds the repo corpus, and REFUSES a stranger's lookalike.
+
+    Without this arm the `None` branch would be dead code everywhere it is
+    gated: `tests/fixtures/**` is tracked, so it is present in the working tree
+    AND in a `git archive` checkout, and both layouts resolve. Here the resolver
+    runs against synthetic trees so both outcomes are actually exercised.
+    """
+    with tempfile.TemporaryDirectory(dir=_TMP_BASE) as td:
+        # 1. nothing above at all -> None
+        deep = os.path.join(td, "empty", "a", "b")
+        os.makedirs(deep)
+        assert _find_repo_fixtures(deep) is None, "bare tree must not resolve"
+
+        # 2. a LOOKALIKE: tests/fixtures/legacy with no frozen manifest above
+        #    it — someone else's project, or a home dir that happens to hold
+        #    one. Must be refused, not replayed.
+        fake = os.path.join(td, "stranger")
+        os.makedirs(os.path.join(fake, "tests", "fixtures", "legacy"))
+        start = os.path.join(fake, "shared", "monitoring", "tests")
+        os.makedirs(start)
+        assert _find_repo_fixtures(start) is None, \
+            "a tests/fixtures/legacy without the frozen manifest is not our corpus"
+
+        # 3. ...and one whose MANIFEST.sha256 lists only its own snapshot (the
+        #    shape of THIS module's fixtures dir) is refused for the same reason.
+        with open(os.path.join(fake, "tests", "fixtures", "MANIFEST.sha256"), "w") as fh:
+            fh.write("0" * 64 + "  snapshot-gold.json\n")
+        assert _find_repo_fixtures(start) is None, \
+            "a manifest that names no legacy/ path is not the repo corpus"
+
+        # 4. the real shape resolves, from any depth below it
+        with open(os.path.join(fake, "tests", "fixtures", "MANIFEST.sha256"), "a") as fh:
+            fh.write("1" * 64 + "  legacy/touch-full-recon-events.jsonl\n")
+        got = _find_repo_fixtures(start)
+        assert got == os.path.join(fake, "tests", "fixtures", "legacy"), got
+
+    # 5. and in THIS checkout it resolves to the repo's own corpus (or to None
+    #    in a packaged copy that ships no corpus — both are legitimate).
+    if _FIXTURES is not None:
+        assert os.path.isdir(_FIXTURES), _FIXTURES
+        assert _is_repo_corpus(os.path.dirname(_FIXTURES))
 
 
 def _write_gold() -> int:

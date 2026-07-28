@@ -181,7 +181,11 @@ def test_commit_identity():
         check("@" in email, f"C '{subject}' has an author email")
 
     if git("config", "--local", "--get", "user.email").returncode != 0:
-        print("  skip: no repo-local identity (fresh clone / CI checkout)")
+        # Routed through skip() like every other skip in this file, so the
+        # file's own trailer and run_all.sh's count agree: a bare print is
+        # counted by the runner but invisible to `skips`.
+        skip("test_commit_identity: no repo-local identity "
+             "(fresh clone / CI checkout)")
         return
     for key in ("user.name", "user.email"):
         proc = git("config", "--local", "--get", key)
