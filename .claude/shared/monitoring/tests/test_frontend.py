@@ -312,6 +312,7 @@ def main():
         "ZOOM-1: the home view must hide the zoom control"
 
     perf_guards(src)
+    roster_guards(src)
 
     print("test_frontend.py: all assertions passed")
     return 0
@@ -727,6 +728,26 @@ def perf_guards(src):
         "DATA-MODEL-9: TP_SLOW_MS must be documented as page-only, not a mirrored fold literal"
     assert not re.search(r"^TP_SLOW_MS = ", py, re.M), \
         "DATA-MODEL-9: TP_SLOW_MS is page-only — a server-side copy would need mirroring too"
+
+
+def roster_guards(src):
+    """ROSTER: the orchestrator accordion also lists driver-declared PLANNED
+    sub-plans (optional event key `roster`, latest wins) before their loops
+    exist — display-only bullets, never materialized as cards."""
+    ev_slice = _slice(src, "function onEvent(", "function logLi")
+    assert "Array.isArray(ev.roster)" in ev_slice, \
+        "ROSTER: onEvent must capture the roster array from orchestrator-card events"
+    assert 'ev.plan === "orchestrator" && Array.isArray(ev.roster)' in ev_slice, \
+        "ROSTER: the roster is honored only on the reserved orchestrator card"
+    sub_slice = _slice(src, "function renderSubplans()", "function fmtTok")
+    assert 'className = "planned"' in sub_slice, \
+        "ROSTER: renderSubplans must render card-less roster entries as planned bullets"
+    assert 'st.textContent = "planned"' in sub_slice, \
+        "ROSTER: planned bullets carry the state word (color is never the only signal)"
+    assert "plans.has(id)" in sub_slice, \
+        "ROSTER: an entry whose loop already has a card must not render twice"
+    assert ".subplans li.planned .dot" in src, \
+        "ROSTER: planned bullets need their hollow-dot style"
 
 
 if __name__ == "__main__":
