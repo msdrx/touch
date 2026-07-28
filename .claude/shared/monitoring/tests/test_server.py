@@ -397,13 +397,47 @@ def test_plan_states_last_event_wins():
 
 # --- R-58 against the FROZEN REAL streams (skipped if the fixtures are absent:
 #     the monitoring module must stay usable outside this repo).
-_FIXTURES = os.path.abspath(os.path.join(HERE, "..", "..", "..", "..",
-                                         "tests", "fixtures", "legacy"))
+#
+# The corpus lives in the REPO (`<repo>/tests/fixtures/legacy`), never in the
+# module, and the module ships without it. Resolve it by walking UP from this
+# file rather than by a fixed count of `..` hops: the module sits at
+# `<repo>/.claude/shared/monitoring/tests/` here and one level shallower inside
+# a plugin, and a hop count that is right for one layout silently points at a
+# stranger's directory in the other. When the walk finds nothing, every read
+# skips with a printed reason and `run_all.sh` reports the count.
+SKIPS = []
+
+
+def _skip(msg):
+    print(f"  skip {msg}")
+    SKIPS.append(msg)
+
+
+def _find_repo_fixtures():
+    d = HERE
+    while True:
+        cand = os.path.join(d, "tests", "fixtures", "legacy")
+        if os.path.isdir(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+_FIXTURES = _find_repo_fixtures()
 
 
 def _fixture(name):
+    """Path to a frozen legacy stream, or None (having printed why)."""
+    if _FIXTURES is None:
+        _skip(f"{name}: no <repo>/tests/fixtures/legacy above this module")
+        return None
     path = os.path.join(_FIXTURES, name)
-    return path if os.path.isfile(path) else None
+    if os.path.isfile(path):
+        return path
+    _skip(f"{name}: fixture absent")
+    return None
 
 
 def test_r58_real_streams_render_corrected():
@@ -417,7 +451,6 @@ def test_r58_real_streams_render_corrected():
     for name in ("touch-full-recon-events.jsonl", "touch-mongo-live-events.jsonl"):
         path = _fixture(name)
         if not path:
-            print(f"  skip {name}: fixture absent")
             continue
         plan_states, last, tokens, failures = ms.replay_plan_states(path)
         assert plan_states.get("research") == "done", (name, plan_states)
@@ -437,7 +470,6 @@ def test_r58_uncorrected_failures_match_the_relabel_predicate():
     for name in ("touch-aggregator-events.jsonl", "touch-mongo-live-events.jsonl"):
         path = _fixture(name)
         if not path:
-            print(f"  skip {name}: fixture absent")
             continue
         fabricated = []
         with open(path, "rb") as f:
@@ -458,7 +490,6 @@ def test_r58_genuine_failure_is_not_a_fabrication():
     predicate — a real failure has to survive the fix (negative control)."""
     path = _fixture("touch-repo-recon-events.jsonl")
     if not path:
-        print("  skip touch-repo-recon-events.jsonl: fixture absent")
         return
     plan_states, _, _, failures = ms.replay_plan_states(path)
     assert plan_states.get("research") == "failed", plan_states
@@ -1105,7 +1136,7 @@ def test_snapshot_matches_the_golden_fixture():
     The module must stay usable outside this repo, so an absent fixture skips.
     """
     if not os.path.isfile(GOLD_SNAPSHOT):
-        print("  skip snapshot-gold.json: fixture absent (--write-gold to make it)")
+        _skip("snapshot-gold.json: fixture absent (--write-gold to make it)")
         return
     want = open(GOLD_SNAPSHOT).read()
     assert _gold_snapshot() == want, "snapshot fold drifted from the golden fixture"
@@ -1774,10 +1805,13 @@ def run_all():
         except Exception as e:
             failed += 1
             print(f"FAIL {t.__name__}: {e!r}")
+    print()
+    for message in SKIPS:
+        print(f"skipped: {message}")
     if failed:
         print(f"\n{failed}/{len(tests)} tests FAILED")
         sys.exit(1)
-    print(f"\nall {len(tests)} tests passed")
+    print(f"\nall {len(tests)} tests passed ({len(SKIPS)} skipped)")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,28 @@
 # fixtures relative to themselves) and with PYTHONDONTWRITEBYTECODE set, so a
 # test run never litters __pycache__ into the tree it is asserting about.
 #
+# SKIPS ARE REPORTED, not swallowed. Several suites legitimately skip when
+# something they read is absent — no mongod, no node, and above all the
+# gitignored run history under `.claude/local-orchestrators/` and the 8 MB
+# fixture corpus, neither of which exists in a clean checkout or a packaged
+# copy. Green must therefore never quietly mean "the files vanished", so this
+# runner counts each file's printed skip lines and prints them as a line-item
+# next to the pass/fail totals. The wire convention every test file follows is
+# one line per skipped check, `skip`/`SKIP` first on the line after optional
+# indent; a trailing `skipped: <reason>` recap block is NOT counted (it would
+# double-count the same skip).
+#
+# THE CLEAN-CHECKOUT GATE. A suite that is green only on the machine that wrote
+# it is not a gate at all, so before any wide mechanical change (and before any
+# release) run it over tracked bytes ONLY:
+#
+#   d=$(mktemp -d) && git archive HEAD | tar -x -C "$d" && (cd "$d" && \
+#     tests/run_all.sh --keep-going)
+#
+# That tree has no `.git`, no `.claude/local-orchestrators/` and no untracked
+# anything, which is exactly what a fresh clone and a packaged copy look like.
+# Files that read those SKIP there; nothing crashes.
+#
 # usage: tests/run_all.sh [--keep-going] [--list] [-h]
 #   default        stop at the first failing file (fail fast)
 #   --keep-going   run everything, then report every failure
@@ -72,19 +94,46 @@ if ! command -v "$PY" >/dev/null 2>&1; then
 fi
 
 failed=()
+skipped=()
 passed=0
+skips_total=0
 started=$SECONDS
+
+# One capture file, reused: each file's output is streamed through `tee` (so a
+# long suite still prints live) and re-read afterwards only to count skips.
+# `pipefail` is already set above, so the pipeline's status is still python's.
+capture="$(mktemp "${TMPDIR:-/tmp}/run_all.XXXXXX")"
+trap 'rm -f "$capture"' EXIT
+
+# One skip = one line whose first word is skip/SKIP. The `skipped:` recap that
+# several files print at the end is deliberately NOT matched. `grep -a` because
+# this sandbox's grep is ugrep, which stops at a NUL byte otherwise.
+count_skips() {
+    grep -ac -E '^[[:space:]]*[Ss][Kk][Ii][Pp]([[:space:]:.,-]|$)' "$1" || true
+}
+
 for f in "${files[@]}"; do
     rel="${f#"$REPO"/}"
     printf '=== %s\n' "$rel"
     t0=$SECONDS
-    if (cd "$(dirname "$f")" && "$PY" "$(basename "$f")"); then
+    if (cd "$(dirname "$f")" && "$PY" "$(basename "$f")" 2>&1) | tee "$capture"; then
         passed=$((passed + 1))
-        printf -- '--- PASS %s (%ss)\n\n' "$rel" "$((SECONDS - t0))"
+        verdict=PASS
     else
         rc=$?
         failed+=("$rel")
-        printf -- '--- FAIL %s (rc=%s, %ss)\n\n' "$rel" "$rc" "$((SECONDS - t0))"
+        verdict=FAIL
+    fi
+    n=$(count_skips "$capture")
+    if [ "${n:-0}" -gt 0 ]; then
+        skipped+=("$rel:$n")
+        skips_total=$((skips_total + n))
+    fi
+    if [ "$verdict" = PASS ]; then
+        printf -- '--- PASS %s (%ss, %s skipped)\n\n' "$rel" "$((SECONDS - t0))" "${n:-0}"
+    else
+        printf -- '--- FAIL %s (rc=%s, %ss, %s skipped)\n\n' \
+            "$rel" "$rc" "$((SECONDS - t0))" "${n:-0}"
         if [ "$keep_going" -eq 0 ]; then
             echo "run_all.sh: stopping at the first failure (--keep-going runs the rest)"
             break
@@ -93,8 +142,11 @@ for f in "${files[@]}"; do
 done
 
 printf '%s\n' "-----------------------------------------------------------------"
-printf 'run_all.sh: %s passed, %s failed, %s file(s) total, %ss\n' \
-    "$passed" "${#failed[@]}" "${#files[@]}" "$((SECONDS - started))"
+printf 'run_all.sh: %s passed, %s failed, %s skipped check(s), %s file(s) total, %ss\n' \
+    "$passed" "${#failed[@]}" "$skips_total" "${#files[@]}" "$((SECONDS - started))"
+if [ ${#skipped[@]} -gt 0 ]; then
+    for s in "${skipped[@]}"; do echo "  SKIPPED: ${s%:*} (${s##*:} check(s))"; done
+fi
 if [ ${#failed[@]} -gt 0 ]; then
     for f in "${failed[@]}"; do echo "  FAILED: $f"; done
     exit 1

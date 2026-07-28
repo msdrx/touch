@@ -22,6 +22,14 @@ as two different finding sets. A bare-id register would silently collapse them.
 Findings files are read with `errors="replace"`: at least one report contains
 raw bytes that are not valid UTF-8 (it quotes transcript payloads), and a
 decoding crash here would be an unrelated failure.
+
+Everything here reads `.claude/local-orchestrators/`, which is gitignored and
+untracked (2026-07-27 amendment): the register and the finding corpus exist in
+a working tree that ran the orchestrations and in no clean checkout at all.
+When that tree is absent the whole file SKIPS with a printed reason instead of
+crashing with FileNotFoundError (RENAME-SCOPE-15 / AGGREGATOR-VISUAL-9); when
+the tree IS present the register must be too, so a genuinely missing register
+still fails.
 """
 import os
 import re
@@ -44,6 +52,7 @@ ROW_RE = re.compile(r"^\|\s*`([A-Z][A-Z0-9]{2,}-\d+)`\s*(?<!\\)\|")
 SPLIT_RE = re.compile(r"(?<!\\)\|")
 
 failures = []
+skips = []
 
 
 def check(cond, msg):
@@ -52,6 +61,11 @@ def check(cond, msg):
     else:
         print(f"  FAIL: {msg}")
         failures.append(msg)
+
+
+def skip(msg):
+    print(f"  SKIP: {msg}")
+    skips.append(msg)
 
 
 def read(path):
@@ -181,21 +195,31 @@ def test_register_explains_itself():
 
 
 def main():
-    for t in (test_register_exists,
-              test_every_finding_registered_exactly_once,
-              test_dispositions_are_meaningful,
-              test_d8_is_never_cited_bare,
-              test_skills_namespace_collision_is_kept_apart,
-              test_r58_aliases_are_registered,
-              test_register_explains_itself):
-        t()
+    # A clean checkout carries no run history at all: no register to read and
+    # no finding corpus to compare it against. Skip the whole file with a
+    # printed reason rather than crash. If the tree IS there, every guard runs
+    # — including `test_register_exists`, which then fails honestly.
+    if not ORCH.is_dir():
+        skip(f"{ORCH.relative_to(REPO)} is gitignored and absent on this "
+             f"checkout — the register and its finding corpus with it")
+    else:
+        for t in (test_register_exists,
+                  test_every_finding_registered_exactly_once,
+                  test_dispositions_are_meaningful,
+                  test_d8_is_never_cited_bare,
+                  test_skills_namespace_collision_is_kept_apart,
+                  test_r58_aliases_are_registered,
+                  test_register_explains_itself):
+            t()
     print()
+    for message in skips:
+        print(f"skipped: {message}")
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    print("all findings-register tests passed")
+    print(f"all findings-register tests passed ({len(skips)} skipped)")
 
 
 if __name__ == "__main__":

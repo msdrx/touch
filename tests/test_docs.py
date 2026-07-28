@@ -20,6 +20,12 @@ was once wrong in this repo:
 
 A guard that only asserted the *presence* of good text would pass while the bad
 text sat next to it, so the negative halves are the load-bearing ones.
+
+Guards that read the gitignored run history (`PLAN`, `PROBES`, `REGISTER`)
+SKIP with a printed reason when the run folder is not on disk, so this file is
+green on a clean checkout instead of crashing (RENAME-SCOPE-15 /
+AGGREGATOR-VISUAL-9). `tests/run_all.sh` reports the skip counts, so a green
+suite never silently means "the files vanished".
 """
 import re
 import sys
@@ -31,11 +37,20 @@ CLAUDE = REPO / "CLAUDE.md"
 INCEPTION = REPO / "inception.md"
 CONTROL_DOC = REPO / "docs/control-semantics.md"
 MONGO_DOC = REPO / "docs/mongo.md"
-PLAN = REPO / ".claude/local-orchestrators/touch-full-recon/plan/touch-full-recon-plan.md"
-PROBES = REPO / ".claude/local-orchestrators/touch-full-recon/report/probes.md"
-REGISTER = REPO / ".claude/local-orchestrators/touch-full-recon/plan/findings-register.md"
+
+# The run-history artifacts. `.claude/local-orchestrators/` is gitignored and
+# untracked (2026-07-27 amendment), so these files exist in a working tree that
+# ran the orchestrations and in NO clean checkout — not `git archive HEAD`, not
+# a fresh clone, not a packaged plugin. Reading them unguarded made this file
+# crash with FileNotFoundError everywhere but this machine, which is the one
+# thing a before/after gate may not do.
+RECON = REPO / ".claude/local-orchestrators/touch-full-recon"
+PLAN = RECON / "plan/touch-full-recon-plan.md"
+PROBES = RECON / "report/probes.md"
+REGISTER = RECON / "plan/findings-register.md"
 
 failures = []
+skips = []
 
 
 def check(cond, msg):
@@ -44,6 +59,29 @@ def check(cond, msg):
     else:
         print(f"  FAIL: {msg}")
         failures.append(msg)
+
+
+def skip(msg):
+    print(f"  SKIP: {msg}")
+    skips.append(msg)
+
+
+def have(path):
+    """True when a run-history artifact can be read; skips (or fails) if not.
+
+    The distinction is deliberate: an ABSENT run folder is a clean checkout and
+    skips with a printed reason, while a run folder that IS on disk without its
+    authoritative artifact is a real regression and still fails. "Green" must
+    never quietly mean "the files vanished".
+    """
+    if path.is_file():
+        return True
+    rel = path.relative_to(REPO)
+    if not RECON.is_dir():
+        skip(f"{rel}: run history is gitignored — absent on a clean checkout")
+        return False
+    check(False, f"{rel} exists (its run folder is on disk, so it must be)")
+    return False
 
 
 def read(path):
@@ -99,9 +137,9 @@ def test_claude_md_watcher_lifecycle():
           "CLAUDE.md carries the 'when a run ends, stop its watcher' rule")
     check("ORCH_STATE_DIR" in text and "inside the paths being" in text,
           "CLAUDE.md states GD-1's SCOPED commit gate (watchers inside the commit path set)")
-    plan = read(PLAN)
-    check("inside the paths being" in plan,
-          "the plan's GD-1 carries the same scoping (R-40)")
+    if have(PLAN):
+        check("inside the paths being" in read(PLAN),
+              "the plan's GD-1 carries the same scoping (R-40)")
 
 
 # --------------------------------------------------------- R-57 / GD-21: pymongo
@@ -118,9 +156,10 @@ def test_claude_md_names_the_pymongo_exception():
 # ------------------------------------------------------------- R-38: the anchors
 def test_plan_d8_is_split():
     print("test_plan_d8_is_split")
-    plan = read(PLAN)
-    check("D8.1" in plan, "the plan labels the stack decision D8.1")
-    check("D8.2" in plan, "the plan labels the journal-`result` clause D8.2")
+    if have(PLAN):
+        plan = read(PLAN)
+        check("D8.1" in plan, "the plan labels the stack decision D8.1")
+        check("D8.2" in plan, "the plan labels the journal-`result` clause D8.2")
     check("D8.1" in read(INCEPTION) and "D8.2" in read(INCEPTION),
           "inception.md uses the split labels too")
 
@@ -148,8 +187,9 @@ def test_inception_truths():
 
 def test_probes_recorded():
     print("test_probes_recorded")
+    if not have(PROBES):
+        return
     text = read(PROBES)
-    check(PROBES.is_file(), "probes.md exists (R-04's evidence artifact)")
     check("2026-07-26" in text, "probes carry the date they were run")
     check(text.count("claude ") >= 3, "probes quote the commands they ran")
     for token in ("hot-reload", "agents --json", "run_in_background", "pymongo",
@@ -256,7 +296,8 @@ def test_docs_agree_on_restart():
 
 def test_register_is_reachable():
     print("test_register_is_reachable")
-    check(REGISTER.is_file(), "the findings register exists (R-06)")
+    if not have(REGISTER):
+        return
     check("findings-register" in read(REGISTER).lower() or "R-06" in read(REGISTER),
           "the register identifies itself")
 
@@ -281,12 +322,14 @@ def main():
               test_register_is_reachable):
         t()
     print()
+    for message in skips:
+        print(f"skipped: {message}")
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    print("all documentation guards passed")
+    print(f"all documentation guards passed ({len(skips)} skipped)")
 
 
 if __name__ == "__main__":

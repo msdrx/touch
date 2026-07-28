@@ -45,6 +45,7 @@ os.environ["ORCH_WF_GLOB_ROOT"] = os.path.join(BASE, "glob")
 dw = importlib.import_module("decision_watcher")
 
 FAILS = []
+SKIPS = []
 
 
 def check(name, cond):
@@ -53,6 +54,46 @@ def check(name, cond):
     else:
         print(f"FAIL - {name}")
         FAILS.append(name)
+
+
+def skip(name):
+    """Record a check that could not run, and say so in one printed line.
+
+    The arms below replay REPO fixtures (`<repo>/tests/fixtures/**`), which the
+    monitoring module never carries: outside this repo — a clean checkout, a
+    packaged plugin — they are simply absent, and skipping loudly is the only
+    honest answer. `tests/run_all.sh` counts these lines so a green suite never
+    silently means "the corpus vanished".
+    """
+    print(f"skip - {name}")
+    SKIPS.append(name)
+
+
+def find_repo_fixtures():
+    """`<repo>/tests/fixtures`, found by walking up — or None.
+
+    Walking up rather than counting `..` hops: the module sits at
+    `<repo>/.claude/shared/monitoring/` here and one level shallower inside a
+    plugin, and a hop count that is right for one layout points at a stranger's
+    directory in the other. None means "not in a repo checkout" and every arm
+    below skips.
+
+    The `legacy/` child is the discriminator, not `tests/fixtures` itself: this
+    module has its own `tests/fixtures/` (the golden snapshot), which the walk
+    passes through first and must not mistake for the repo corpus.
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        cand = os.path.join(d, "tests", "fixtures")
+        if os.path.isdir(os.path.join(cand, "legacy")):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+REPO_FIXTURES = find_repo_fixtures() or os.path.join(BASE, "no-repo-fixtures")
 
 
 # ---------------------------------------------------------------------------
@@ -1256,14 +1297,12 @@ check("M2: the poll loop refreshes the config", "refresh_caps()" in _exit_src)
 # this fixture deliberately does not carry). The full file-level e2e replay with
 # transcripts is the acceptance sub-plan's arm (R-56/R-16), not this one's.
 # ---------------------------------------------------------------------------
-REPO = os.path.abspath(os.path.join(MOD_DIR, "..", "..", ".."))
+R58_REPLAY = os.path.join(REPO_FIXTURES, "mirror", "r58-replay",
+                          "292fc08c-923d-4ab4-8ff2-a9572417dbc8",
+                          "subagents", "workflows")
 R58_JOURNALS = {
-    "touch-full-recon": os.path.join(
-        REPO, "tests/fixtures/mirror/r58-replay/292fc08c-923d-4ab4-8ff2-a9572417dbc8",
-        "subagents/workflows/wf_930e210a-6da/journal.jsonl"),
-    "touch-mongo-live": os.path.join(
-        REPO, "tests/fixtures/mirror/r58-replay/292fc08c-923d-4ab4-8ff2-a9572417dbc8",
-        "subagents/workflows/wf_cca84d59-933/journal.jsonl"),
+    "touch-full-recon": os.path.join(R58_REPLAY, "wf_930e210a-6da", "journal.jsonl"),
+    "touch-mongo-live": os.path.join(R58_REPLAY, "wf_cca84d59-933", "journal.jsonl"),
 }
 
 
@@ -1389,7 +1428,7 @@ def replay_journal(path, strategy=None, rule=None, sequenced=None, marker=None):
 
 for task, journal in R58_JOURNALS.items():
     if not os.path.isfile(journal):
-        print(f"skip - R-58 replay for {task}: fixture missing ({journal})")
+        skip(f"R-58 replay for {task}: fixture missing ({journal})")
         continue
     for strategy in (None, "serial"):
         badges, outcome = replay_journal(journal, strategy=strategy)
@@ -2531,12 +2570,12 @@ check(f"R-40: no terminal complete event -> the watcher stays alive "
 # the close predicate narrowing back to decisive-only — fails this arm even if
 # every unit predicate still passes.
 # ---------------------------------------------------------------------------
-FIXTURES = os.path.join(REPO, "tests", "fixtures")
+FIXTURES = REPO_FIXTURES
 WF_829 = os.path.join(FIXTURES, "run-wf_829e6f58",
                       "dd469822-2546-47d9-aaa3-31db4cb705e8", "subagents",
                       "workflows", "wf_829e6f58-b2f")
 if not os.path.isfile(os.path.join(WF_829, "journal.jsonl")):
-    print(f"skip - R-58 e2e replay: fixture missing ({WF_829})")
+    skip(f"R-58 e2e replay: fixture missing ({WF_829})")
 else:
     e2e_state = os.path.join(BASE, "proc", "r58e2e", "state")
     os.makedirs(e2e_state, exist_ok=True)
@@ -2604,7 +2643,7 @@ for name, plan in (("touch-mongo-live-events.jsonl", "research"),
                    ("touch-full-recon-events.jsonl", "research")):
     path = os.path.join(LEGACY, name)
     if not os.path.isfile(path):
-        print(f"skip - SD-4 fold for {name}: fixture missing")
+        skip(f"SD-4 fold for {name}: fixture missing")
         continue
     folded = fold_plan_states(path)
     check(f"SD-4: {name} — the corrective done beats the fabricated failed",
@@ -2618,12 +2657,15 @@ if os.path.isfile(killed):
     check("SD-4: a genuinely failed run still folds to failed (control)",
           fold_plan_states(killed).get("research", ("", ""))[0] == "failed")
 else:
-    print("skip - SD-4 negative control: fixture missing")
+    skip("SD-4 negative control: fixture missing")
 
 
 shutil.rmtree(os.path.join(BASE, "proc"), ignore_errors=True)
 
+print()
+for message in SKIPS:
+    print(f"skipped: {message}")
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}")
     sys.exit(1)
-print("\nALL WATCHER TESTS PASSED")
+print(f"\nALL WATCHER TESTS PASSED ({len(SKIPS)} skipped)")

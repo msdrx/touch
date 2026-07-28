@@ -97,6 +97,26 @@ def skip(msg):
     skipped.append(msg)
 
 
+def have_note(path, msg):
+    """Assert a run-history deviation note is present; True when readable.
+
+    `.claude/local-orchestrators/` is gitignored and untracked, so these notes
+    exist in the working tree that produced them and in no clean checkout — a
+    bare `read_text()` here crashed every clone (RENAME-SCOPE-15 /
+    AGGREGATOR-VISUAL-9). An absent findings folder skips with a printed
+    reason; a findings folder that IS on disk without its note still FAILS,
+    because that is a note somebody deleted.
+    """
+    if path.is_file():
+        print(f"  ok: {msg}")
+        return True
+    if not FINDINGS.is_dir():
+        skip(f"{path.name}: run history is gitignored — absent on a clean checkout")
+        return False
+    check(False, msg)
+    return False
+
+
 def raises(exc, fn, *args, **kwargs):
     try:
         fn(*args, **kwargs)
@@ -1089,10 +1109,10 @@ def test_the_head_and_the_bind_have_a_named_driver_handoff():
     check("sp-12" in docstring,
           "…and NAMES the sub-plan that must drive them, rather than leaving the gap "
           "to be discovered by whoever queries an empty head")
-    check(DEVIATION.is_file(),
-          f"…with the same handoff recorded where the run's other deviations are: "
-          f"{DEVIATION.name}")
-    drivers = {"head_write", "bind_slot", "rebuild_heads", "apply_guarded"}
+    have_note(DEVIATION,
+              f"…with the same handoff recorded where the run's other deviations are: "
+              f"{DEVIATION.name}")
+    drivers ={"head_write", "bind_slot", "rebuild_heads", "apply_guarded"}
     callers = []
     for module in sorted((REPO / "aggregator").glob("*.py")):
         if module.name == "custom_state.py":
@@ -1108,24 +1128,24 @@ def test_the_head_and_the_bind_have_a_named_driver_handoff():
     for phrase in ("SLOT_SET_FIELDS", "set_fields", "sp-05"):
         check(phrase in docstring,
               f"the docstring states the set_fields handoff too ({phrase!r})")
-    check(SET_FIELDS_DEVIATION.is_file(),
-          f"…recorded beside the other deviation: {SET_FIELDS_DEVIATION.name}")
-    text = SET_FIELDS_DEVIATION.read_text(encoding="utf-8")
-    check(all(name in text for name in cs.SLOT_SET_FIELDS)
-          and "mongo_store.py" in text and "sp-05" in text,
-          "…naming the owner and the exact tuple, so the fix is a paste rather than a "
-          "re-derivation")
+    if have_note(SET_FIELDS_DEVIATION,
+                 f"…recorded beside the other deviation: {SET_FIELDS_DEVIATION.name}"):
+        text = SET_FIELDS_DEVIATION.read_text(encoding="utf-8")
+        check(all(name in text for name in cs.SLOT_SET_FIELDS)
+              and "mongo_store.py" in text and "sp-05" in text,
+              "…naming the owner and the exact tuple, so the fix is a paste rather than a "
+              "re-derivation")
 
     # The third, same shape: the head's order field wants `custom_state`'s
     # accumulable fence, and that spec is sp-05's too.
     check("HEAD_ORDER_FIELD" in docstring and "accumulable" in docstring,
           "the docstring states the head-order handoff as well")
-    check(HEAD_ORDER_DEVIATION.is_file(),
-          f"…recorded beside the others: {HEAD_ORDER_DEVIATION.name}")
-    order_text = HEAD_ORDER_DEVIATION.read_text(encoding="utf-8")
-    check(cs.HEAD_ORDER_FIELD in order_text and "accumulable" in order_text
-          and "mongo_store.py" in order_text and "sp-05" in order_text,
-          f"…naming the owner and the exact line, {cs.HEAD_ORDER_FIELD!r} included")
+    if have_note(HEAD_ORDER_DEVIATION,
+                 f"…recorded beside the others: {HEAD_ORDER_DEVIATION.name}"):
+        order_text = HEAD_ORDER_DEVIATION.read_text(encoding="utf-8")
+        check(cs.HEAD_ORDER_FIELD in order_text and "accumulable" in order_text
+              and "mongo_store.py" in order_text and "sp-05" in order_text,
+              f"…naming the owner and the exact line, {cs.HEAD_ORDER_FIELD!r} included")
     check(ms.spec_for("custom_state").accumulable >= {"seq"},
           "…while `seq`'s own fence is already there, which is what the note asks the "
           "order to join")

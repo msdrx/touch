@@ -10,6 +10,15 @@ These are *repository state* assertions, not unit tests: they read `.gitignore`
 and interrogate git itself, so they are the durable guard that the bootstrap
 stays bootstrapped (a later careless ignore rule, a branch rename back to
 master, or a re-tracked watcher checkpoint all fail here).
+
+Everything that interrogates git is gated on this tree actually BEING the git
+checkout (`git rev-parse --show-toplevel` == REPO): unpacked-archive and
+packaged copies carry the files but no `.git`, where `check-ignore` answers
+rc=128 and `log` answers nothing, and eight assertions used to fail for the
+one reason that is not a defect (RENAME-SCOPE-15). The `.gitignore` guard
+itself needs no git and always runs. Comparing the toplevel — rather than just
+asking whether git finds *a* repo — also stops an archive unpacked INSIDE some
+other checkout from silently asserting against that repo's history.
 """
 import os
 import subprocess
@@ -62,6 +71,7 @@ MUST_NOT_IGNORE = (
 )
 
 failures = []
+skips = []
 
 
 def check(cond, msg):
@@ -70,6 +80,11 @@ def check(cond, msg):
     else:
         print(f"  FAIL: {msg}")
         failures.append(msg)
+
+
+def skip(msg):
+    print(f"  SKIP: {msg}")
+    skips.append(msg)
 
 
 def git(*args):
@@ -82,6 +97,20 @@ def git(*args):
 
 def git_out(*args):
     return git(*args).stdout.strip()
+
+
+def is_git_checkout():
+    """True when REPO is the working tree of a git repo (not just inside one)."""
+    proc = git("rev-parse", "--show-toplevel")
+    if proc.returncode != 0:
+        return False
+    try:
+        return Path(proc.stdout.strip()).resolve() == REPO
+    except OSError:
+        return False
+
+
+GIT = is_git_checkout()
 
 
 # --- R-01/R-42: the entry list is present verbatim, one entry per line
@@ -183,18 +212,26 @@ def test_run_state_not_tracked():
 
 
 def main():
-    for t in (test_gitignore_entries, test_check_ignore_positive,
-              test_check_ignore_negative, test_head_exists, test_branch_is_main,
-              test_commit_identity, test_no_tracked_watcher_state,
-              test_run_state_not_tracked):
-        t()
+    test_gitignore_entries()
+    needs_git = (test_check_ignore_positive, test_check_ignore_negative,
+                 test_head_exists, test_branch_is_main, test_commit_identity,
+                 test_no_tracked_watcher_state, test_run_state_not_tracked)
+    if not GIT:
+        for t in needs_git:
+            skip(f"{t.__name__}: {REPO} is not a git checkout "
+                 f"(unpacked archive / packaged copy)")
+    else:
+        for t in needs_git:
+            t()
     print()
+    for message in skips:
+        print(f"skipped: {message}")
     if failures:
         print(f"FAILED ({len(failures)}):")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    print("all sp-repo-bootstrap tests passed")
+    print(f"all sp-repo-bootstrap tests passed ({len(skips)} skipped)")
 
 
 if __name__ == "__main__":
