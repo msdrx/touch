@@ -31,6 +31,7 @@ change cannot pass by editing a constant in this file.
 import ast
 import hashlib
 import json
+import math
 import os
 import random
 import shutil
@@ -587,6 +588,261 @@ def test_a_token_line_that_cannot_fold_losslessly_is_kept_whole():
           f"neither is folded away ({len(reduction.tokens)} records)")
     check(reduction.tokens[0].tokens["in"] == 7 and reduction.tokens[0].agent_id is None,
           "…and an unattributable token line is recorded as exactly that")
+    check(not any(record.absolute for record in reduction.tokens),
+          "…and is marked `absolute=False`: it is that line's own delta, so a "
+          "reader must sum it rather than fold it latest-wins")
+
+
+# --- GD-C: the fold equals the stream, plan by plan -----------------------
+def _zero_tokens():
+    return {key: 0 for key in lg.TOKEN_KEYS}
+
+
+def _number(value):
+    """`Number(value)` for the shapes a JSON token field can hold.
+
+    The page writes `Number(tokens[k])`, which accepts more than an `int`: a
+    numeric STRING coerces, `null` is 0, a bool is 0/1, an object is NaN. The
+    replica below is only evidence about the page if it coerces the same way,
+    so it does — rather than type-checking and quietly diverging.
+
+    Two JS corners are deliberately not reproduced, both unreachable here:
+    `Number("0x10")` is 16 (Python's `float` refuses), and `Number("Infinity")`
+    is Infinity where Python also accepts `"inf"`. Nothing emits a string token
+    field at all — `legacy._tokens()` coerces to `int` and `server.py` ships
+    those ints — so the divergence has no input that reaches it.
+    """
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return value
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        try:
+            return float(text)
+        except ValueError:
+            return float("nan")
+    return float("nan")
+
+
+def _add_tokens(into, tokens):
+    """The page's own arithmetic: finite, positive, four keys, never a subtraction."""
+    for key in lg.TOKEN_KEYS:
+        value = _number((tokens or {}).get(key))
+        if math.isfinite(value) and value > 0:
+            into[key] += value
+    return into
+
+
+def _delta_sum_per_plan(task):
+    """Ground truth: sum EVERY line's top-level `tokens`, per plan.
+
+    This is what `.claude/shared/monitoring/monitor.html` displays
+    (`p.tokIn += ev.tokens.in || 0`), read straight off the frozen bytes with no
+    reducer in the way — so it cannot inherit a reducer bug.
+    """
+    totals = {}
+    with open(stream_path(task), "r", encoding="utf-8") as handle:
+        for raw in handle:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue                    # a parse failure has no tokens either
+            if isinstance(event.get("tokens"), dict):
+                _add_tokens(totals.setdefault(event.get("plan"), _zero_tokens()),
+                            event["tokens"])
+    return totals
+
+
+def _last_cumulative_per_plan(task):
+    """GD-C's model B: per (plan, agent.id) keep the LAST `agent.tokens` seen on
+    ANY event — a terminal carries a higher cumulative than the agent's last
+    quiet tick — and add the agent-less deltas to nothing."""
+    latest = {}
+    with open(stream_path(task), "r", encoding="utf-8") as handle:
+        for raw in handle:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except ValueError:
+                continue
+            agent = event.get("agent")
+            if isinstance(agent, dict) and isinstance(agent.get("tokens"), dict):
+                latest[(event.get("plan"), agent.get("id"))] = agent["tokens"]
+    totals = {}
+    for (plan, _agent), tokens in latest.items():
+        _add_tokens(totals.setdefault(plan, _zero_tokens()), tokens)
+    return totals
+
+
+def _rollup_list_per_plan(records, *, collapse_agentless=False):
+    """A line-for-line replica of `touch-visual/app.js::rollupList`, per plan.
+
+    `collapse_agentless=True` is the pre-fix arm — kept so the assertion below
+    can prove it still has teeth rather than passing vacuously.
+    """
+    latest = {}
+    totals = {}
+    for record in records:
+        key = (record.plan, record.stage, record.agent_id, record.label)
+        if record.agent_id is None and not collapse_agentless:
+            _add_tokens(totals.setdefault(record.plan, _zero_tokens()), record.tokens)
+            continue
+        latest[key] = record
+    for key, record in latest.items():
+        _add_tokens(totals.setdefault(record.plan, _zero_tokens()), record.tokens)
+    return totals
+
+
+def test_the_token_rollup_equals_the_streams_own_delta_sum():
+    print("test_the_token_rollup_equals_the_streams_own_delta_sum")
+    # GD-C's executable half. The pre-existing fold test asserts a RATIO on the
+    # corpus and an exact total only on a synthetic six-line stream where every
+    # line carries a cumulative — the arm that always worked. It could not see
+    # that Touch's page showed 880,162,277 where the monitor showed 894,901,067
+    # for the same bytes (PRIOR-ART-TOUCH-2/-3), so the shortfall passed green.
+    # These three models must agree, per plan and in total, on every frozen
+    # stream, or the page and the monitor disagree about the same file again.
+    caught = 0
+    for task in sorted(name.replace("-events.jsonl", "") for name in STREAMS):
+        deltas = _delta_sum_per_plan(task)
+        cumulative = _last_cumulative_per_plan(task)
+        check(deltas == cumulative,
+              f"{task}: summing every delta == summing the last cumulative per "
+              f"(plan, agent), plan by plan — {len(deltas)} plans")
+
+        records = reduced(task).tokens
+        check(_rollup_list_per_plan(records) == deltas,
+              f"{task}: …and the reduction rolled up the way `rollupList` rolls "
+              f"it up lands on the same numbers, so the page shows the truth")
+
+        # The old rule (agent-less records in the latest-wins map) is never
+        # HIGHER than the truth, and on today's corpora it is strictly lower —
+        # the defect this test exists to catch.
+        before = _rollup_list_per_plan(records, collapse_agentless=True)
+        lost = sum(deltas[plan]["in"] - before.get(plan, _zero_tokens())["in"]
+                   for plan in deltas)
+        if lost > 0:
+            caught += 1
+        check(lost >= 0, f"{task}: the pre-fix rollup never over-reported")
+
+        # The wire carries no `absolute` key (`server.py`'s token payload is an
+        # explicit seven-field dict), so `rollupList` reads the distinction off
+        # `agentId` alone. `legacy._fold_tokens` derives `absolute` from
+        # `agent_id`, making the two equivalent by construction — pin both
+        # directions so a fold that starts inferring it from the cumulative
+        # again (the shape that over-counts, below) fails here first.
+        check(all(record.absolute == (record.agent_id is not None)
+                  for record in records),
+              f"{task}: `absolute` is False on exactly the agent-less records, "
+              f"which is what makes the page's `agentId`-only test correct")
+    # Deliberately `>= 1`, not `== len(STREAMS)`: this pass's own write side
+    # (M1) emits the terminal residual WITH an `agent` block, so a corpus frozen
+    # from a post-M1 run has no agent-less token lines and would drop `caught`
+    # below the stream count — a correct suite going red for a reason unrelated
+    # to the code under test. The corpus-independent teeth are the synthetic
+    # streams in the next test, which cannot drift.
+    check(caught >= 1,
+          f"the collapsing key really did lose tokens on {caught} of "
+          f"{len(STREAMS)} frozen streams — the assertions above are not vacuous")
+
+
+def test_the_rollup_neither_drops_nor_doubles_an_unattributable_line():
+    print("test_the_rollup_neither_drops_nor_doubles_an_unattributable_line")
+    # Two synthetic streams, built here so the teeth are deterministic and do
+    # not depend on what a future frozen corpus happens to contain.
+
+    # (a) The drop the fix removes: several token lines naming no agent at all,
+    # on one plan. They share the rollup key `plan|stage|None|None`, so a
+    # latest-wins fold keeps the last (30) and loses the rest.
+    agentless = [
+        lg.parse_line("t", index, line(ts=f"2026-07-25T00:00:0{index}.000Z",
+                                       plan="p", stage="tokens", state="info",
+                                       detail="delta", quiet=True,
+                                       tokens={"in": 10 * index, "out": 0,
+                                               "cached": 0, "cache_write": 0}))
+        for index in (1, 2, 3)]
+    records = lg.reduce_events(agentless, task="t").tokens
+    check(len(records) == 3 and not any(r.absolute for r in records),
+          f"three unattributable token lines stay three delta records "
+          f"({len(records)} records)")
+    check(_rollup_list_per_plan(records)["p"]["in"] == 60,
+          "…and the rollup sums them: 10 + 20 + 30 = 60")
+    check(_rollup_list_per_plan(records, collapse_agentless=True)["p"]["in"] == 30,
+          "…where the pre-fix collapsing key kept only the last one (30), which "
+          "is the shortfall this test has teeth against")
+
+    # (b) The double-count the fix PREVENTS, and the reason `absolute` is
+    # derived from `agent_id` rather than from the presence of a cumulative.
+    # These lines carry `agent.tokens` — a cumulative — but the id is neither
+    # 8- nor 17-hex, so `agent_ref_id()` cannot key it and `agentId` is null on
+    # the wire. Reading them as absolutes files them under one collapsing key;
+    # summing them (what the page does with an agent-less record) would add a
+    # monotonic sequence of cumulatives: 100 + 300 + 600 = 1000 for a truth of
+    # 600, an error that GROWS with run length. Neither may happen.
+    unkeyable = [
+        lg.parse_line("t", index,
+                      line(ts=f"2026-07-25T00:00:0{index}.000Z", plan="p",
+                           stage="tokens", state="info", detail="delta",
+                           quiet=True,
+                           agent={"id": "3f2b1c8e-4c5e-4f01-9abc-000000000001",
+                                  "label": "research/a",
+                                  "tokens": {"in": total, "out": 0, "cached": 0,
+                                             "cache_write": 0}},
+                           tokens={"in": delta, "out": 0, "cached": 0,
+                                   "cache_write": 0}))
+        for index, (delta, total) in
+        enumerate(((100, 100), (200, 300), (300, 600)), 1)]
+    check(all(event.agent_ref_id() is None and event.agent_tokens is not None
+              for event in unkeyable),
+          "an id that is neither 8- nor 17-hex carries a cumulative that no "
+          "reader can attribute (agent_ref_id ⇒ None)")
+    records = lg.reduce_events(unkeyable, task="t").tokens
+    check(not any(record.absolute for record in records),
+          "…so the fold refuses to call it absolute: `absolute` is "
+          "`cumulative is not None AND agent_id is not None`, not the first half")
+    check(_rollup_list_per_plan(records)["p"]["in"] == 600,
+          "…and the page lands on 600 — the record carries its own delta, so "
+          "summing is right; summing the cumulatives would have read 1000")
+    check(all(record.absolute == (record.agent_id is not None)
+              for record in records),
+          "…keeping `absolute == (agentId is not None)` true on a stream shape "
+          "no frozen corpus contains")
+
+
+def test_the_rollup_replica_still_matches_the_page():
+    print("test_the_rollup_replica_still_matches_the_page")
+    # `_rollup_list_per_plan` is only evidence about the page while it is the
+    # same rule as the page's. Source text, the house convention for app.js
+    # (tests/test_touch_frontend.py) — the JS is never executed by Python.
+    source = (REPO / "touch-visual" / "app.js").read_text(encoding="utf-8")
+    start = source.find("function rollupList(")
+    check(start != -1, "app.js still defines rollupList")
+    end = source.find("\n}", start)
+    # Without this arm an unfound terminator (-1) makes `body` the rest of the
+    # file, and every substring check below silently searches all of app.js.
+    check(end != -1, "…and the function body is delimited, so the checks below "
+                     "read rollupList rather than the rest of the file")
+    body = source[start:end]
+    check("entry.agentId === undefined || entry.agentId === null" in body,
+          "rollupList singles out the agent-less records by name")
+    divert, mapset = body.find("whole.push("), body.find("latest.set(")
+    # `divert < mapset` alone passes when `whole.push(` is ABSENT (-1 < n) —
+    # exactly when the divert this assertion protects has been deleted.
+    check(divert != -1 and mapset != -1 and divert < mapset,
+          "…and diverts them BEFORE the latest-wins map, so they cannot share "
+          "the collapsing `plan|stage|null|null` key")
+    check(" - " not in body,
+          "…while still never subtracting on a token field (GD-25)")
 
 
 # --- RUNSTATE-13 / GD-14: folders, controls, archive labels ---------------
@@ -1050,6 +1306,9 @@ def main():
         test_watcher_wins_is_only_for_same_state_duplicates,
         test_the_token_fold_is_lossless_and_bounded,
         test_a_token_line_that_cannot_fold_losslessly_is_kept_whole,
+        test_the_token_rollup_equals_the_streams_own_delta_sum,
+        test_the_rollup_neither_drops_nor_doubles_an_unattributable_line,
+        test_the_rollup_replica_still_matches_the_page,
         test_a_plan_only_folder_is_its_own_kind_with_no_controls,
         test_the_archive_label_is_derived_not_constant,
         test_a_broken_config_does_not_break_the_folder,

@@ -35,11 +35,15 @@ document, and a collapsed line is a lost event.
 
 A positional key is only safe on an append-only file, so this schema **depends
 on the never-delete rule** for `events.jsonl` (CLAUDE.md: "Never delete a
-finished task folder or its `events.jsonl`"; GD-16 keeps the streams tracked in
-git, MONGOSCHEMA-7). That dependency is recorded here because it is now load
-bearing: renumbering a stream would silently re-point every `_id` after the
-edit, and unlike `stream_meta` (GD-26's single legal scoped delete) this
-collection has no repair path.
+finished task folder or its `events.jsonl`", MONGOSCHEMA-7) — and on that rule
+**alone**. An earlier version of this paragraph also leaned on "GD-16 keeps the
+streams tracked in git"; that is false since the 2026-07-27 amendment ignored
+`.claude/local-orchestrators/` outright (`.gitignore:12`, guarded by
+`tests/test_bootstrap.py`), so no committed copy exists to recover a renumbered
+stream from. The dependency is recorded here because it is load bearing:
+renumbering a stream would silently re-point every `_id` after the edit, and
+unlike `stream_meta` (GD-26's single legal scoped delete) this collection has
+no repair path.
 
 Provenance never guesses (GD-28/CUSTOMSTATE-3)
 ----------------------------------------------
@@ -858,7 +862,35 @@ class PlanState:
 
 @dataclass(frozen=True)
 class TokenRecord:
-    """One folded token observation: cumulative, never a delta (GD-25)."""
+    """One folded token observation — cumulative when it can be (GD-25).
+
+    `absolute` says which of the two it is, because a reader cannot tell from
+    the numbers and the two fold differently:
+
+    * ``absolute=True`` — `tokens` is the agent's cumulative running total as
+      of `line_no`. Two such records for the same agent are two observations of
+      one quantity: fold them **latest-wins**; adding them double-counts.
+    * ``absolute=False`` — no cumulative could be attributed to an agent, so
+      `tokens` is that line's own **delta**, and nothing else *in*
+      :class:`Reduction`.tokens states it (the fold only sees token-stage
+      lines — see :func:`_fold_tokens`). Two such records are two separate
+      quantities: **sum** them. Latest-wins collapses them (they share
+      plan/stage/agent/label), which is exactly the 1.65 % shortfall
+      `tests/test_legacy.py` now pins.
+
+    `absolute` is `(cumulative is not None and agent_id is not None)`, so
+    `absolute == (agent_id is not None)` holds by construction and a reader that
+    can see only `agentId` — every browser client, because `server.py`'s token
+    payload is an explicit seven-field dict — still gets the right answer.
+
+    Recorded follow-up (M15/PRIOR-ART-TOUCH-5 style: note, do not implement
+    here): that payload should gain ``"absolute": t.absolute``. It is
+    schema-additive, old clients ignore an unknown key, and it would let
+    `rollupList` branch on the fact instead of on a proxy for it.
+
+    Additive and defaulted: an older caller that constructs a record without it
+    gets the cumulative reading, which is what every folded record is.
+    """
 
     task: str
     plan: str
@@ -870,6 +902,7 @@ class TokenRecord:
     tokens: dict
     window: object = None
     folded: int = 1
+    absolute: bool = True
 
 
 @dataclass
@@ -1307,6 +1340,36 @@ def _fold_tokens(task, token_events, window, alias, stats):
     summed (summing deltas is the double-count GD-25 forbids). Lines this cannot
     fold losslessly are kept whole: a non-quiet token line is the agent's final
     total, and a token line naming no agent has no cumulative copy to take.
+
+    Those two kept arms are not the same thing, and :class:`TokenRecord`'s
+    `absolute` flag says which is which: a kept line whose cumulative can be
+    **attributed to an agent** is absolute (fold it latest-wins), any other kept
+    line is its own delta and must be **summed** — nothing else *in*
+    :class:`Reduction`.tokens states it, because the fold only ever sees
+    token-stage lines. (The stream at large may state it elsewhere: an agent's
+    terminal `done` carries a higher cumulative than its last delta line, which
+    is exactly the 1.9 % PRIOR-ART-TOUCH-1 measures. Corollary: if this fold
+    ever starts reading cumulatives off *any* event, the summation of the
+    agent-less records must be dropped in the same change, or that 1.9 % is
+    counted twice.)
+
+    Losing the distinction is what under-reported this repo's own corpus by
+    1.65 % (PRIOR-ART-TOUCH-2): every agent-less line of a plan shares the
+    rollup key `plan|stage|None|None`, so latest-wins kept the last one and
+    dropped the rest. Deriving `absolute` from `agent_id` rather than from the
+    presence of a cumulative keeps `absolute == (agent_id is not None)` true by
+    construction, which is what lets `touch-visual/app.js::rollupList` read the
+    distinction off `agentId` alone (the wire carries no `absolute` key);
+    `tests/test_legacy.py` pins it in both directions.
+
+    One residual the flag cannot rescue: a kept line that names an agent but
+    carries no cumulative is `absolute=False`, yet the page — reading `agentId`
+    — will fold it latest-wins. Recorded, not fixed: it is unreachable today,
+    since `status.sh` writes neither `agent` nor `tokens`, and every
+    `decision_watcher.py` token emit carries `agent.tokens`. It becomes real
+    only if a writer starts emitting `agent` without `agent.tokens` on a
+    token-stage line, and the fix then is the one noted on
+    :class:`TokenRecord` — put `absolute` on the wire.
     """
     if window is None or window <= 0:
         window = DEFAULT_TOKEN_WINDOW
@@ -1317,11 +1380,17 @@ def _fold_tokens(task, token_events, window, alias, stats):
         cumulative = event.agent_tokens
         agent_id = event.agent_ref_id()
         agent_id = alias.get(agent_id, agent_id)
-        if not event.quiet or cumulative is None or agent_id is None:
+        # A cumulative is only usable as one if it can be attributed: two
+        # cumulatives of the SAME agent are one quantity (latest-wins), but two
+        # cumulatives no reader can tell apart have no bucket to be latest in.
+        # So `absolute` is structural, never observed — see the docstring.
+        absolute = cumulative is not None and agent_id is not None
+        if not event.quiet or not absolute:
             kept.append(TokenRecord(
                 task=task, plan=event.plan, stage=event.stage, agent_id=agent_id,
                 label=event.agent_label, ts=event.ts, line_no=event.line_no,
-                tokens=cumulative or event.tokens or _tokens(None)))
+                tokens=(cumulative if absolute else (event.tokens or _tokens(None))),
+                absolute=absolute))
             continue
         slot = None
         if event.ts is not None:

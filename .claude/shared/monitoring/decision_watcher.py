@@ -202,6 +202,37 @@ MAX_FINALGATE_ATTEMPTS = CAP_DEFAULTS["max_finalgate_attempts"]
 # what fixes R-58 — close_state_for() is; `strategy` only decides whether the
 # retired heuristic runs at all.
 STRATEGY = ""
+# GD-D: cadence CEILING for the live token tick, in seconds. The watcher still
+# POLLS every ~1 s and still emits only when it has a non-zero delta to report —
+# this knob can suppress an emit, never manufacture one. That asymmetry is
+# load-bearing: the dashboard derives silence from the ABSENCE of events, so a
+# heartbeat below the page's 4 min stall threshold would erase every stall
+# segment the strip exists to expose (WRITE-SIDE-2, measured: all 17 of them).
+#
+# 15 s is the measured knee: at 15 s a real 12.3k-event run drops to 4.9k with
+# bit-identical timeplan segmentation, while 30 s starts mis-drawing a working
+# gap as a stall. Never raise the default past 30 s, and keep it far inside the
+# page's TP_IDLE_MS (120 s). ``0`` = emit on every poll tick, i.e. exactly the
+# pre-cadence behaviour, kept as the escape hatch.
+#
+# Precedence is env > orch-config.json > default, the same order resolve_wf_dir
+# uses: ORCH_TOKEN_TICK_SECS PINS the value (an operator debugging a live run
+# must not be overridden by a config the orchestrator script republishes), and
+# without it ``token_tick_secs`` is re-read live by refresh_caps().
+#
+# Both spellings are documented for operators in monitoring.md by M14/sp-docs
+# (this sub-plan owns no doc file): the orch-config row, the ceiling semantics
+# and the "values below ~10 s barely help, the flush trigger is p50 5 s" range
+# guidance live there, not here.
+TOKEN_TICK_DEFAULT = 15
+# max(0, ...) on BOTH paths (env here, config in apply_caps): a negative value
+# is read as 0 = always due. "Emit less often than never" has no meaning, and
+# the reload log line / apply_caps() return must state the value that is
+# actually in force, not the typo that produced it.
+_TOKEN_TICK_ENV: int | None = (
+    max(0, _int_env("ORCH_TOKEN_TICK_SECS", TOKEN_TICK_DEFAULT))
+    if os.environ.get("ORCH_TOKEN_TICK_SECS") else None)
+TOKEN_TICK_SECS = TOKEN_TICK_DEFAULT if _TOKEN_TICK_ENV is None else _TOKEN_TICK_ENV
 
 
 def apply_caps(cfg: dict) -> tuple:
@@ -212,15 +243,20 @@ def apply_caps(cfg: dict) -> tuple:
     the whole point of refresh_caps() below.
     """
     global MAX_PLAN_ATTEMPTS, MAX_GATE_ATTEMPTS, MAX_E2E_ATTEMPTS
-    global MAX_FINALGATE_ATTEMPTS, STRATEGY
+    global MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS
     MAX_PLAN_ATTEMPTS = _int_cfg(cfg, "max_plan_attempts", CAP_DEFAULTS["max_plan_attempts"])
     MAX_GATE_ATTEMPTS = _int_cfg(cfg, "max_gate_attempts", CAP_DEFAULTS["max_gate_attempts"])
     MAX_E2E_ATTEMPTS = _int_cfg(cfg, "max_e2e_attempts", CAP_DEFAULTS["max_e2e_attempts"])
     MAX_FINALGATE_ATTEMPTS = _int_cfg(cfg, "max_finalgate_attempts",
                                       CAP_DEFAULTS["max_finalgate_attempts"])
     STRATEGY = str(cfg.get("strategy") or "").strip().lower()
+    # A negative value is read as 0 (always due) on both paths — see the
+    # _TOKEN_TICK_ENV note above; silently freezing every counter would be the
+    # worst possible reading of a typo.
+    TOKEN_TICK_SECS = (_TOKEN_TICK_ENV if _TOKEN_TICK_ENV is not None
+                       else max(0, _int_cfg(cfg, "token_tick_secs", TOKEN_TICK_DEFAULT)))
     return (MAX_PLAN_ATTEMPTS, MAX_GATE_ATTEMPTS, MAX_E2E_ATTEMPTS,
-            MAX_FINALGATE_ATTEMPTS, STRATEGY)
+            MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS)
 
 
 def _config_mtime() -> int | None:
@@ -257,7 +293,7 @@ def refresh_caps() -> tuple | None:
         return None
     _CFG_MTIME = mtime
     before = (MAX_PLAN_ATTEMPTS, MAX_GATE_ATTEMPTS, MAX_E2E_ATTEMPTS,
-              MAX_FINALGATE_ATTEMPTS, STRATEGY)
+              MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS)
     seen = len(_CFG_WARNINGS)
     after = apply_caps(read_config())
     # A bad value in a RELOAD cannot use the import-time deferred queue (nothing
@@ -446,6 +482,133 @@ def emit(stage: str, state: str, detail: str, ts: str | None = None,
               file=sys.stderr, flush=True)
 
 
+# WRITE-SIDE-10: per-transcript incremental parse cache, keyed by path:
+#   {"ident": "<dev>:<ino>", "offset": int, "lines": int,
+#    "usage": {message-key: (in, cached, write, out)}}
+# ``agent_tokens`` used to re-read and json.loads EVERY line of EVERY transcript
+# copy of EVERY running agent on EVERY ~1 s poll tick (4.5-11.0 ms per call on a
+# real 1 MB transcript, growing with the transcript, so quadratic in agent
+# length). Only the bytes past ``offset`` are parsed now; the message-key union
+# that makes a /clear-split transcript safe survives incremental reads unchanged,
+# because a re-flushed message overwrites its own key whenever it is re-appended.
+# What is retained is four ints per billed message, not the raw usage rows — the
+# cost of not re-reading the same bytes every second, kept as small as the
+# union semantics allow.
+_USAGE_CACHE: dict[str, dict] = {}
+
+
+def drop_usage_cache(agent_id: str) -> None:
+    """Forget one agent's parse caches — called when it is finished for good.
+
+    The cache is per-PATH and lives as long as the daemon, so without this the
+    167-agent measured run retains order-10^5 dead entries (four ints plus a
+    message key each) for agents that have already resulted or been stale-closed
+    and will never be read again. Every call site of flush_agent_tokens() is by
+    construction such a terminal point.
+
+    Dropping is always SAFE, never merely cheap: a re-read simply re-parses the
+    file from byte 0 and rebuilds the same message-keyed union, because the
+    cache is a memo of the file's own bytes and holds no state the file lacks.
+
+    Eviction reads the CACHE's own keys instead of re-running agent_paths():
+    globbing the whole projects tree a second time just to throw a dict away
+    would double the glob on every result, every stale close and every swept
+    agent — in the one pass whose first fix is removing ~93% of that glob. It is
+    also strictly more complete: a transcript copy pruned or rotated away
+    between the last read and this call is no longer returned by the glob, so a
+    glob-driven eviction would leave that entry alive for the daemon's whole
+    life with no other eviction path at all.
+    """
+    suffix = f"agent-{agent_id}.jsonl"
+    for path in [p for p in _USAGE_CACHE if os.path.basename(p) == suffix]:
+        _USAGE_CACHE.pop(path, None)
+
+
+def _usage_totals(u: dict) -> tuple[int, int, int, int]:
+    """One usage row as ``(input, cache-read, cache-write, output)``.
+
+    ``input`` is the TOTAL input volume (fresh + cache writes + cache reads);
+    the cache components are also reported separately because an agent loop
+    re-sends its whole conversation prefix every turn.
+    """
+    cached = u.get("cache_read_input_tokens") or 0
+    write = u.get("cache_creation_input_tokens") or 0
+    return ((u.get("input_tokens") or 0) + write + cached, cached, write,
+            u.get("output_tokens") or 0)
+
+
+def _transcript_usage(path: str) -> dict[str, tuple[int, int, int, int]]:
+    """Usage rows of ONE transcript copy, parsed incrementally (WRITE-SIDE-10).
+
+    Re-parses from byte 0 when the file shrinks past the stored OFFSET or its
+    inode changes — the stored offset is meaningless against different bytes,
+    exactly the rule (and the same comparison) the journal tailer applies to its
+    own checkpoint. A torn trailing line (the harness is appending while we
+    read) is never consumed: the offset advances only past the last ``\\n``, so
+    the partial line is re-read when it completes.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    ident = f"{st.st_dev}:{st.st_ino}"
+    cached = _USAGE_CACHE.get(path)
+    # Compare against the OFFSET, not a separately tracked size: the file can
+    # grow between the stat() and the read(), so a stored size would sit BELOW
+    # the offset we actually consumed, and a later genuine truncation to a point
+    # between the two would slip past the guard, seek beyond EOF and freeze this
+    # transcript's totals until it grew back. The offset is the only number that
+    # says how many of these bytes we have already believed.
+    if cached is None or cached["ident"] != ident or st.st_size < cached["offset"]:
+        cached = {"ident": ident, "offset": 0, "lines": 0, "usage": {}}
+        _USAGE_CACHE[path] = cached
+    if st.st_size == cached["offset"]:  # nothing new since the last read
+        return cached["usage"]
+    try:
+        with open(path, "rb") as f:
+            f.seek(cached["offset"])
+            chunk = f.read()
+    except OSError:
+        return cached["usage"]
+    cut = chunk.rfind(b"\n")
+    if cut == -1:  # no complete line yet; leave the offset where it is
+        return cached["usage"]
+    # split(b"\n") on the BYTES, decoding per line — never str.splitlines(),
+    # which also splits on \x0b \x0c \x1c-\x1e \x85 and U+2028/U+2029. Those last
+    # two are legal UNESCAPED inside a JSON string (JSON.stringify does not
+    # escape them), so an assistant message merely containing a line separator
+    # would be torn into two fragments, both failing json.loads, both skipped —
+    # and because the offset has already advanced past them the billed row would
+    # be dropped from this agent's total FOREVER. Slicing at ``cut + 1`` means
+    # the last element is always the empty tail after the final newline.
+    for raw in chunk[:cut + 1].split(b"\n"):
+        if not raw:  # the tail after the final \n (and any blank line)
+            continue
+        lineno = cached["lines"]
+        cached["lines"] += 1
+        try:
+            d = json.loads(raw.decode(errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") != "assistant":
+            continue
+        m = d.get("message") or {}
+        u = m.get("usage")
+        if u:
+            # Fall back to a stable per-row key (path+line) when the entry
+            # carries neither message.id nor uuid, so multiple id-less usage
+            # rows are summed rather than collapsing to a single "" key
+            # (WATCHER-8). The line counter is per-path, monotonic across
+            # incremental reads and counts only NON-EMPTY lines, so a row keeps
+            # its key as the file grows however the reads happen to be chunked.
+            key = m.get("id") or d.get("uuid")
+            if not key:
+                key = f"\0noid\0{path}\0{lineno}"
+            cached["usage"][key] = _usage_totals(u)
+    cached["offset"] += cut + 1
+    return cached["usage"]
+
+
 def agent_tokens(agent_id: str) -> tuple[int, int, int, int]:
     """Sum (input, cache-read, cache-write, output) tokens across an agent's API calls, deduped by message id.
 
@@ -456,40 +619,79 @@ def agent_tokens(agent_id: str) -> tuple[int, int, int, int]:
     the r:/w: breakdown to keep the big number interpretable.
     """
     # A /clear- or /compact-split transcript yields several copies; the
-    # message-id key unions them safely (overlapping messages collapse).
-    usage_by_msg: dict[str, dict] = {}
+    # message-id key unions them safely (overlapping messages collapse), and
+    # agent_paths() returns them oldest-first so a newer copy's row wins.
+    usage_by_msg: dict[str, tuple[int, int, int, int]] = {}
     for path in agent_paths(agent_id):
-        try:
-            with open(path) as f:
-                for lineno, raw in enumerate(f):
-                    try:
-                        d = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if d.get("type") != "assistant":
-                        continue
-                    m = d.get("message") or {}
-                    u = m.get("usage")
-                    if u:
-                        # Fall back to a stable per-row key (path+line) when the
-                        # entry carries neither message.id nor uuid, so multiple
-                        # id-less usage rows are summed rather than collapsing to
-                        # a single "" key (WATCHER-8).
-                        key = m.get("id") or d.get("uuid")
-                        if not key:
-                            key = f"\0noid\0{path}\0{lineno}"
-                        usage_by_msg[key] = u
-        except OSError:
-            continue
+        usage_by_msg.update(_transcript_usage(path))
     tin = tcached = twrite = tout = 0
-    for u in usage_by_msg.values():
-        cached = u.get("cache_read_input_tokens") or 0
-        write = u.get("cache_creation_input_tokens") or 0
-        tin += (u.get("input_tokens") or 0) + write + cached
-        tcached += cached
-        twrite += write
-        tout += u.get("output_tokens") or 0
+    for u_in, u_cached, u_write, u_out in usage_by_msg.values():
+        tin += u_in
+        tcached += u_cached
+        twrite += u_write
+        tout += u_out
     return tin, tcached, twrite, tout
+
+
+def token_deltas(prev: dict, tin: int, tcached: int, twrite: int,
+                 tout: int) -> tuple[dict, dict]:
+    """``(wire deltas, new baseline)`` under the D7 monotonic rule.
+
+    Deltas are clamped >= 0 and a stored baseline is never lowered, so a
+    transiently unreadable or pruned transcript copy can't regress a counter.
+    The baseline is what makes the cadence ceiling structurally lossless: a
+    skipped emit leaves it where it was, so the NEXT emit — later tick, result
+    rollup, stale close or exit sweep — carries the whole accumulated delta.
+    No pending-delta accumulator exists, and none may be added (a simulated one
+    lost 117k tokens on one plan of the measured corpus).
+    """
+    deltas = {"in": max(0, tin - prev.get("in", 0)),
+              "out": max(0, tout - prev.get("out", 0)),
+              "cached": max(0, tcached - prev.get("cached", 0)),
+              "cache_write": max(0, twrite - prev.get("cache_write", 0))}
+    base = {"in": max(prev.get("in", 0), tin),
+            "out": max(prev.get("out", 0), tout),
+            "cached": max(prev.get("cached", 0), tcached),
+            "cache_write": max(prev.get("cache_write", 0), twrite)}
+    return deltas, base
+
+
+def token_tick_due(agent_id: str, now: float, tok_tick_at: dict,
+                   secs: int | None = None) -> bool:
+    """Is this agent's LIVE token tick due? (GD-D, the cadence ceiling)
+
+    Consulted only by the poll-tick path — every force-flush path
+    (flush_agent_tokens) ignores it by construction. What the window gates is
+    the transcript READ, not just the emit: an ungated read is what makes the
+    watcher O(transcript bytes x running agents) PER SECOND, and gating it on
+    the same window is where WRITE-SIDE-10's ~93% parsing cut comes from.
+
+    Exactly ONE exemption, the one M1 specifies: an absent window key is DUE —
+    an agent seen for the first time, or a checkpoint written before this knob
+    existed. That is what makes a freshly spawned row light up within a poll
+    tick instead of after a whole ceiling, and it is bounded: the read that
+    serves it stamps the window, so it can happen once per agent. A broader
+    "has never published a counter" exemption was considered and rejected — an
+    agent running with no billable activity would then be re-read every second
+    until ABANDON_QUIET_SECS (1200 s by default), ~1200 globs where the cadence
+    budgets ~80, which is precisely the cost WRITE-SIDE-10 exists to remove.
+
+    A clock that stepped backwards is due rather than frozen for the difference.
+
+    ``secs`` defaults to the live TOKEN_TICK_SECS global (which refresh_caps()
+    moves mid-run, so the poll loop must keep reading it at CALL time) and is
+    otherwise the ceiling to apply — the whole rule then takes its inputs as
+    arguments, which is what lets a caller (or a test arm) ask the question
+    without mutating module state other code is reading.
+    """
+    if secs is None:
+        secs = TOKEN_TICK_SECS
+    if secs <= 0:
+        return True
+    last = tok_tick_at.get(agent_id)
+    if last is None or now < last:
+        return True
+    return (now - last) >= secs
 
 
 def fmt_tokens(n: int) -> str:
@@ -767,6 +969,90 @@ def agent_block(agent_id: str, info: dict | None, state: str | None = None,
     else:
         block["unconventional"] = True
     return block
+
+
+def flush_agent_tokens(state: dict, agent_id: str, info: dict | None = None,
+                       ts: str | None = None, row_state: str | None = None,
+                       totals: tuple[int, int, int, int] | None = None,
+                       force: bool = False) -> tuple[int, int, int, int]:
+    """UNTHROTTLED token flush for one agent; returns its cumulative totals.
+
+    The one force-flush path (GD-D / WRITE-SIDE-3+4+5), shared by every site
+    where an agent is about to stop being ticked: the result rollup, the
+    unclassified agent's result (it is ticked too — GD-7 gives it a node), the
+    two stale closes, and the exit sweep. It reads the transcript once (or takes a
+    reading the caller already made), emits the ``stage:"tokens"`` delta against
+    ``tok_emitted``, advances that baseline, and states the agent's CUMULATIVE
+    total in the line's ``agent`` block.
+
+    Both halves matter. Without the delta line the agent's last accrual reaches
+    no counter at all — deltas are wire-only, so nothing self-heals on replay.
+    Without the cumulative the line cannot be folded: a replay that drops quiet
+    ticks (every snapshot/prelude design) must reconstruct totals from
+    ``agent.tokens`` last-wins, never by summing surviving deltas — on the
+    measured corpus the surviving deltas are 1.9% of the truth. 15 of 167 agents
+    and 9.14% of that run's input tokens lived only inside quiet ticks before
+    this existed.
+
+    ``force`` emits even a zero delta (the result rollup's closing statement,
+    which must land whether or not anything accrued since the last tick); every
+    other caller stays silent when there is nothing to report. All of it is
+    schema-ADDITIVE — ``agent`` is already documented as optional on any event
+    and readers ignore keys they don't know.
+    """
+    if totals is None:
+        totals = agent_tokens(agent_id)
+    # Every caller is a point where this agent stops being ticked, so BOTH of
+    # its per-agent maps are dead weight from here on: the per-transcript parse
+    # caches (the reading above was their last reader) and the cadence window,
+    # whose only consumer is token_tick_due() and which is only ever asked about
+    # agents in `running`. Keeping the window would double the per-agent
+    # footprint of the checkpoint for the life of the run, with nothing ever
+    # reading it — tok_emitted persists because it is the D7 baseline; this map
+    # has no such reason. Both are dropped BEFORE the zero-delta return, because
+    # "nothing accrued" is just as terminal as "something did". If a truncation
+    # rebuild ever puts the agent back in `running`, the absent window reads as
+    # DUE and costs one read — the safe direction, and the same first-tick rule
+    # every new agent gets.
+    drop_usage_cache(agent_id)
+    state.setdefault("tok_tick_at", {}).pop(agent_id, None)
+    tin, tcached, twrite, tout = totals
+    prev = state["tok_emitted"].get(agent_id, {})
+    deltas, base = token_deltas(prev, tin, tcached, twrite, tout)
+    if not force and not any(deltas.values()):
+        return totals
+    if info is None:
+        info = state["agents"].get(agent_id)
+    # agent_label() (stage-qualified, R-13) rather than the bare `role #attempt`
+    # this line used before the helper existed: six parallel researchers on one
+    # plan differ ONLY by stage, and the live tick line next to it has always
+    # been labelled this way. `detail` is free text, single-line and inside the
+    # 1 KB writer cap, so the change is display-only.
+    emit("tokens", "info",
+         f"{agent_label(info, agent_id)} used "
+         f"{fmt_in(base['in'], base['cached'], base['cache_write'])} · "
+         f"out {fmt_tokens(base['out'])} total",
+         ts=ts, plan=info["plan"] if info else "orchestrator",
+         extra={"tokens": deltas,
+                "agent": agent_block(agent_id, info, row_state, tokens=dict(base))})
+    # Never clear tok_emitted itself — the truncation branch in main()
+    # documents why. (The cadence WINDOW was dropped above: this agent has
+    # stopped being ticked, so there is nothing left to throttle.)
+    state["tok_emitted"][agent_id] = base
+    return totals
+
+
+def sweep_running_tokens(state: dict) -> None:
+    """Final unthrottled flush for every agent still in flight, before stopping.
+
+    The residual hole in a cadence CEILING is an agent that never emits again:
+    the watcher stops (drain or either self-exit) while the agent is mid-flight,
+    so everything it accrued since its last tick — its ENTIRE usage if it never
+    ticked — would live nowhere in the append-only record. Cheap: at most one
+    transcript read per running agent, once, on the way out.
+    """
+    for agent_id in list(state.get("running") or []):
+        flush_agent_tokens(state, agent_id, state["agents"].get(agent_id))
 
 
 def close_state_for(plan: str, decisive: dict, last_result_ok: dict) -> str:
@@ -1275,6 +1561,10 @@ def main() -> None:
     state.setdefault("agents", {})
     state.setdefault("running", [])
     state.setdefault("tok_emitted", {})
+    # GD-D: per-agent wall-clock of the last token emit, checkpointed beside the
+    # baseline so a restart does not re-open every agent's cadence window.
+    # setdefault, so a pre-cadence .watcher-state.json loads unchanged.
+    state.setdefault("tok_tick_at", {})
     state.setdefault("plans", {})
     state.setdefault("decisive", {})
     # GD-10: "was the plan's LAST result a failure" — the close predicate's
@@ -1309,21 +1599,24 @@ def main() -> None:
     # carry no "cache_write", so replayed history under-reports w:. Re-read
     # every already-tracked agent and emit a quiet delta for whatever the
     # emitted totals are missing (normally just the cache-write component).
+    backfill_at = time.time()
     for aid, prev in list(state["tok_emitted"].items()):
         tin, tcached, twrite, tout = agent_tokens(aid)
+        # For an agent still in flight this backfill IS a read, so it opens the
+        # cadence window like any other (GD-D: the window restarts on the READ).
+        # Without this every in-flight agent would be re-parsed a second time on
+        # the very next poll tick, immediately after the pass that just parsed
+        # it. Agents that are NOT in `running` are never ticked, so stamping a
+        # window for them would only be state nobody reads — see the sweep below.
+        if aid in state["running"]:
+            state["tok_tick_at"][aid] = backfill_at
         # Monotonic counters (D7): clamp deltas >= 0; never lower the baseline.
-        deltas = {"in": max(0, tin - prev.get("in", 0)),
-                  "out": max(0, tout - prev.get("out", 0)),
-                  "cached": max(0, tcached - prev.get("cached", 0)),
-                  "cache_write": max(0, twrite - prev.get("cache_write", 0))}
+        deltas, new_base = token_deltas(prev, tin, tcached, twrite, tout)
         if not any(deltas.values()):
             continue
         info = state["agents"].get(aid)
         plan = info["plan"] if info else "orchestrator"
         label = agent_label(info, aid)
-        new_base = {"in": max(prev.get("in", 0), tin), "out": max(prev.get("out", 0), tout),
-                    "cached": max(prev.get("cached", 0), tcached),
-                    "cache_write": max(prev.get("cache_write", 0), twrite)}
         emit("tokens", "info", f"{label} token backfill", plan=plan,
              extra={"tokens": deltas, "quiet": True,
                     # no "state" key: leave the row's queued/running/done dot as-is
@@ -1332,6 +1625,22 @@ def main() -> None:
                                                  "cached": new_base["cached"],
                                                  "cache_write": new_base["cache_write"]})})
         state["tok_emitted"][aid] = new_base
+    # The backfill is a one-shot TERMINAL read for every agent that is NOT in
+    # flight, and on a RESTART (the documented resume workflow) that is nearly
+    # all of them: `tok_emitted` holds every agent the run has ever tracked —
+    # 167 on the measured run — while `running` holds the handful still alive.
+    # Their parse memos are exactly the order-1e5 dead entries drop_usage_cache()
+    # exists to prevent, and their cadence windows (inherited from the
+    # checkpoint or stamped by an earlier session) have no consumer either,
+    # since token_tick_due() is only ever asked about agents in `running`.
+    # Sweeping both here is what keeps a resumed watcher's footprint
+    # proportional to CONCURRENCY instead of to the length of the run.
+    live_transcripts = {f"agent-{aid}.jsonl" for aid in state["running"]}
+    for path in [p for p in _USAGE_CACHE
+                 if os.path.basename(p) not in live_transcripts]:
+        _USAGE_CACHE.pop(path, None)
+    for aid in [a for a in state["tok_tick_at"] if a not in state["running"]]:
+        del state["tok_tick_at"][aid]
     save_state(state)
     # M-2: from here on a SIGTERM (the templates' closeRun epilogue) arms a drain
     # instead of killing the process mid-poll. Installed after the startup
@@ -1368,6 +1677,9 @@ def main() -> None:
         # `closeRun`'s immediate SIGTERM. A second signal exits now.
         if stop_requested():
             if len(_STOP_SIGNALS) > 1:
+                # No token sweep here on purpose: a second signal means the
+                # operator wants out NOW, and the drain below is where the
+                # rescue work belongs (M-2's own contract).
                 emit("watcher", "info",
                      "watcher exiting: second stop signal, drain cut short")
                 save_state(state)
@@ -1375,6 +1687,9 @@ def main() -> None:
             if drain_until is None:
                 drain_until = time.time() + DRAIN_SECS
             elif time.time() >= drain_until:
+                # GD-D force-flush: state every in-flight agent's total before
+                # the process that alone can report it goes away.
+                sweep_running_tokens(state)
                 emit("watcher", "info",
                      f"watcher exiting: stop signal, journal drained {DRAIN_SECS}s")
                 save_state(state)
@@ -1456,13 +1771,31 @@ def main() -> None:
                                     or info["attempt"] <= oinfo["attempt"]):
                                 continue
                             state["running"].remove(other)
+                            # WRITE-SIDE-4: an agent that leaves `running`
+                            # without a result is never ticked again, so this is
+                            # its last chance to state a total. One transcript
+                            # read serves both the row's cumulative and the
+                            # flushing delta line below.
+                            o_totals = agent_tokens(other)
+                            # D7: state the CLAMPED baseline, never the raw
+                            # reading. agent_paths() unions transcript COPIES,
+                            # so a pruned or rotated copy can shrink the union —
+                            # and if it has, the flush below is silent (zero
+                            # delta), leaving this row as the last word on the
+                            # agent's cumulative. A raw reading there would be
+                            # the one place a counter goes backwards and GD-C's
+                            # "delta sum == last cumulative" equality breaks.
+                            _, o_base = token_deltas(
+                                state["tok_emitted"].get(other, {}), *o_totals)
                             emit(oinfo["stage"], "stale",
                                  f"{oinfo['role']} #{oinfo['attempt']} abandoned — no result, "
                                  f"{info['role']} attempt {info['attempt']} respawned",
                                  ts=ts0, plan=oinfo["plan"],
                                  extra={"agent": agent_block(
-                                     other, oinfo, "stale",
+                                     other, oinfo, "stale", tokens=dict(o_base),
                                      runtime=elapsed_str(first_ts(other), last_ts(other)))})
+                            flush_agent_tokens(state, other, oinfo, ts=ts0,
+                                               totals=o_totals)
                         emit(info["plan"], "running",
                              f"spawn {info['plan']} {info['role']} attempt {info['attempt']}",
                              ts=ts0)
@@ -1544,7 +1877,8 @@ def main() -> None:
                         # LAST result was a failure, so a verdict-less plan can
                         # close "done — no verdict" instead of a fabricated failed.
                         state["last_result_ok"][info["plan"]] = sst != "failed"
-                        a_tin, a_tcached, a_twrite, a_tout = agent_tokens(agent_id)
+                        a_totals = agent_tokens(agent_id)
+                        a_tin, a_tcached, a_twrite, a_tout = a_totals
                         emit(info["stage"], sst,
                              f"{info['role']} #{info['attempt']}: {sdetail}",
                              ts=tsN, plan=info["plan"],
@@ -1569,26 +1903,36 @@ def main() -> None:
                                 emit("plan", "running",
                                      f"{info['role']} attempt {info['attempt']} rejected -> reopened",
                                      ts=tsN, plan=info["plan"])
-                        tin, tcached, twrite, tout = agent_tokens(agent_id)
-                        prev = state["tok_emitted"].get(agent_id,
-                                                        {"in": 0, "out": 0, "cached": 0, "cache_write": 0})
-                        # Monotonic token counters (D7): clamp emitted deltas >= 0
-                        # and never lower the stored baseline, so a transiently
-                        # unreadable/pruned transcript copy can't regress the total.
-                        emit("tokens", "info",
-                             f"{info['role']} #{info['attempt']} used {fmt_in(tin, tcached, twrite)} · out {fmt_tokens(tout)} total",
-                             ts=tsN, plan=info["plan"],
-                             extra={"tokens": {"in": max(0, tin - prev.get("in", 0)),
-                                               "out": max(0, tout - prev.get("out", 0)),
-                                               "cached": max(0, tcached - prev.get("cached", 0)),
-                                               "cache_write": max(0, twrite - prev.get("cache_write", 0))}})
-                        state["tok_emitted"][agent_id] = {
-                            "in": max(prev.get("in", 0), tin),
-                            "out": max(prev.get("out", 0), tout),
-                            "cached": max(prev.get("cached", 0), tcached),
-                            "cache_write": max(prev.get("cache_write", 0), twrite)}
+                        # The per-agent rollup: unconditional (force), so the
+                        # agent's closing statement lands even when nothing
+                        # accrued since its last tick, and now carrying the
+                        # `agent` block those 144 lines never had — without it
+                        # no folded replay can attribute the run's largest
+                        # single token line to an agent (WRITE-SIDE-5). The
+                        # reading taken for the stage event above is reused, so
+                        # a result costs ONE transcript parse, not two.
+                        flush_agent_tokens(state, agent_id, info, ts=tsN,
+                                           row_state=sst, totals=a_totals,
+                                           force=True)
                     else:
                         tsN = last_ts(agent_id)
+                        # GD-D force-flush, the fourth site: the `started`
+                        # branch above puts EVERY agent in `running` before it
+                        # knows whether the prompt carries a marker (GD-7:
+                        # harness facts create nodes), so an unclassified agent
+                        # is ticked like any other — under plan="orchestrator" —
+                        # and its result is just as terminal as the classified
+                        # rollup below. Without a flush here the cadence is lossy
+                        # exactly here, and can lose an agent's WHOLE usage: its
+                        # first tick a second after the spawn legitimately reads
+                        # a transcript with no usage rows yet, which spends the
+                        # first-tick exemption and stamps the window, so an agent
+                        # that finishes inside one ceiling reports nothing at all
+                        # — where the pre-cadence per-second tick reported
+                        # essentially everything. The GD-C equality cannot catch
+                        # it either: both sides under-report by the same amount.
+                        flush_agent_tokens(state, agent_id, None, ts=tsN,
+                                           row_state="done")
                         emit("watcher", "info",
                              f"result from unclassified agent {agent_id}", ts=tsN,
                              extra={"agent": agent_block(
@@ -1611,7 +1955,7 @@ def main() -> None:
             emit("watcher", "info",
                  f"config reloaded: plan cap {MAX_PLAN_ATTEMPTS}, gate cap "
                  f"{MAX_GATE_ATTEMPTS}, finalgate cap {MAX_FINALGATE_ATTEMPTS}, "
-                 f"strategy {STRATEGY or 'unset'}")
+                 f"strategy {STRATEGY or 'unset'}, token tick {TOKEN_TICK_SECS}s")
         # ABANDONED agents: a session killed mid-agent leaves journal `started`
         # entries with no `result`, so `running` never empties and the run card
         # ticks forever. After the long window, close them `stale` (GD-10: a
@@ -1621,14 +1965,24 @@ def main() -> None:
         for aid in gone:
             ainfo = state["agents"].get(aid)
             state["running"].remove(aid)
+            # WRITE-SIDE-4: the stale close used to state neither a cumulative
+            # nor a flush, so a stale-closed agent's usage survived only inside
+            # quiet ticks — 15 of 167 agents and 9.14% of the measured run's
+            # input tokens, invisible to any replay that folds those away.
+            a_totals = agent_tokens(aid)
+            # D7 again (see the respawn stale close above): the clamped
+            # baseline, so this row can never be the event that lowers an
+            # agent's cumulative.
+            _, a_base = token_deltas(state["tok_emitted"].get(aid, {}), *a_totals)
             emit(ainfo["stage"] if ainfo else "watcher", "stale",
                  (f"{ainfo['role']} #{ainfo['attempt']}" if ainfo else f"agent {aid}")
                  + " abandoned — no result, no transcript activity for "
                    f"{ABANDON_QUIET_SECS}s",
                  plan=ainfo["plan"] if ainfo else "orchestrator",
                  extra={"agent": agent_block(
-                     aid, ainfo, "stale",
+                     aid, ainfo, "stale", tokens=dict(a_base),
                      runtime=elapsed_str(first_ts(aid), last_ts(aid)))})
+            flush_agent_tokens(state, aid, ainfo, totals=a_totals)
         if gone:
             save_state(state)
         # Watcher-detected run completion: the driver conversation is supposed
@@ -1714,12 +2068,14 @@ def main() -> None:
         # of a merely-idle run (m1). It also carries the ORCH_NO_SELF_EXIT opt-out.
         if exit_precheck(state, quiet_for):
             if should_exit(quiet_for, exit_authorized(EVENTS, events_baseline)):
+                sweep_running_tokens(state)  # GD-D force-flush before stopping
                 emit("watcher", "info",
                      f"watcher exiting: run closed by the driver, journal quiet "
                      f"{EXIT_QUIET_SECS}s+")
                 save_state(state)
                 return
             if abandoned_exit(state, quiet_for):
+                sweep_running_tokens(state)  # GD-D force-flush before stopping
                 emit("watcher", "info",
                      f"watcher exiting: run abandoned — no driver close, journal "
                      f"quiet {ABANDON_QUIET_SECS}s+")
@@ -1729,20 +2085,36 @@ def main() -> None:
         if state["running"]:  # every poll tick (~1s): live token deltas
             # Live token deltas for in-flight agents (quiet: counters only, no log line).
             dirty = False
+            now = time.time()
             for aid in list(state["running"]):
+                # GD-D: the cadence ceiling gates the transcript READ as well as
+                # the emit — at the 15 s default that removes ~93% of the
+                # per-second parsing (agent_paths' glob included), which is the
+                # whole of WRITE-SIDE-10's first fix. The journal tail above
+                # keeps polling at 1 s: spawn/result latency is user-visible
+                # contract and is not what this knob tunes.
+                if not token_tick_due(aid, now, state["tok_tick_at"]):
+                    continue
                 tin, tcached, twrite, tout = agent_tokens(aid)
+                # The window restarts on the READ: one transcript parse per
+                # agent per TOKEN_TICK_SECS is the point, and an agent that
+                # read as unchanged must not fall back to per-second polling.
+                # (The token BASELINE is a different matter — see below.)
+                state["tok_tick_at"][aid] = now
                 prev = state["tok_emitted"].get(aid, {"in": 0, "out": 0})
                 # Monotonic counters (D7): clamp deltas >= 0; never lower baseline.
-                din, dout = max(0, tin - prev.get("in", 0)), max(0, tout - prev.get("out", 0))
-                dcached = max(0, tcached - prev.get("cached", 0))
-                dwrite = max(0, twrite - prev.get("cache_write", 0))
+                deltas, base = token_deltas(prev, tin, tcached, twrite, tout)
+                din, dout = deltas["in"], deltas["out"]
+                dcached, dwrite = deltas["cached"], deltas["cache_write"]
+                # The non-zero-delta guard is load-bearing and the throttle lives
+                # INSIDE it, never around it: this watcher emits only when it has
+                # something to report, so the cadence can suppress a line but can
+                # never manufacture one (WRITE-SIDE-2 — a heartbeat here would
+                # erase every stall segment the timeplan draws).
                 if din or dout or dcached or dwrite:
                     info = state["agents"].get(aid)
                     plan = info["plan"] if info else "orchestrator"
                     label = agent_label(info, aid)
-                    base = {"in": max(prev.get("in", 0), tin), "out": max(prev.get("out", 0), tout),
-                            "cached": max(prev.get("cached", 0), tcached),
-                            "cache_write": max(prev.get("cache_write", 0), twrite)}
                     emit("tokens", "info",
                          f"{label} running: {fmt_in(base['in'], base['cached'], base['cache_write'])} · out {fmt_tokens(base['out'])} so far",
                          plan=plan,
@@ -1754,8 +2126,20 @@ def main() -> None:
                                     tokens={"in": base["in"], "out": base["out"],
                                             "cached": base["cached"],
                                             "cache_write": base["cache_write"]})})
+                    # The baseline advances ONLY on an actual emit (GD-D): a
+                    # suppressed or empty tick leaves it exactly where it was,
+                    # so the next emit — later tick, rollup, stale close or exit
+                    # sweep — carries the whole accumulated delta. That is what
+                    # makes coalescing lossless by construction, with no
+                    # pending-delta accumulator anywhere.
                     state["tok_emitted"][aid] = base
                     dirty = True
+            # Only an EMIT checkpoints. A read that found nothing leaves its
+            # fresh tok_tick_at stamp in memory only, so a restart re-opens that
+            # agent's window and re-reads it once — the safe direction: the
+            # cadence can over-emit after a restart, never under-emit. Paying a
+            # checkpoint write per silent poll tick to avoid one re-read would
+            # be the wrong trade in exactly the loop this pass is making cheaper.
             if dirty:
                 save_state(state)
         tick_sleep()

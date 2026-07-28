@@ -117,6 +117,15 @@ const REFRESH_MS = 2000;
  * folders are *history* — they do not change at the live cadence — so pulling
  * them at `REFRESH_MS` alongside the run data would spend the socket's process
  * time re-parsing files that did not move.
+ *
+ * This constant is a client-side workaround for a server-side cost, and it is
+ * recorded as such: the fix is for `server.h_tasks` to keep the reduction
+ * behind the same `(st_mtime_ns, st_size)` key
+ * `.claude/shared/monitoring/monitor_server.py` already uses for `/tasks`
+ * (63 ms cold, 1.3 ms warm there; ~250-400 ms per call here). Deliberately NOT
+ * done in this pass — one caching story for the same files, decided once, is
+ * the point (PRIOR-ART-TOUCH-5); a second improvised one is how the next
+ * divergence starts. Lowering `TASKS_MS` before that lands only moves the cost.
  */
 const TASKS_MS = 30000;
 /** `/health` poll. Slow on purpose: it is a label, not a liveness path (GD-22). */
@@ -698,19 +707,47 @@ function rollup(filter) {
  * Fold a legacy task's token list the same way (R-32's rollup half).
  *
  * `legacy.Reduction.tokens` holds at most one folded record per agent per
- * throttle window (GD-14), each one cumulative — so the rollup is again
- * latest-per-ref summed, by the same rule and the same helper vocabulary as
- * the socket's.
+ * throttle window (GD-14), each one cumulative — so a record that names an
+ * agent rolls up latest-per-ref summed, by the same rule and the same helper
+ * vocabulary as the socket's.
+ *
+ * A record that names NO agent is the other kind. The reducer kept it whole
+ * because no cumulative could be attributed to an agent, so its four numbers
+ * are that line's own delta, and nothing else IN THIS LIST states them — the
+ * reducer's fold only sees token-stage lines. (The raw stream may state it
+ * elsewhere; an agent's terminal event carries a higher cumulative. That gap is
+ * a measured 1.9 %, and it is why this sum and a cumulative-from-any-event
+ * model must never be combined — see `legacy._fold_tokens`.)
+ *
+ * Such a record also has no bucket: every agent-less record of a plan shares
+ * the key `plan|stage|null|null`, so putting them in the latest-wins map kept
+ * the last one and silently dropped the rest — the same collapsing-key failure
+ * `noteTokens` refuses for a ref-less live record, and here it cost 14.7 M
+ * tokens (1.65 %) against the monitor's delta-sum over the very same bytes.
+ * They are summed instead, which lands on that sum exactly, plan by plan, on
+ * all four frozen corpora (`tests/test_legacy.py` pins it).
+ *
+ * Reading `agentId` is a proxy for the reducer's `absolute` flag, which the
+ * wire does not carry (`server.py`'s token payload is an explicit seven-field
+ * dict). The reducer derives `absolute` from `agent_id`, so the proxy is exact
+ * by construction rather than by luck; the follow-up that would remove the
+ * proxy — putting `absolute` on the wire — is recorded on `TokenRecord`.
  */
 function rollupList(entries) {
     const latest = new Map();
+    const whole = [];
     (entries || []).forEach((entry) => {
+        const tokens = entry.tokens || {};
+        if (entry.agentId === undefined || entry.agentId === null) {
+            whole.push(tokens);
+            return;
+        }
         const key = [entry.plan, entry.stage, entry.agentId, entry.label].join("|");
-        latest.set(key, entry.tokens || {});
+        latest.set(key, tokens);
     });
     const totals = {};
     TOKEN_KEYS.forEach((k) => { totals[k] = 0; });
-    latest.forEach((tokens) => {
+    whole.concat(Array.from(latest.values())).forEach((tokens) => {
         TOKEN_KEYS.forEach((k) => {
             const value = Number(tokens[k]);
             if (Number.isFinite(value) && value > 0) totals[k] += value;

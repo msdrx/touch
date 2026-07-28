@@ -7,7 +7,15 @@
 # (GD-20) and a green Touch suite over a red monitoring suite would be a lie:
 #
 #   tests/test_*.py                              — Touch's own
-#   .claude/shared/monitoring/tests/test_*.py    — the four module tests
+#   .claude/shared/monitoring/tests/test_*.py    — the module's
+#
+# Registration is by GLOB, not by a hand-maintained list: dropping a
+# `test_<thing>.py` into either directory registers it, and nothing else in
+# this script has to change. The corollary is the naming rule — a test HELPER
+# must not be named `test_*.py` or it will be executed as a suite. That is why
+# the monitoring module's stream generator is `tests/gen_stream.py`
+# (imported by `test_ws_e2e.py`, never run on its own; it has a `--self-check`
+# mode for humans).
 #
 # Each file runs with its own directory as cwd (the monitoring tests resolve
 # fixtures relative to themselves) and with PYTHONDONTWRITEBYTECODE set, so a
@@ -32,7 +40,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --keep-going|-k) keep_going=1 ;;
         --list|-l) list_only=1 ;;
-        -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        # print the whole header block, however long it grows: stop at the
+        # first non-comment line rather than at a hard-coded line number that
+        # silently truncates the usage text the next time this file is edited.
+        -h|--help) sed -n '2,${/^#/!q;p;}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "run_all.sh: unknown argument '$1' (try -h)" >&2; exit 2 ;;
     esac
     shift

@@ -257,6 +257,363 @@ check("dedup: same-id rows collapse (in=7)", tin2 == 7)
 
 
 # ---------------------------------------------------------------------------
+# WRITE-SIDE-10: the transcript parse is INCREMENTAL — appended bytes only
+#
+# agent_tokens() used to json.loads every line of every transcript copy on every
+# ~1 s poll tick (4.5-11.0 ms per call on a 1 MB transcript, and growing with
+# it). The arms below assert the WORK, not the wall clock (GD-G): how many lines
+# were parsed, and that the totals are identical to a full re-read.
+# ---------------------------------------------------------------------------
+class _CountingJson:
+    """json shim that counts loads() calls; everything else passes through."""
+
+    def __init__(self, real):
+        self._real = real
+        self.loads_calls = 0
+
+    def loads(self, *a, **k):
+        self.loads_calls += 1
+        return self._real.loads(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def counted_tokens(agent_id):
+    """(totals, json.loads calls) for one agent_tokens() call."""
+    real, counter = dw.json, _CountingJson(dw.json)
+    dw.json = counter
+    try:
+        return dw.agent_tokens(agent_id), counter.loads_calls
+    finally:
+        dw.json = real
+
+
+inc_path = os.path.join(big_dir, "agent-inc1.jsonl")
+with open(inc_path, "w") as f:
+    for i in range(3):
+        f.write(json.dumps({"type": "assistant", "message": {
+            "id": f"m{i}", "usage": {"input_tokens": 10, "output_tokens": 1}}}) + "\n")
+(inc_in, _, _, inc_out), first_calls = counted_tokens("inc1")
+check("incremental: cold read sums the whole file (in=30)", inc_in == 30)
+check("incremental: the cold read parsed all 3 lines", first_calls == 3)
+(inc_in2, _, _, _), warm_calls = counted_tokens("inc1")
+check("incremental: an unchanged transcript is not re-parsed at all",
+      warm_calls == 0 and inc_in2 == 30)
+with open(inc_path, "a") as f:
+    f.write(json.dumps({"type": "assistant", "message": {
+        "id": "m3", "usage": {"input_tokens": 40, "output_tokens": 4}}}) + "\n")
+(inc_in3, _, _, inc_out3), grow_calls = counted_tokens("inc1")
+check("incremental: only the APPENDED line is parsed (1 call, not 4)",
+      grow_calls == 1)
+check("incremental: the totals match a full re-read (in=70)", inc_in3 == 70)
+check("incremental: output totals too (out=7)", inc_out3 == 7)
+# A torn tail (the harness is mid-append) is never consumed: the offset stops at
+# the last newline, so the partial line is re-read once it completes.
+with open(inc_path, "a") as f:
+    f.write('{"type": "assistant", "message": {"id": "m4", "usage": {"input_')
+(torn_in, _, _, _), torn_calls = counted_tokens("inc1")
+check("incremental: a torn trailing line is deferred, not parsed",
+      torn_in == 70 and torn_calls == 0)
+with open(inc_path, "a") as f:
+    f.write('tokens": 5, "output_tokens": 1}}}\n')
+(healed_in, _, _, _), healed_calls = counted_tokens("inc1")
+check("incremental: the completed line is recovered intact (in=75)",
+      healed_in == 75 and healed_calls == 1)
+# A transcript that SHRANK is different bytes: rescan from 0, like the journal
+# tailer does with its checkpoint.
+with open(inc_path, "w") as f:
+    f.write(json.dumps({"type": "assistant", "message": {
+        "id": "z0", "usage": {"input_tokens": 3, "output_tokens": 1}}}) + "\n")
+(shrunk_in, _, _, _), shrunk_calls = counted_tokens("inc1")
+check("incremental: a shrunken transcript is re-read from byte 0 (in=3)",
+      shrunk_in == 3 and shrunk_calls == 1)
+# The id-less fallback key stays unique across incremental reads (WATCHER-8
+# survives): two id-less rows written in two separate reads must both count.
+noid_path = os.path.join(big_dir, "agent-noid1.jsonl")
+with open(noid_path, "w") as f:
+    f.write(json.dumps({"type": "assistant",
+                        "message": {"usage": {"input_tokens": 11}}}) + "\n")
+dw.agent_tokens("noid1")
+with open(noid_path, "a") as f:
+    f.write(json.dumps({"type": "assistant",
+                        "message": {"usage": {"input_tokens": 22}}}) + "\n")
+noid_in, _, _, _ = dw.agent_tokens("noid1")
+check("incremental: id-less rows read in separate passes both count (in=33)",
+      noid_in == 33)
+# The parse splits on \n and NOTHING else. str.splitlines() also splits on
+# U+2028/U+2029 (and \x0b \x0c \x1c-\x1e \x85), and those two are legal
+# UNESCAPED inside a JSON string — json.dumps(ensure_ascii=False) emits them raw,
+# as the harness that writes these transcripts does. Under splitlines() such a
+# row is torn into fragments that all fail json.loads, and because the offset has
+# already advanced past them the billed row is dropped from this agent's total
+# FOREVER: a silent, permanent under-report of the one number the token law rests
+# on. This arm is the regression guard.
+sep_path = os.path.join(big_dir, "agent-sep1.jsonl")
+with open(sep_path, "w", encoding="utf-8") as f:
+    f.write(json.dumps({"type": "assistant", "message": {
+        "id": "s0", "text": "para\u2028graph\u2029break",  # raw separators, escaped here
+        "usage": {"input_tokens": 500, "output_tokens": 5}}},
+        ensure_ascii=False) + "\n")
+check("splitlines: a raw U+2028/U+2029 in an assistant message is still ONE line",
+      open(sep_path, "rb").read().count(b"\n") == 1)
+sep_in, _, _, sep_out = dw.agent_tokens("sep1")
+check("splitlines: ...so its billed row still counts in full (in=500, out=5)",
+      sep_in == 500 and sep_out == 5)
+# ...and the per-line fallback key stays aligned: an id-less row FOLLOWING a
+# separator-bearing one must count once, not twice, across incremental reads.
+with open(sep_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps({"type": "assistant",
+                        "message": {"usage": {"input_tokens": 30}}}) + "\n")
+sep_grown, _, _, _ = dw.agent_tokens("sep1")
+sep_again, _, _, _ = dw.agent_tokens("sep1")
+check("splitlines: an id-less row after it counts exactly once (in=530, stable)",
+      sep_grown == 530 and sep_again == 530)
+
+# The shrink guard compares against the OFFSET actually consumed, never a
+# separately tracked size: the file can grow between the stat() and the read(),
+# so a stored size sits BELOW the offset, and a later genuine truncation to a
+# point between the two would slip past a size-based guard, seek beyond EOF and
+# freeze this transcript's totals until it grew back past the stale offset.
+shrink_path = os.path.join(big_dir, "agent-shrink1.jsonl")
+shrink_rows = [json.dumps({"type": "assistant", "message": {
+    "id": f"k{i}", "usage": {"input_tokens": 100}}}) + "\n" for i in range(4)]
+with open(shrink_path, "w") as f:
+    f.write("".join(shrink_rows))
+check("shrink: the cold read sums the whole file (in=400)",
+      dw.agent_tokens("shrink1")[0] == 400)
+shrink_cache = dw._USAGE_CACHE[shrink_path]
+check("shrink: the cache records only the consumed offset — no second size field",
+      shrink_cache["offset"] == os.path.getsize(shrink_path)
+      and "size" not in shrink_cache)
+with open(shrink_path, "w") as f:  # truncated BELOW the offset we consumed
+    f.write(shrink_rows[0] + shrink_rows[1])
+check("shrink: a file truncated below that offset re-derives from byte 0 (in=200)",
+      dw.agent_tokens("shrink1")[0] == 200)
+
+
+# ---------------------------------------------------------------------------
+# M1 / GD-D: the token-tick cadence ceiling (ORCH_TOKEN_TICK_SECS)
+# ---------------------------------------------------------------------------
+check("cadence: the shipped default is 15s", dw.TOKEN_TICK_DEFAULT == 15)
+check("cadence: 15s stays far inside the page's 120s idle threshold",
+      dw.TOKEN_TICK_DEFAULT <= 30)
+
+_saved_tick, _saved_env = dw.TOKEN_TICK_SECS, dw._TOKEN_TICK_ENV
+dw._TOKEN_TICK_ENV = None
+check("cadence: token_tick_secs is read from orch-config.json",
+      dw.apply_caps({"token_tick_secs": 7})[-1] == 7 and dw.TOKEN_TICK_SECS == 7)
+check("cadence: an absent key keeps the default",
+      dw.apply_caps({})[-1] == dw.TOKEN_TICK_DEFAULT)
+_warns = len(dw._CFG_WARNINGS)
+check("cadence: a garbage value falls back to the default, no raise",
+      dw.apply_caps({"token_tick_secs": "often"})[-1] == dw.TOKEN_TICK_DEFAULT)
+check("cadence: ...and queues a deferred warning",
+      len(dw._CFG_WARNINGS) > _warns)
+del dw._CFG_WARNINGS[_warns:]
+check("cadence: a negative value reads as 0 (always due), never a frozen counter",
+      dw.apply_caps({"token_tick_secs": -5})[-1] == 0)
+dw._TOKEN_TICK_ENV = 3
+check("cadence: ORCH_TOKEN_TICK_SECS PINS the value against a config re-publish",
+      dw.apply_caps({"token_tick_secs": 60})[-1] == 3)
+dw._TOKEN_TICK_ENV = _saved_env
+dw.apply_caps(dw.read_config())  # restore the suite's import-time caps
+dw.TOKEN_TICK_SECS = _saved_tick
+check("cadence: the suite's caps are restored after the knob arms",
+      dw.MAX_GATE_ATTEMPTS == 5)
+
+# The env pin is established by the ENVIRONMENT, not only by the module global
+# the arms above set by hand: one subprocess each closes that loop honestly, and
+# proves the max(0, ...) clamp exists on the env path too (the config path is
+# asserted above) — a typo must read as "always due", never freeze a counter.
+def _tick_in_env(value):
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import decision_watcher as d; print(d.TOKEN_TICK_SECS)"],
+        env=dict(os.environ, ORCH_TOKEN_TICK_SECS=value),
+        cwd=MOD_DIR, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+check("cadence: ORCH_TOKEN_TICK_SECS is read from the environment at import (=7)",
+      _tick_in_env("7") == "7")
+check("cadence: a negative env value clamps to 0 on the env path too",
+      _tick_in_env("-5") == "0")
+
+now = 1_000_000.0
+# The ceiling is a defaulted ARGUMENT, so each arm states the value it means
+# instead of assigning a module global that every later arm (and the live
+# watcher's own poll loop) also reads.
+check("cadence: an agent with no window entry is DUE (checkpoint predates the knob)",
+      dw.token_tick_due("a1", now, {}, secs=15))
+check("cadence: inside the window it is NOT due",
+      not dw.token_tick_due("a1", now, {"a1": now - 5}, secs=15))
+check("cadence: at the window boundary it is due again",
+      dw.token_tick_due("a1", now, {"a1": now - 15}, secs=15))
+check("cadence: a backwards clock step is due, not frozen for the difference",
+      dw.token_tick_due("a1", now, {"a1": now + 300}, secs=15))
+# The absent-window rule is the ONLY exemption M1 grants. A broader "has never
+# published a counter" exemption would keep an agent with no billable activity on
+# the 1 s poll — glob + stat + parse — until ABANDON_QUIET_SECS (1200 s by
+# default), ~1200 reads where the cadence budgets ~80: precisely the cost this
+# item exists to remove. Once an agent's window is stamped it is throttled like
+# every other, emitted counter or not.
+check("cadence: a stamped window throttles even an agent that has never "
+      "published a counter (exactly one exemption, not two)",
+      not dw.token_tick_due("never-emitted", now, {"never-emitted": now - 1}, secs=15))
+check("cadence: 0 is the escape hatch — every tick is due (today's behaviour)",
+      dw.token_tick_due("a1", now, {"a1": now}, secs=0))
+# ...and with the argument omitted the LIVE global decides, which is what makes
+# a refresh_caps() re-tune reach the running poll loop at all.
+dw.TOKEN_TICK_SECS = 30
+check("cadence: an omitted ceiling reads the live global, so a mid-run re-tune "
+      "takes effect on the next tick",
+      not dw.token_tick_due("a1", now, {"a1": now - 20})
+      and dw.token_tick_due("a1", now, {"a1": now - 31}))
+dw.TOKEN_TICK_SECS = _saved_tick
+
+# WRITE-SIDE-2/10, guarded as source text: in the live tick block the cadence
+# gates the transcript READ, and the non-zero-delta guard still sits between that
+# read and the emit — so the ceiling can SUPPRESS a line and can never
+# MANUFACTURE one. A cadence that could manufacture a tick would erase every
+# stall segment the timeplan draws (all 17 on the measured run).
+tick_src = open(os.path.join(MOD_DIR, "decision_watcher.py")).read()
+tick_block = tick_src[tick_src.index('if state["running"]:'):]
+# find(), not index(): a removal must fail as a check line, not as a traceback.
+i_due = tick_block.find("token_tick_due(")
+i_read = tick_block.find("agent_tokens(aid)")
+i_guard = tick_block.find("if din or dout or dcached or dwrite:")
+check("WRITE-SIDE-10: the throttle precedes the transcript READ (it gates the "
+      "read, not just the emit)", -1 < i_due < i_read)
+check("WRITE-SIDE-2: the non-zero-delta guard still sits between the read and "
+      "the emit (a ceiling, never a floor)", -1 < i_read < i_guard)
+# The load-bearing negative: nothing emits between the throttle and that guard,
+# so no timer-driven line can exist.
+i_emit = tick_block.find("emit(", i_due)
+check("WRITE-SIDE-2: no emit( between the throttle and the delta guard — the "
+      "cadence has no path to a heartbeat", i_emit == -1 or i_emit > i_guard)
+check("M1: the journal tail poll is untouched at 1s (spawn latency is contract)",
+      "def poll_sleep(seconds: float = 1.0" in tick_src)
+
+
+# ---------------------------------------------------------------------------
+# M2 / GD-D: flush_agent_tokens — the one unthrottled force-flush path
+# ---------------------------------------------------------------------------
+def emitted_events():
+    if not os.path.isfile(dw.EVENTS):
+        return []
+    return [json.loads(ln) for ln in open(dw.EVENTS) if ln.strip()]
+
+
+# The seeded window is this arm's anti-vacuity: the drop below has to remove
+# something that was really there.
+flush_state = {"tok_emitted": {}, "tok_tick_at": {"f1": 1.0}, "agents": {},
+               "running": []}
+info_a = {"plan": "sp-x", "stage": "implement", "role": "impl", "attempt": 1}
+before = len(emitted_events())
+dw.flush_agent_tokens(flush_state, "f1", info_a, totals=(500, 40, 10, 20))
+flushed = emitted_events()[before:]
+check("M2: a force-flush emits one tokens line", len(flushed) == 1)
+check("M2: ...carrying the WIRE DELTA", flushed[0]["tokens"]["in"] == 500)
+check("M2: ...and the agent's ABSOLUTE cumulative (GD-C)",
+      flushed[0]["agent"]["tokens"] == {"in": 500, "out": 20, "cached": 40,
+                                        "cache_write": 10})
+check("M2: ...attributed to the agent AND its plan (WRITE-SIDE-5)",
+      flushed[0]["agent"]["id"] == "f1" and flushed[0]["plan"] == "sp-x")
+check("M2: the baseline advanced to the cumulative",
+      flush_state["tok_emitted"]["f1"]["in"] == 500)
+check("M2: the flush DROPS the cadence window — a flushed agent has stopped "
+      "being ticked, so keeping it would grow the checkpoint by one dead entry "
+      "per agent for the life of the run",
+      "f1" not in flush_state["tok_tick_at"])
+before = len(emitted_events())
+dw.flush_agent_tokens(flush_state, "f1", info_a, totals=(500, 40, 10, 20))
+check("M2: a second flush with nothing new stays SILENT",
+      len(emitted_events()) == before)
+dw.flush_agent_tokens(flush_state, "f1", info_a, totals=(500, 40, 10, 20), force=True)
+forced = emitted_events()[before:]
+check("M2: force=True states the total anyway (the rollup's closing line)",
+      len(forced) == 1 and forced[0]["tokens"]["in"] == 0
+      and forced[0]["agent"]["tokens"]["in"] == 500)
+before = len(emitted_events())
+dw.flush_agent_tokens(flush_state, "f1", info_a, totals=(400, 30, 5, 10))
+check("M2: a regressed transcript never emits a negative delta (D7)",
+      len(emitted_events()) == before
+      and flush_state["tok_emitted"]["f1"]["in"] == 500)
+# The exit sweep is the same helper over everything still in flight.
+sweep_state = {"tok_emitted": {"s1": {"in": 100}}, "tok_tick_at": {},
+               "agents": {"s1": info_a}, "running": ["s1"]}
+_real_agent_tokens = dw.agent_tokens
+dw.agent_tokens = lambda aid: (900, 0, 0, 0)
+before = len(emitted_events())
+try:
+    dw.sweep_running_tokens(sweep_state)
+finally:
+    dw.agent_tokens = _real_agent_tokens
+swept = emitted_events()[before:]
+check("M2: the exit sweep flushes an agent that would never emit again",
+      len(swept) == 1 and swept[0]["tokens"]["in"] == 800
+      and swept[0]["agent"]["tokens"]["in"] == 900)
+before = len(emitted_events())
+dw.sweep_running_tokens({"tok_emitted": {}, "tok_tick_at": {}, "agents": {},
+                         "running": []})
+check("M2: an empty running list sweeps nothing", len(emitted_events()) == before)
+
+# Every flush site is a point where the agent stops being ticked, so its
+# per-transcript parse caches are dead weight from there on. Without the drop,
+# the measured 167-agent run retains order-1e5 entries (four ints plus a message
+# key each) for agents that resulted or were stale-closed hours earlier.
+evict_path = os.path.join(big_dir, "agent-evict1.jsonl")
+with open(evict_path, "w") as f:
+    f.write(json.dumps({"type": "assistant", "message": {
+        "id": "e0", "usage": {"input_tokens": 60}}}) + "\n")
+check("evict: a read populates the parse cache (the arm's precondition)",
+      dw.agent_tokens("evict1")[0] == 60 and evict_path in dw._USAGE_CACHE)
+dw.flush_agent_tokens({"tok_emitted": {}, "tok_tick_at": {}, "agents": {},
+                       "running": []}, "evict1", info_a)
+check("evict: the terminal flush drops that agent's parse caches",
+      evict_path not in dw._USAGE_CACHE)
+check("evict: ...and dropping is lossless — a re-read rebuilds the same total",
+      dw.agent_tokens("evict1")[0] == 60)
+# Eviction reads the cache's own keys, never a second agent_paths() glob: the
+# glob over the whole projects tree is the cost this pass exists to remove (it
+# would be paid twice on every result, stale close and swept agent), and a
+# transcript copy pruned or rotated away between the last read and the flush is
+# no longer IN the glob — a glob-driven eviction would strand that entry for the
+# daemon's whole life, since this cache has no other eviction path.
+gone_path = os.path.join(big_dir, "agent-gone1.jsonl")
+with open(gone_path, "w") as f:
+    f.write(json.dumps({"type": "assistant", "message": {
+        "id": "g0", "usage": {"input_tokens": 40}}}) + "\n")
+dw.agent_tokens("gone1")
+check("evict: the vanished-transcript arm has an entry to evict (precondition)",
+      gone_path in dw._USAGE_CACHE)
+os.remove(gone_path)  # pruned/rotated away under us, as agent_paths' union can
+_real_agent_paths, _glob_calls = dw.agent_paths, []
+dw.agent_paths = lambda aid: (_glob_calls.append(aid), _real_agent_paths(aid))[1]
+try:
+    dw.drop_usage_cache("gone1")
+finally:
+    dw.agent_paths = _real_agent_paths
+check("evict: a transcript that DISAPPEARED still loses its cache entry",
+      gone_path not in dw._USAGE_CACHE)
+check("evict: ...and the eviction cost no second glob of the projects tree",
+      _glob_calls == [])
+
+# token_deltas is the shared arithmetic behind every emit site (D7).
+d, b = dw.token_deltas({"in": 100, "out": 50, "cached": 10, "cache_write": 5},
+                       80, 8, 3, 40)
+check("token_deltas: every shrunk component clamps to 0",
+      d == {"in": 0, "out": 0, "cached": 0, "cache_write": 0})
+check("token_deltas: no baseline component regresses",
+      b == {"in": 100, "out": 50, "cached": 10, "cache_write": 5})
+d2, b2 = dw.token_deltas({"in": 100}, 250, 20, 10, 7)
+check("token_deltas: growth is reported in full",
+      d2 == {"in": 150, "out": 7, "cached": 20, "cache_write": 10})
+check("token_deltas: and the new baseline is the cumulative", b2["in"] == 250)
+
+
+# ---------------------------------------------------------------------------
 # WATCHER-5: classify() with a missing transcript is time-bounded (no ~5s stall)
 # ---------------------------------------------------------------------------
 sleep_calls = []
@@ -1509,6 +1866,17 @@ check("M-2: and its token usage entered the totals (deltas are wire-only)",
 check("M-2: the drain announces why it stopped",
       any(e["stage"] == "watcher" and "stop signal" in (e.get("detail") or "")
           for e in drain_evs))
+# M2 / WRITE-SIDE-5 on the same stream: the per-agent result rollup used to be
+# the ONE token line with no `agent` block at all (144 of them on the measured
+# run), so a replay that folds quiet ticks away could attribute none of it.
+drain_rollup = [e for e in drain_evs
+                if e["stage"] == "tokens" and not e.get("quiet")]
+check("M2: the result rollup token line carries agent attribution",
+      bool(drain_rollup)
+      and all((e.get("agent") or {}).get("id") == "a1" for e in drain_rollup))
+check("M2: ...with the agent's ABSOLUTE cumulative on it (4180 = 4000+120+60)",
+      bool(drain_rollup)
+      and drain_rollup[-1]["agent"]["tokens"]["in"] == 4180)
 
 # CONTROL for the arm above: SIGKILL cannot be handled, so it reproduces exactly
 # the pre-fix behavior. Same journal, same stimulus, same instant — if these
@@ -1530,6 +1898,463 @@ check("M-2 control: it had monitored the spawn before dying",
 check("M-2 control: and the result it never drained is ABSENT — so the arm above "
       "is not passing on a lucky poll tick",
       not any(e["stage"] == "probe" and e["state"] == "done" for e in kill_evs))
+
+
+# ---------------------------------------------------------------------------
+# M1 / M2 live: the cadence ceiling, its escape hatch, and the force-flush paths
+#
+# These run the REAL watcher, because the cadence lives inside main()'s poll
+# loop: what is asserted is the shape of the stream it appended (how many quiet
+# lines, which deltas, which cumulative) — work, never wall clock (GD-G).
+# ---------------------------------------------------------------------------
+STARTED_A1 = json.dumps({"type": "started", "agentId": "a1"}) + "\n"
+CADENCE_MARKER = "[monitor] plan=sp-a stage=implement role=impl attempt=1"
+
+
+def usage_row(msg_id, tokens_in, tokens_out=0):
+    return json.dumps({"type": "assistant", "message": {
+        "id": msg_id, "usage": {"input_tokens": tokens_in,
+                                "output_tokens": tokens_out}}}) + "\n"
+
+
+def write_metered_transcript(wf_dir, agent_id, marker, first=1000):
+    """Marker + ONE usage row: the first live tick has exactly `first` in-tokens.
+
+    Only ``input_tokens`` are used so every delta in these arms is an exact,
+    readable number (``in`` is the total input volume: fresh + cache r/w).
+    """
+    with open(os.path.join(wf_dir, f"agent-{agent_id}.jsonl"), "w") as f:
+        f.write(json.dumps({"type": "user", "timestamp": "2026-07-25T00:00:00.000Z",
+                            "message": {"content": marker + "\nprompt body\n"}}) + "\n")
+        f.write(usage_row("msg_1", first))
+
+
+def append_usage(wf_dir, agent_id, msg_id, tokens_in):
+    with open(os.path.join(wf_dir, f"agent-{agent_id}.jsonl"), "a") as f:
+        f.write(usage_row(msg_id, tokens_in))
+
+
+def token_lines(state_dir, quiet, agent_id="a1"):
+    return [e for e in events_of(state_dir)
+            if e["stage"] == "tokens" and bool(e.get("quiet")) is quiet
+            and (e.get("agent") or {}).get("id") == agent_id]
+
+
+def wire_total(state_dir, agent_id="a1"):
+    """Everything the stream ever said about this agent's input tokens."""
+    return sum((e.get("tokens") or {}).get("in") or 0
+               for e in events_of(state_dir)
+               if e["stage"] == "tokens"
+               and (e.get("agent") or {}).get("id") == agent_id)
+
+
+def gdc_fold(events):
+    """GD-C's two ways of reading one stream: ``(delta sums, cumulative sums)``.
+
+    Per plan: the sum of every wire ``tokens`` delta, versus the sum of the LAST
+    cumulative ``agent.tokens`` seen per (plan, agent) on ANY event. They must
+    agree — that equality is what lets a folded replay drop quiet ticks and
+    still show the true totals, and it only holds if every agent that stops
+    being ticked (result, stale close, exit) flushed on its way out.
+    """
+    deltas, absolute = {}, {}
+    for ev in events:
+        plan = ev.get("plan") or "orchestrator"
+        if ev.get("tokens"):
+            deltas[plan] = deltas.get(plan, 0) + (ev["tokens"].get("in") or 0)
+        agent = ev.get("agent") or {}
+        if agent.get("id") and isinstance(agent.get("tokens"), dict):
+            absolute[(plan, agent["id"])] = agent["tokens"].get("in") or 0
+    cumulative = {}
+    for (plan, _aid), value in absolute.items():
+        cumulative[plan] = cumulative.get(plan, 0) + value
+    return deltas, cumulative
+
+
+def settled(pred, tail=1.5):
+    """``pred`` has held for ``tail`` seconds — an EXACT count needs a tail.
+
+    ``until=`` stops the child the instant its predicate is true, so an arm that
+    asserts "exactly N lines" while polling for the Nth one is asserting what
+    the harness enforced. Keeping the watcher alive for a poll tick or two past
+    the line it was waiting for makes an N+1st line observable, so the count is
+    the code's, not the harness's — at the cost of one idle interval, not of the
+    whole window.
+    """
+    seen_at = []
+
+    def _ready():
+        if not pred():
+            return False
+        if not seen_at:
+            seen_at.append(time.time())
+        return time.time() - seen_at[0] >= tail
+    return _ready
+
+
+def check_gdc(label, events):
+    deltas, cumulative = gdc_fold(events)
+    check(f"GD-C: {label} — delta sum == cumulative sum, per plan "
+          f"({deltas} vs {cumulative})", deltas == cumulative)
+    check(f"GD-C: {label} — the equality is not vacuous (tokens really flowed)",
+          bool(deltas) and sum(deltas.values()) > 0)
+
+
+# M1 (a): two transcript growths inside ONE cadence window collapse into one
+# line whose delta is their sum. The window is short (2 s) because what is being
+# proved is the coalescing, not the number.
+coal_state, coal_wf = make_run("cadence-coalesce", journal_lines=STARTED_A1)
+write_metered_transcript(coal_wf, "a1", CADENCE_MARKER)
+
+
+def _two_growths():
+    append_usage(coal_wf, "a1", "msg_2", 2000)
+    append_usage(coal_wf, "a1", "msg_3", 3000)
+
+
+exited, rc, err = run_watcher(
+    coal_state, coal_wf,
+    dict(LONG, ORCH_EXIT_QUIET_SECS="999", ORCH_TOKEN_TICK_SECS="2"),
+    wait=25.0, during=_two_growths, after=10.0,
+    # The stimulus must land AFTER the first tick, or there would be nothing to
+    # coalesce: the first tick for an agent always emits.
+    when=lambda: bool(token_lines(coal_state, quiet=True)),
+    # settled(), not the bare predicate: the count below must be the watcher's,
+    # not the moment the harness pulled the plug — the tail keeps it polling
+    # past the second line (and past the 2 s ceiling) so a third would show up.
+    until=settled(lambda: len(token_lines(coal_state, quiet=True)) >= 2))
+coal_quiet = token_lines(coal_state, quiet=True)
+check(f"M1: the first tick for a new agent emits at once (got {len(coal_quiet)} lines)",
+      bool(coal_quiet) and coal_quiet[0]["tokens"]["in"] == 1000)
+check("M1: two growths inside one window emit exactly ONE more line",
+      len(coal_quiet) == 2)
+check("M1: ...whose delta is their SUM (2000+3000), nothing dropped",
+      len(coal_quiet) == 2 and coal_quiet[1]["tokens"]["in"] == 5000)
+check("M1: ...and it states the ABSOLUTE running total (GD-C)",
+      len(coal_quiet) == 2 and coal_quiet[1]["agent"]["tokens"]["in"] == 6000)
+check_gdc("coalesced ticks", events_of(coal_state))
+
+# M1 (b): ORCH_TOKEN_TICK_SECS=0 reproduces today's behaviour exactly — one line
+# per transcript growth. Same staged stimulus as the ceiling arm below, so the
+# two differ ONLY in the knob.
+STAGE_GAP = 2.0
+
+
+def staged_growths(wf_dir, gate_on=None, timeout=20.0):
+    """Two growths separated by a poll interval.
+
+    Under the ``0`` escape hatch they are two lines; under a ceiling above the
+    gap they are one. ``gate_on`` is a predicate the second growth waits for —
+    the state dir's first growth having reached the wire. The arm that proves
+    "no coalescing" must be event-driven, not sleep-driven (GD-G): on a loaded
+    box a missed poll would merge two appends the code would have reported
+    separately, and the arm would fail for a reason that has nothing to do with
+    the escape hatch. The ceiling arm has nothing to poll for (the whole point is
+    that nothing is emitted), so it keeps the timed gap.
+    """
+    def _fire():
+        append_usage(wf_dir, "a1", "msg_2", 2000)
+        if gate_on is None:
+            time.sleep(STAGE_GAP)
+        else:
+            deadline = time.time() + timeout
+            while time.time() < deadline and not gate_on():
+                time.sleep(0.05)
+        append_usage(wf_dir, "a1", "msg_3", 3000)
+    return _fire
+
+
+zero_state, zero_wf = make_run("cadence-zero", journal_lines=STARTED_A1)
+write_metered_transcript(zero_wf, "a1", CADENCE_MARKER)
+exited, rc, err = run_watcher(
+    zero_state, zero_wf,
+    dict(LONG, ORCH_EXIT_QUIET_SECS="999", ORCH_TOKEN_TICK_SECS="0"),
+    wait=45.0,
+    during=staged_growths(
+        zero_wf, gate_on=lambda: len(token_lines(zero_state, quiet=True)) >= 2),
+    after=10.0,
+    when=lambda: bool(token_lines(zero_state, quiet=True)),
+    until=lambda: len(token_lines(zero_state, quiet=True)) >= 3)
+zero_deltas = [e["tokens"]["in"] for e in token_lines(zero_state, quiet=True)]
+check(f"M1: ORCH_TOKEN_TICK_SECS=0 is the escape hatch — a separate line per "
+      f"growth, as before the knob (got {zero_deltas})",
+      len(zero_deltas) >= 3 and zero_deltas[0] == 1000)
+check("M1: ...and the escape hatch is lossless too (1000+2000+3000)",
+      sum(zero_deltas) == 6000)
+check_gdc("unthrottled ticks", events_of(zero_state))
+
+# M1 (a)/(c) + M2 (b): the SAME stimulus under a ceiling far above it emits ONE
+# line — and the tokens it withheld are not lost: the SIGTERM drain's sweep
+# flushes them with the agent's cumulative. A negative arm (nothing must be
+# emitted) has nothing to poll for, so its window is the stimulus plus a
+# calibrated idle stretch, in the negative_window() house style.
+CAP_WINDOW = 2.0 + STAGE_GAP + negative_window(AUTH_EXIT_LATENCY)
+cap_state, cap_wf = make_run("cadence-cap", journal_lines=STARTED_A1)
+write_metered_transcript(cap_wf, "a1", CADENCE_MARKER)
+exited, rc, err = run_watcher(
+    cap_state, cap_wf,
+    dict(LONG, ORCH_EXIT_QUIET_SECS="999", ORCH_TOKEN_TICK_SECS="999",
+         ORCH_DRAIN_SECS="1"),
+    wait=CAP_WINDOW, during=staged_growths(cap_wf), after=2.0,
+    when=lambda: bool(token_lines(cap_state, quiet=True)),
+    # Ends the arm EARLY only if the ceiling leaked, so a failure is cheap and a
+    # pass costs the full window it is asserting over.
+    until=lambda: len(token_lines(cap_state, quiet=True)) >= 2)
+cap_quiet = token_lines(cap_state, quiet=True)
+cap_flush = token_lines(cap_state, quiet=False)
+check(f"M1: a 999s ceiling suppresses every tick after the first "
+      f"(window {CAP_WINDOW:.1f}s, got {len(cap_quiet)})", len(cap_quiet) == 1)
+check("M2: the drain's exit sweep flushes what the ceiling withheld",
+      bool(cap_flush) and cap_flush[-1]["tokens"]["in"] == 5000)
+check("M2: ...stating the agent's absolute cumulative, not just a delta",
+      bool(cap_flush) and cap_flush[-1]["agent"]["tokens"]["in"] == 6000)
+check("GD-D: throttling is LOSSLESS — every withheld token still reached the wire",
+      wire_total(cap_state) == 6000)
+check_gdc("ceiling + drain sweep", events_of(cap_state))
+
+# M2 (a): a stale/abandoned close. Its agent never results, so before this fix
+# it stated no total and flushed nothing — on the measured run that was 15 of
+# 167 agents and 9.14% of the input tokens, alive only inside quiet ticks. The
+# ceiling is set absurdly high so the growth can reach the wire ONLY through the
+# stale flush: the arm cannot pass by accident.
+stale_flush_state, stale_flush_wf = make_run("staleflush", journal_lines=STARTED_A1)
+write_metered_transcript(stale_flush_wf, "a1", CADENCE_MARKER)
+exited, rc, err = run_watcher(
+    stale_flush_state, stale_flush_wf,
+    {"ORCH_QUIET_SECS": "1", "ORCH_EXIT_QUIET_SECS": "1",
+     "ORCH_ABANDON_QUIET_SECS": "3", "ORCH_TOKEN_TICK_SECS": "999"},
+    wait=40.0, during=lambda: append_usage(stale_flush_wf, "a1", "msg_2", 5000),
+    after=10.0, when=lambda: bool(token_lines(stale_flush_state, quiet=True)))
+stale_evs = events_of(stale_flush_state)
+stale_rows = [e for e in stale_evs if e["state"] == "stale"
+              and (e.get("agent") or {}).get("id") == "a1"]
+check("M2: the abandoned agent is closed stale (the arm's precondition)",
+      bool(stale_rows))
+check("M2: the stale row states the agent's TRUE total, not silence",
+      bool(stale_rows) and (stale_rows[-1]["agent"].get("tokens") or {}).get("in") == 6000)
+stale_flush = token_lines(stale_flush_state, quiet=False)
+check("M2: ...and a flushing delta line lands with it",
+      bool(stale_flush) and stale_flush[-1]["tokens"]["in"] == 5000)
+check("M2: exactly one quiet tick, so the 5000 lived nowhere else (anti-vacuity)",
+      len(token_lines(stale_flush_state, quiet=True)) == 1)
+check("M2: the stale-closed agent's usage reached the totals in full",
+      wire_total(stale_flush_state) == 6000)
+check_gdc("stale/abandoned close", stale_evs)
+
+# M2 (a), the OTHER stale close: DRIVER-1's respawn branch, where a same-role
+# spawn at a GREATER attempt closes the predecessor that never returned a result.
+# It is a different code path from the abandon-quiet close above — journal-driven
+# rather than idle-driven, and stamped with the NEW spawn's timestamp — and it
+# carries the same obligation: an agent that leaves `running` without a result is
+# never ticked again, so that is its last chance to state a total. The ceiling is
+# absurdly high so a1's growth can reach the wire ONLY through the stale flush.
+RESPAWN_MARKER_1 = "[monitor] plan=sp-r stage=implement role=impl attempt=1"
+RESPAWN_MARKER_2 = "[monitor] plan=sp-r stage=implement role=impl attempt=2"
+resp_state, resp_wf = make_run("respawn-stale", journal_lines=STARTED_A1)
+write_metered_transcript(resp_wf, "a1", RESPAWN_MARKER_1)
+
+
+def _respawn():
+    """a1 accrues (withheld by the ceiling), then attempt 2 spawns over it."""
+    append_usage(resp_wf, "a1", "msg_2", 5000)
+    write_metered_transcript(resp_wf, "a2", RESPAWN_MARKER_2, first=700)
+    with open(os.path.join(resp_wf, "journal.jsonl"), "a") as f:
+        f.write(json.dumps({"type": "started", "agentId": "a2"}) + "\n")
+
+
+def _respawn_closed():
+    evs = events_of(resp_state)
+    stale = any(e["state"] == "stale" and (e.get("agent") or {}).get("id") == "a1"
+                for e in evs)
+    # Both, so the poll can't catch the stale row before its flush line lands.
+    return stale and bool(token_lines(resp_state, quiet=False, agent_id="a1"))
+
+
+exited, rc, err = run_watcher(
+    resp_state, resp_wf,
+    dict(LONG, ORCH_EXIT_QUIET_SECS="999", ORCH_TOKEN_TICK_SECS="999"),
+    wait=40.0, during=_respawn, after=10.0,
+    # The stimulus waits for a1's first tick: without it there is nothing
+    # withheld, and the arm would prove only that a stale row exists.
+    when=lambda: bool(token_lines(resp_state, quiet=True, agent_id="a1")),
+    until=_respawn_closed)
+resp_evs = events_of(resp_state)
+resp_stale = [e for e in resp_evs if e["state"] == "stale"
+              and (e.get("agent") or {}).get("id") == "a1"]
+resp_flush = token_lines(resp_state, quiet=False, agent_id="a1")
+check("M2: a higher-attempt respawn stale-closes its predecessor (DRIVER-1)",
+      bool(resp_stale))
+check("M2: the respawn stale row states a1's TRUE cumulative, not silence",
+      bool(resp_stale)
+      and (resp_stale[-1]["agent"].get("tokens") or {}).get("in") == 6000)
+check("M2: ...and the withheld delta lands with it (5000)",
+      bool(resp_flush) and resp_flush[-1]["tokens"]["in"] == 5000)
+check("M2: exactly one quiet tick for a1, so the 5000 lived nowhere else",
+      len(token_lines(resp_state, quiet=True, agent_id="a1")) == 1)
+check("M2: the respawn-closed agent's usage reached the totals in full",
+      wire_total(resp_state, "a1") == 6000)
+check_gdc("respawn stale close", resp_evs)
+
+# D7 on the stale rows: a stale close may never publish a RAW reading.
+# agent_paths() unions transcript COPIES, so a pruned or rotated copy can shrink
+# the union — and when it has, the flush that follows the stale row is SILENT
+# (every delta clamps to 0), leaving that row as the last word on the agent's
+# cumulative. A raw reading there would be the one place a counter goes
+# backwards, and GD-C's "delta sum == last cumulative" equality would be false on
+# a real stream, under-reporting the snapshot fold built on top of it.
+#
+# The stimulus is what a restart actually finds: a checkpoint whose baseline
+# (50000) is far above what the surviving transcript now reads (1000), plus the
+# events.jsonl that baseline came from.
+D7_BASE = {"in": 50000, "out": 0, "cached": 0, "cache_write": 0}
+D7_INFO = {"plan": "sp-d7", "stage": "implement", "role": "impl", "attempt": 1}
+d7_state, d7_wf = make_run("stale-regress", journal_lines=STARTED_A1)
+d7_journal = os.path.join(d7_wf, "journal.jsonl")
+write_metered_transcript(d7_wf, "a1",
+                         "[monitor] plan=sp-d7 stage=implement role=impl attempt=1")
+with open(os.path.join(d7_state, ".watcher-state.json"), "w") as f:
+    # offset at EOF: the `started` line is already consumed, so the seeded
+    # agents/running/baseline stand exactly as a restart would find them.
+    json.dump({"offset": os.path.getsize(d7_journal), "journal": d7_journal,
+               "agents": {"a1": D7_INFO}, "running": ["a1"],
+               "tok_emitted": {"a1": dict(D7_BASE)}, "tok_tick_at": {},
+               "plans": {"sp-d7": "running"}, "decisive": {},
+               "last_result_ok": {}}, f)
+with open(os.path.join(d7_state, "events.jsonl"), "w") as f:
+    f.write(json.dumps({"ts": "2026-07-25T00:00:00.000Z", "plan": "sp-d7",
+                        "stage": "tokens", "state": "info",
+                        "detail": "implement:impl #1 running", "w": "watcher",
+                        "tokens": dict(D7_BASE), "quiet": True,
+                        "agent": {"id": "a1", "shortId": "a1",
+                                  "label": "implement:impl #1",
+                                  "state": "running",
+                                  "tokens": dict(D7_BASE)}}) + "\n")
+exited, rc, err = run_watcher(
+    d7_state, d7_wf,
+    {"ORCH_QUIET_SECS": "1", "ORCH_EXIT_QUIET_SECS": "999",
+     "ORCH_ABANDON_QUIET_SECS": "3", "ORCH_TOKEN_TICK_SECS": "999"},
+    wait=40.0,
+    until=lambda: any(e["state"] == "stale" for e in events_of(d7_state)))
+d7_evs = events_of(d7_state)
+d7_stale = [e for e in d7_evs if e["state"] == "stale"
+            and (e.get("agent") or {}).get("id") == "a1"]
+check("D7: the shrunken-transcript agent is stale-closed (the arm's precondition)",
+      bool(d7_stale))
+check("D7: the stale row publishes the CLAMPED baseline (50000), never the raw "
+      "reading (1000) — no stale row may lower a counter",
+      bool(d7_stale)
+      and (d7_stale[-1]["agent"].get("tokens") or {}).get("in") == 50000)
+check("D7: ...and the flush that follows stays silent, so that row IS the last "
+      "word on the cumulative",
+      not token_lines(d7_state, quiet=False))
+check_gdc("stale close over a shrunken transcript", d7_evs)
+
+# M2 / GD-D, the fourth force-flush site: an UNCLASSIFIED agent's result. The
+# `started` branch appends every agent to `running` BEFORE it knows whether the
+# prompt carries a [monitor] marker (GD-7: harness facts create the node), so an
+# unclassified agent is ticked exactly like a classified one — under
+# plan="orchestrator" — and its result ends the ticking just as finally. The
+# hole this arm guards is total, not partial: the first tick a second after the
+# spawn legitimately reads a transcript with no usage rows yet, which SPENDS the
+# first-tick exemption and stamps the window, so an agent that finishes inside
+# one ceiling would report nothing at all where the pre-cadence per-second tick
+# reported essentially everything. GD-C cannot catch it — both sides of the
+# equality under-report by the same amount — so the assertion is the TOTAL.
+uncl_state, uncl_wf = make_run("unclassified-flush", journal_lines=STARTED_A1)
+write_metered_transcript(uncl_wf, "a1", "no [monitor] marker in this prompt")
+
+
+def _uncl_result():
+    """a1 accrues (withheld by the ceiling), then the journal reports its result."""
+    append_usage(uncl_wf, "a1", "msg_2", 5000)
+    with open(os.path.join(uncl_wf, "journal.jsonl"), "a") as f:
+        f.write(json.dumps({"type": "result", "agentId": "a1",
+                            "result": {"summary": "s"}}) + "\n")
+
+
+exited, rc, err = run_watcher(
+    uncl_state, uncl_wf,
+    dict(LONG, ORCH_EXIT_QUIET_SECS="999", ORCH_TOKEN_TICK_SECS="999"),
+    wait=40.0, during=_uncl_result, after=15.0,
+    # The stimulus waits for the first tick: without it there is nothing
+    # withheld, and the arm would prove only that a result line exists.
+    when=lambda: bool(token_lines(uncl_state, quiet=True)),
+    until=lambda: bool(token_lines(uncl_state, quiet=False)))
+uncl_evs = events_of(uncl_state)
+check("GD-7: the unclassified agent still gets a node (the arm's precondition)",
+      any((e.get("agent") or {}).get("unconventional") for e in uncl_evs))
+uncl_flush = token_lines(uncl_state, quiet=False)
+check("M2: an unclassified agent's result flushes what the ceiling withheld (5000)",
+      bool(uncl_flush) and uncl_flush[-1]["tokens"]["in"] == 5000)
+check("M2: ...stating its ABSOLUTE cumulative (6000), foldable like any other",
+      bool(uncl_flush) and uncl_flush[-1]["agent"]["tokens"]["in"] == 6000)
+check("M2: exactly one quiet tick, so the 5000 lived nowhere else (anti-vacuity)",
+      len(token_lines(uncl_state, quiet=True)) == 1)
+check("M2: the unclassified agent's usage reached the totals in full",
+      wire_total(uncl_state) == 6000)
+check_gdc("unclassified result flush", uncl_evs)
+
+# WRITE-SIDE-10 / startup: the backfill re-reads EVERY agent in `tok_emitted`,
+# which on a resumed watcher is every agent the run has ever tracked (167 on the
+# measured run) against a handful still in flight. Those reads are terminal, so
+# what they memoise must not survive startup — otherwise a restart re-creates
+# exactly the order-1e5 retention drop_usage_cache() exists to prevent, on the
+# one path where tok_emitted is large, and the cadence-window map grows with the
+# LENGTH of the run instead of with concurrency.
+bf_state, bf_wf = make_run("backfill-sweep", journal_lines=STARTED_A1)
+write_metered_transcript(bf_wf, "r1", CADENCE_MARKER)   # still in flight
+write_metered_transcript(bf_wf, "b1", CADENCE_MARKER)   # resulted long ago
+bf_journal = os.path.join(bf_wf, "journal.jsonl")
+with open(os.path.join(bf_state, ".watcher-state.json"), "w") as f:
+    json.dump({"offset": os.path.getsize(bf_journal), "journal": bf_journal,
+               "agents": {}, "running": ["r1"],
+               "tok_emitted": {"r1": {}, "b1": {}},
+               # A window inherited from the previous session, for an agent that
+               # is no longer running: the sweep must clear it too.
+               "tok_tick_at": {"b1": 1.0}, "plans": {}, "decisive": {},
+               "last_result_ok": {}}, f)
+# The probe cuts the process off at the first statement AFTER the backfill
+# (install_stop_handlers), then reports what startup left behind: cache keys and
+# checkpointed windows — work counters, no wall clock (GD-G).
+BACKFILL_PROBE = """
+import json, os
+import decision_watcher as d
+
+
+class _Cut(Exception):
+    pass
+
+
+def _cut(*a, **k):
+    raise _Cut
+
+
+d.install_stop_handlers = _cut
+try:
+    d.main()
+except _Cut:
+    pass
+with open(os.path.join(d.STATE_DIR, ".watcher-state.json")) as f:
+    windows = sorted(json.load(f).get("tok_tick_at") or {})
+print(json.dumps({"cache": sorted(os.path.basename(p) for p in d._USAGE_CACHE),
+                  "windows": windows}))
+"""
+bf_out = subprocess.run(
+    [sys.executable, "-c", BACKFILL_PROBE],
+    env=dict(os.environ, ORCH_STATE_DIR=bf_state, ORCH_WF_DIR=bf_wf,
+             ORCH_WF_GLOB_ROOT=os.path.join(BASE, "glob")),
+    cwd=MOD_DIR, capture_output=True, text=True)
+bf = json.loads(bf_out.stdout.strip().splitlines()[-1]) if bf_out.stdout.strip() else {}
+bf_tokens = [e for e in events_of(bf_state) if e["stage"] == "tokens"]
+check("backfill: the startup pass really read both tracked agents (precondition)",
+      {(e.get("agent") or {}).get("id") for e in bf_tokens} == {"r1", "b1"})
+check("backfill: the in-flight agent keeps its parse memo (it will be ticked)",
+      bf.get("cache") == ["agent-r1.jsonl"])
+check("backfill: ...and the finished agent's memo is dropped — a restart must "
+      "not retain one dead entry per agent the run ever tracked",
+      "agent-b1.jsonl" not in (bf.get("cache") or []))
+check("backfill: the checkpoint keeps a cadence window only for what is running",
+      bf.get("windows") == ["r1"])
 
 # R-40/M1: the SAME shape, but the only close is the WATCHER's own settle pass —
 # it must keep running, and it must still be there to monitor the next spawn.

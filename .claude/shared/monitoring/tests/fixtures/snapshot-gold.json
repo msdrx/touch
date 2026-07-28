@@ -1,0 +1,1483 @@
+{
+ "evCount": 1200,
+ "foldGen": 1,
+ "kind": "monitor-snapshot",
+ "logTruncated": false,
+ "m": "snapshot",
+ "offset": 569744,
+ "parseFailures": 0,
+ "planTotal": 2,
+ "plans": [
+  [
+   "research",
+   {
+    "agents": [
+     [
+      "a429f718054304e72",
+      {
+       "finishedMs": 1785226253160,
+       "label": "mongoschema:research #1",
+       "runtime": "10m52s",
+       "started": "2026-07-28T08:00:02.020Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 694173,
+        "cached": 3868696,
+        "in": 4564657,
+        "out": 45008
+       }
+      }
+     ],
+     [
+      "add612f92c5daef85",
+      {
+       "finishedMs": 1785226519197,
+       "label": "customstate:research #1",
+       "runtime": "15m18s",
+       "started": "2026-07-28T08:00:02.461Z",
+       "state": "failed",
+       "tokens": {
+        "cache_write": 971970,
+        "cached": 5407124,
+        "in": 6381447,
+        "out": 50084
+       }
+      }
+     ],
+     [
+      "ac84a4f8c5789d10a",
+      {
+       "finishedMs": 1785226896626,
+       "label": "convo:research #1",
+       "runtime": "21m36s",
+       "started": "2026-07-28T08:00:02.819Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 1542307,
+        "cached": 8701300,
+        "in": 10246923,
+        "out": 93293
+       }
+      }
+     ],
+     [
+      "aaf953294ee06a684",
+      {
+       "finishedMs": 1785225902232,
+       "label": "liveflow:research #1",
+       "runtime": "5m00s",
+       "started": "2026-07-28T08:00:03.170Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 362786,
+        "cached": 1863551,
+        "in": 2227004,
+        "out": 25896
+       }
+      }
+     ],
+     [
+      "ad97f70de5027ae8f",
+      {
+       "finishedMs": 1785225789465,
+       "label": "sessionjsonl:research #1",
+       "runtime": "3m06s",
+       "started": "2026-07-28T08:00:03.278Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 224122,
+        "cached": 1162044,
+        "in": 1386671,
+        "out": 11182
+       }
+      }
+     ],
+     [
+      "a6a6a70d89c9e0a8b",
+      {
+       "finishedMs": 1785226265276,
+       "label": "frontend-render:research #1",
+       "runtime": "11m01s",
+       "started": "2026-07-28T08:00:04.087Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 702921,
+        "cached": 4483255,
+        "in": 5188120,
+        "out": 49480
+       }
+      }
+     ],
+     [
+      "aaad4a6a72aecf3cb",
+      {
+       "finishedMs": 1785227751427,
+       "label": "write-side:research #1",
+       "runtime": "14m12s",
+       "started": "2026-07-28T08:21:40.135Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 1076203,
+        "cached": 5241490,
+        "in": 6320159,
+        "out": 67047
+       }
+      }
+     ],
+     [
+      "ac8bd4e2827ec60df",
+      {
+       "finishedMs": 1785228122193,
+       "label": "server-read:research #1",
+       "runtime": "20m21s",
+       "started": "2026-07-28T08:21:42.321Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 1186178,
+        "cached": 6995532,
+        "in": 8185090,
+        "out": 77023
+       }
+      }
+     ]
+    ],
+    "firstTs": "2026-07-28T08:00:00.000+00:00",
+    "lastTs": "2026-07-28T08:42:04.969+00:00",
+    "log": [
+     {
+      "detail": "research closed",
+      "stage": "plan",
+      "state": "done",
+      "ts": "2026-07-28T08:42:04.969+00:00"
+     },
+     {
+      "detail": "server-read:research #1 used in 8185.1k - r:6995.5k w:1186.2k \u00b7 out 77.0k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:42:02.447Z"
+     },
+     {
+      "detail": "server-read:research #1: complete",
+      "stage": "server-read",
+      "state": "done",
+      "ts": "2026-07-28T08:42:02.193Z"
+     },
+     {
+      "detail": "write-side:research #1 used in 6320.2k - r:5241.5k w:1076.2k \u00b7 out 67.0k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:35:51.424Z"
+     },
+     {
+      "detail": "write-side:research #1: complete",
+      "stage": "write-side",
+      "state": "done",
+      "ts": "2026-07-28T08:35:51.427Z"
+     },
+     {
+      "detail": "attempt 1: server-read pass",
+      "stage": "server-read",
+      "state": "running",
+      "ts": "2026-07-28T08:27:48.805+00:00"
+     },
+     {
+      "detail": "attempt 1: write-side pass",
+      "stage": "write-side",
+      "state": "running",
+      "ts": "2026-07-28T08:25:55.984+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "server-read",
+      "state": "running",
+      "ts": "2026-07-28T08:23:44.766+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "write-side",
+      "state": "running",
+      "ts": "2026-07-28T08:23:05.385+00:00"
+     },
+     {
+      "detail": "server-read attempt 1 spawned",
+      "stage": "server-read",
+      "state": "running",
+      "ts": "2026-07-28T08:21:42.264Z"
+     },
+     {
+      "detail": "write-side attempt 1 spawned",
+      "stage": "write-side",
+      "state": "running",
+      "ts": "2026-07-28T08:21:40.007Z"
+     },
+     {
+      "detail": "convo:research #1 used in 10246.9k - r:8701.3k w:1542.3k \u00b7 out 93.3k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:21:38.116Z"
+     },
+     {
+      "detail": "convo:research #1: complete",
+      "stage": "convo",
+      "state": "done",
+      "ts": "2026-07-28T08:21:36.626Z"
+     },
+     {
+      "detail": "customstate:research #1 used in 6381.4k - r:5407.1k w:972.0k \u00b7 out 50.1k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:15:18.903Z"
+     },
+     {
+      "detail": "customstate:research #1: rejected",
+      "stage": "customstate",
+      "state": "failed",
+      "ts": "2026-07-28T08:15:19.197Z"
+     },
+     {
+      "detail": "frontend-render:research #1 used in 5188.1k - r:4483.3k w:702.9k \u00b7 out 49.5k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:11:04.303Z"
+     },
+     {
+      "detail": "frontend-render:research #1: complete",
+      "stage": "frontend-render",
+      "state": "done",
+      "ts": "2026-07-28T08:11:05.276Z"
+     },
+     {
+      "detail": "mongoschema:research #1 used in 4564.7k - r:3868.7k w:694.2k \u00b7 out 45.0k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:10:54.432Z"
+     },
+     {
+      "detail": "mongoschema:research #1: complete",
+      "stage": "mongoschema",
+      "state": "done",
+      "ts": "2026-07-28T08:10:53.160Z"
+     },
+     {
+      "detail": "attempt 1: writing findings",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:10:51.038+00:00"
+     },
+     {
+      "detail": "attempt 1: convo pass",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:06:31.731+00:00"
+     },
+     {
+      "detail": "attempt 1: writing findings",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T08:05:28.324+00:00"
+     },
+     {
+      "detail": "liveflow:research #1 used in 2227.0k - r:1863.6k w:362.8k \u00b7 out 25.9k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:05:03.379Z"
+     },
+     {
+      "detail": "liveflow:research #1: complete",
+      "stage": "liveflow",
+      "state": "done",
+      "ts": "2026-07-28T08:05:02.232Z"
+     },
+     {
+      "detail": "attempt 1: customstate pass",
+      "stage": "customstate",
+      "state": "running",
+      "ts": "2026-07-28T08:04:38.348+00:00"
+     },
+     {
+      "detail": "attempt 1: frontend-render pass",
+      "stage": "frontend-render",
+      "state": "running",
+      "ts": "2026-07-28T08:03:22.583+00:00"
+     },
+     {
+      "detail": "attempt 1: mongoschema pass",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T08:03:18.053+00:00"
+     },
+     {
+      "detail": "sessionjsonl:research #1 used in 1386.7k - r:1162.0k w:224.1k \u00b7 out 11.2k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:03:08.419Z"
+     },
+     {
+      "detail": "sessionjsonl:research #1: complete",
+      "stage": "sessionjsonl",
+      "state": "done",
+      "ts": "2026-07-28T08:03:09.465Z"
+     },
+     {
+      "detail": "attempt 1: writing findings",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:02:33.609+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:02:12.423+00:00"
+     },
+     {
+      "detail": "attempt 1: writing findings",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:01:36.627+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "customstate",
+      "state": "running",
+      "ts": "2026-07-28T08:01:34.523+00:00"
+     },
+     {
+      "detail": "attempt 1: liveflow pass",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:01:33.453+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "frontend-render",
+      "state": "running",
+      "ts": "2026-07-28T08:01:10.502+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T08:01:07.431+00:00"
+     },
+     {
+      "detail": "attempt 1: sessionjsonl pass",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:00:59.287+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:00:33.298+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:00:21.948+00:00"
+     },
+     {
+      "detail": "frontend-render attempt 1 spawned",
+      "stage": "frontend-render",
+      "state": "running",
+      "ts": "2026-07-28T08:00:02.941Z"
+     },
+     {
+      "detail": "sessionjsonl attempt 1 spawned",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:00:01.416Z"
+     },
+     {
+      "detail": "liveflow attempt 1 spawned",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:00:03.156Z"
+     },
+     {
+      "detail": "convo attempt 1 spawned",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:00:01.770Z"
+     },
+     {
+      "detail": "customstate attempt 1 spawned",
+      "stage": "customstate",
+      "state": "running",
+      "ts": "2026-07-28T08:00:00.643Z"
+     },
+     {
+      "detail": "mongoschema attempt 1 spawned",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T08:00:01.589Z"
+     },
+     {
+      "detail": "research loop opening",
+      "stage": "plan",
+      "state": "running",
+      "ts": "2026-07-28T08:00:00.470+00:00"
+     },
+     {
+      "detail": "research queued by the driver",
+      "stage": "plan",
+      "state": "queued",
+      "ts": "2026-07-28T08:00:00.000+00:00"
+     }
+    ],
+    "logTotal": 47,
+    "roles": [
+     [
+      "mongoschema:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "customstate:research",
+      {
+       "attempt": 1,
+       "state": "failed"
+      }
+     ],
+     [
+      "convo:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "liveflow:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "sessionjsonl:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "frontend-render:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "write-side:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "server-read:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ]
+    ],
+    "stages": [
+     [
+      "mongoschema",
+      "done"
+     ],
+     [
+      "customstate",
+      "failed"
+     ],
+     [
+      "convo",
+      "done"
+     ],
+     [
+      "liveflow",
+      "done"
+     ],
+     [
+      "sessionjsonl",
+      "done"
+     ],
+     [
+      "frontend-render",
+      "done"
+     ],
+     [
+      "write-side",
+      "done"
+     ],
+     [
+      "server-read",
+      "done"
+     ]
+    ],
+    "state": "done",
+    "title": "Research",
+    "tok": {
+     "cached": 37722992,
+     "in": 44500071,
+     "out": 419013,
+     "write": 6760660
+    }
+   }
+  ],
+  [
+   "synthesis",
+   {
+    "agents": [
+     [
+      "a5b2b935158b4fef7",
+      {
+       "finishedMs": 1785228380523,
+       "label": "convo:research #1",
+       "runtime": "4m07s",
+       "started": "2026-07-28T08:42:14.902Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 356241,
+        "cached": 1924385,
+        "in": 2281353,
+        "out": 21191
+       }
+      }
+     ],
+     [
+      "a1c3bfc5a3378ce36",
+      {
+       "finishedMs": 1785229020914,
+       "label": "sessionjsonl:research #1",
+       "runtime": "14m47s",
+       "started": "2026-07-28T08:42:15.148Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 990626,
+        "cached": 5766179,
+        "in": 6759218,
+        "out": 56364
+       }
+      }
+     ],
+     [
+      "ac3bbbf8702fcc104",
+      {
+       "finishedMs": 1785229027538,
+       "label": "liveflow:research #1",
+       "runtime": "14m53s",
+       "started": "2026-07-28T08:42:16.422Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 981269,
+        "cached": 5323591,
+        "in": 6307668,
+        "out": 64321
+       }
+      }
+     ],
+     [
+      "a6d172d0d08983f19",
+      {
+       "finishedMs": null,
+       "label": "frontend-render:research #1",
+       "runtime": "6m04s",
+       "started": "2026-07-28T08:57:11.820Z",
+       "state": "stale",
+       "tokens": {
+        "cache_write": 304381,
+        "cached": 1847551,
+        "in": 2152981,
+        "out": 26418
+       }
+      }
+     ],
+     [
+      "ac8c77ee2cbe5fc6f",
+      {
+       "finishedMs": 1785230066625,
+       "label": "mongoschema:research #1",
+       "runtime": "17m15s",
+       "started": "2026-07-28T08:57:12.181Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 1149043,
+        "cached": 6486404,
+        "in": 7638358,
+        "out": 57120
+       }
+      }
+     ],
+     [
+      "acf0901b0e0fc1103",
+      {
+       "finishedMs": 1785230002017,
+       "label": "customstate:research #1",
+       "runtime": "16m09s",
+       "started": "2026-07-28T08:57:13.973Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 1026840,
+        "cached": 5414392,
+        "in": 6444186,
+        "out": 67937
+       }
+      }
+     ],
+     [
+      "a7ce68c5c08ef95c7",
+      {
+       "finishedMs": 1785230609180,
+       "label": "write-side:research #1",
+       "runtime": "9m00s",
+       "started": "2026-07-28T09:14:29.700Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 607538,
+        "cached": 2957044,
+        "in": 3566151,
+        "out": 33762
+       }
+      }
+     ],
+     [
+      "a731238ad21902935",
+      {
+       "finishedMs": 1785230979279,
+       "label": "server-read:research #1",
+       "runtime": "15m09s",
+       "started": "2026-07-28T09:14:30.530Z",
+       "state": "done",
+       "tokens": {
+        "cache_write": 934009,
+        "cached": 4959303,
+        "in": 5895741,
+        "out": 54621
+       }
+      }
+     ]
+    ],
+    "firstTs": "2026-07-28T08:00:00.035+00:00",
+    "lastTs": "2026-07-28T09:29:41.682+00:00",
+    "log": [
+     {
+      "detail": "synthesis closed",
+      "stage": "plan",
+      "state": "done",
+      "ts": "2026-07-28T09:29:41.682+00:00"
+     },
+     {
+      "detail": "server-read:research #1 used in 5895.7k - r:4959.3k w:934.0k \u00b7 out 54.6k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T09:29:39.687Z"
+     },
+     {
+      "detail": "server-read:research #1: complete",
+      "stage": "server-read",
+      "state": "done",
+      "ts": "2026-07-28T09:29:39.279Z"
+     },
+     {
+      "detail": "write-side:research #1: complete",
+      "stage": "write-side",
+      "state": "done",
+      "ts": "2026-07-28T09:23:29.180Z"
+     },
+     {
+      "detail": "attempt 1: server-read pass",
+      "stage": "server-read",
+      "state": "running",
+      "ts": "2026-07-28T09:19:03.615+00:00"
+     },
+     {
+      "detail": "attempt 1: write-side pass",
+      "stage": "write-side",
+      "state": "running",
+      "ts": "2026-07-28T09:17:12.104+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "server-read",
+      "state": "running",
+      "ts": "2026-07-28T09:16:01.525+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "write-side",
+      "state": "running",
+      "ts": "2026-07-28T09:15:23.835+00:00"
+     },
+     {
+      "detail": "server-read attempt 1 spawned",
+      "stage": "server-read",
+      "state": "running",
+      "ts": "2026-07-28T09:14:28.586Z"
+     },
+     {
+      "detail": "write-side attempt 1 spawned",
+      "stage": "write-side",
+      "state": "running",
+      "ts": "2026-07-28T09:14:27.703Z"
+     },
+     {
+      "detail": "mongoschema:research #1: complete",
+      "stage": "mongoschema",
+      "state": "done",
+      "ts": "2026-07-28T09:14:26.625Z"
+     },
+     {
+      "detail": "customstate:research #1 used in 6444.2k - r:5414.4k w:1026.8k \u00b7 out 67.9k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T09:13:22.992Z"
+     },
+     {
+      "detail": "customstate:research #1: complete",
+      "stage": "customstate",
+      "state": "done",
+      "ts": "2026-07-28T09:13:22.017Z"
+     },
+     {
+      "detail": "frontend-render:research #1 abandoned \u2014 no transcript activity",
+      "stage": "frontend-render",
+      "state": "stale",
+      "ts": "2026-07-28T09:03:15.731Z"
+     },
+     {
+      "detail": "attempt 1: mongoschema pass",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T09:02:23.137+00:00"
+     },
+     {
+      "detail": "attempt 1: customstate pass",
+      "stage": "customstate",
+      "state": "running",
+      "ts": "2026-07-28T09:02:04.682+00:00"
+     },
+     {
+      "detail": "attempt 1: frontend-render pass",
+      "stage": "frontend-render",
+      "state": "running",
+      "ts": "2026-07-28T08:59:01.119+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T08:58:55.933+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "customstate",
+      "state": "running",
+      "ts": "2026-07-28T08:58:51.126+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "frontend-render",
+      "state": "running",
+      "ts": "2026-07-28T08:57:48.536+00:00"
+     },
+     {
+      "detail": "customstate attempt 1 spawned",
+      "stage": "customstate",
+      "state": "running",
+      "ts": "2026-07-28T08:57:11.781Z"
+     },
+     {
+      "detail": "mongoschema attempt 1 spawned",
+      "stage": "mongoschema",
+      "state": "running",
+      "ts": "2026-07-28T08:57:10.000Z"
+     },
+     {
+      "detail": "frontend-render attempt 1 spawned",
+      "stage": "frontend-render",
+      "state": "running",
+      "ts": "2026-07-28T08:57:11.725Z"
+     },
+     {
+      "detail": "liveflow:research #1 used in 6307.7k - r:5323.6k w:981.3k \u00b7 out 64.3k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:57:08.388Z"
+     },
+     {
+      "detail": "liveflow:research #1: complete",
+      "stage": "liveflow",
+      "state": "done",
+      "ts": "2026-07-28T08:57:07.538Z"
+     },
+     {
+      "detail": "sessionjsonl:research #1: complete",
+      "stage": "sessionjsonl",
+      "state": "done",
+      "ts": "2026-07-28T08:57:00.914Z"
+     },
+     {
+      "detail": "attempt 1: liveflow pass",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:46:44.721+00:00"
+     },
+     {
+      "detail": "attempt 1: sessionjsonl pass",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:46:41.640+00:00"
+     },
+     {
+      "detail": "convo:research #1 used in 2281.4k - r:1924.4k w:356.2k \u00b7 out 21.2k total",
+      "stage": "tokens",
+      "state": "info",
+      "ts": "2026-07-28T08:46:19.894Z"
+     },
+     {
+      "detail": "convo:research #1: complete",
+      "stage": "convo",
+      "state": "done",
+      "ts": "2026-07-28T08:46:20.523Z"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:43:45.921+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:43:44.012+00:00"
+     },
+     {
+      "detail": "attempt 1: convo pass",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:43:29.156+00:00"
+     },
+     {
+      "detail": "attempt 1: implementing",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:42:39.654+00:00"
+     },
+     {
+      "detail": "liveflow attempt 1 spawned",
+      "stage": "liveflow",
+      "state": "running",
+      "ts": "2026-07-28T08:42:13.957Z"
+     },
+     {
+      "detail": "sessionjsonl attempt 1 spawned",
+      "stage": "sessionjsonl",
+      "state": "running",
+      "ts": "2026-07-28T08:42:14.545Z"
+     },
+     {
+      "detail": "convo attempt 1 spawned",
+      "stage": "convo",
+      "state": "running",
+      "ts": "2026-07-28T08:42:12.675Z"
+     },
+     {
+      "detail": "synthesis loop opening",
+      "stage": "plan",
+      "state": "running",
+      "ts": "2026-07-28T08:42:12.467+00:00"
+     },
+     {
+      "detail": "synthesis queued by the driver",
+      "stage": "plan",
+      "state": "queued",
+      "ts": "2026-07-28T08:00:00.035+00:00"
+     }
+    ],
+    "logTotal": 39,
+    "roles": [
+     [
+      "convo:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "sessionjsonl:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "liveflow:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "frontend-render:research",
+      {
+       "attempt": 1,
+       "state": "stale"
+      }
+     ],
+     [
+      "mongoschema:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "customstate:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "write-side:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ],
+     [
+      "server-read:research",
+      {
+       "attempt": 1,
+       "state": "done"
+      }
+     ]
+    ],
+    "stages": [
+     [
+      "convo",
+      "done"
+     ],
+     [
+      "sessionjsonl",
+      "done"
+     ],
+     [
+      "liveflow",
+      "done"
+     ],
+     [
+      "frontend-render",
+      "stale"
+     ],
+     [
+      "mongoschema",
+      "done"
+     ],
+     [
+      "customstate",
+      "done"
+     ],
+     [
+      "write-side",
+      "done"
+     ],
+     [
+      "server-read",
+      "done"
+     ]
+    ],
+    "state": "done",
+    "title": "Synthesis",
+    "tok": {
+     "cached": 34678849,
+     "in": 41045656,
+     "out": 381734,
+     "write": 6349947
+    }
+   }
+  ],
+  [
+   "orchestrator",
+   {
+    "agents": [],
+    "firstTs": "2026-07-28T08:00:00.070+00:00",
+    "lastTs": "2026-07-28T09:30:01.341+00:00",
+    "log": [
+     {
+      "detail": "run complete",
+      "stage": "complete",
+      "state": "done",
+      "ts": "2026-07-28T09:30:01.341+00:00"
+     },
+     {
+      "detail": "verdict synthesis server-read attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:29:38.268Z"
+     },
+     {
+      "detail": "verdict synthesis write-side attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:23:28.273Z"
+     },
+     {
+      "detail": "spawn synthesis server-read attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:14:28.921Z"
+     },
+     {
+      "detail": "spawn synthesis write-side attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:14:28.752Z"
+     },
+     {
+      "detail": "verdict synthesis mongoschema attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:14:26.201Z"
+     },
+     {
+      "detail": "verdict synthesis customstate attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:13:21.581Z"
+     },
+     {
+      "detail": "verdict synthesis frontend-render attempt 1: stale",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T09:03:14.291Z"
+     },
+     {
+      "detail": "spawn synthesis customstate attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:57:11.821Z"
+     },
+     {
+      "detail": "spawn synthesis mongoschema attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:57:11.420Z"
+     },
+     {
+      "detail": "spawn synthesis frontend-render attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:57:11.741Z"
+     },
+     {
+      "detail": "verdict synthesis liveflow attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:57:07.916Z"
+     },
+     {
+      "detail": "verdict synthesis sessionjsonl attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:57:01.813Z"
+     },
+     {
+      "detail": "verdict synthesis convo attempt 1: done",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:46:20.273Z"
+     },
+     {
+      "detail": "spawn synthesis liveflow attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:42:15.654Z"
+     },
+     {
+      "detail": "spawn synthesis sessionjsonl attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:42:14.108Z"
+     },
+     {
+      "detail": "spawn synthesis convo attempt 1",
+      "stage": "synthesis",
+      "state": "running",
+      "ts": "2026-07-28T08:42:13.882Z"
+     },
+     {
+      "detail": "verdict research server-read attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:42:03.716Z"
+     },
+     {
+      "detail": "verdict research write-side attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:35:51.581Z"
+     },
+     {
+      "detail": "spawn research server-read attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:21:39.994Z"
+     },
+     {
+      "detail": "spawn research write-side attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:21:39.074Z"
+     },
+     {
+      "detail": "verdict research convo attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:21:36.581Z"
+     },
+     {
+      "detail": "verdict research customstate attempt 1: failed",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:15:20.012Z"
+     },
+     {
+      "detail": "verdict research frontend-render attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:11:04.601Z"
+     },
+     {
+      "detail": "verdict research mongoschema attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:10:53.824Z"
+     },
+     {
+      "detail": "verdict research liveflow attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:05:01.445Z"
+     },
+     {
+      "detail": "verdict research sessionjsonl attempt 1: done",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:03:07.094Z"
+     },
+     {
+      "detail": "spawn research frontend-render attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:00:01.766Z"
+     },
+     {
+      "detail": "spawn research sessionjsonl attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:00:01.185Z"
+     },
+     {
+      "detail": "spawn research liveflow attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:00:02.859Z"
+     },
+     {
+      "detail": "spawn research convo attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:00:00.745Z"
+     },
+     {
+      "detail": "spawn research customstate attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:00:02.415Z"
+     },
+     {
+      "detail": "spawn research mongoschema attempt 1",
+      "stage": "research",
+      "state": "running",
+      "ts": "2026-07-28T08:00:00.255Z"
+     },
+     {
+      "detail": "run launching",
+      "stage": "plan",
+      "state": "running",
+      "ts": "2026-07-28T08:00:00.070+00:00"
+     }
+    ],
+    "logTotal": 34,
+    "roles": [],
+    "stages": [
+     [
+      "research",
+      "running"
+     ],
+     [
+      "synthesis",
+      "running"
+     ]
+    ],
+    "state": "done",
+    "title": "Orchestrator",
+    "tok": {
+     "cached": 0,
+     "in": 0,
+     "out": 0,
+     "write": 0
+    }
+   }
+  ]
+ ],
+ "quietCount": 1080,
+ "sig": "dd32dd510f3fa036",
+ "timeplan": {
+  "atRuns": 1,
+  "atSegs": 1,
+  "open": [],
+  "openAt": [
+   [
+    "synthesis",
+    1785225600035
+   ]
+  ],
+  "prevAt": 1785230492708,
+  "runs": [
+   {
+    "plan": "research",
+    "t0": 1785225600000,
+    "t1": 1785228124969
+   },
+   {
+    "plan": "synthesis",
+    "t0": 1785225600035,
+    "t1": 1785230981682
+   }
+  ],
+  "segs": [
+   {
+    "kind": "up",
+    "t0": 1785225600000,
+    "t1": 1785231001341
+   }
+  ],
+  "summary": {
+   "downMs": 0,
+   "end": 1785231001341,
+   "idleMs": 0,
+   "live": false,
+   "stallCount": 0,
+   "stallMax": 0,
+   "t0": 1785225600000,
+   "upMs": 5401341
+  },
+  "tailFrom": 1785230498045,
+  "tailTicks": [
+   {
+    "t": 1785230498045
+   },
+   {
+    "t": 1785230504025
+   },
+   {
+    "t": 1785230508239
+   },
+   {
+    "t": 1785230514548
+   },
+   {
+    "t": 1785230521459
+   },
+   {
+    "t": 1785230526094
+   },
+   {
+    "t": 1785230526832
+   },
+   {
+    "t": 1785230538743
+   },
+   {
+    "t": 1785230542732
+   },
+   {
+    "t": 1785230547721
+   },
+   {
+    "t": 1785230554627
+   },
+   {
+    "t": 1785230560769
+   },
+   {
+    "t": 1785230561307
+   },
+   {
+    "t": 1785230567415
+   },
+   {
+    "t": 1785230572654
+   },
+   {
+    "t": 1785230579075
+   },
+   {
+    "t": 1785230580608
+   },
+   {
+    "t": 1785230584383
+   },
+   {
+    "t": 1785230590632
+   },
+   {
+    "t": 1785230596052
+   },
+   {
+    "t": 1785230597050
+   },
+   {
+    "t": 1785230608273
+   },
+   {
+    "t": 1785230608311
+   },
+   {
+    "t": 1785230609180
+   },
+   {
+    "t": 1785230611509
+   },
+   {
+    "t": 1785230623798
+   },
+   {
+    "t": 1785230630295
+   },
+   {
+    "t": 1785230638072
+   },
+   {
+    "t": 1785230650310
+   },
+   {
+    "t": 1785230658296
+   },
+   {
+    "t": 1785230662698
+   },
+   {
+    "t": 1785230671865
+   },
+   {
+    "t": 1785230685004
+   },
+   {
+    "t": 1785230697506
+   },
+   {
+    "t": 1785230708067
+   },
+   {
+    "t": 1785230723653
+   },
+   {
+    "t": 1785230738402
+   },
+   {
+    "t": 1785230745255
+   },
+   {
+    "t": 1785230757233
+   },
+   {
+    "t": 1785230764237
+   },
+   {
+    "t": 1785230777504
+   },
+   {
+    "t": 1785230794194
+   },
+   {
+    "t": 1785230802027
+   },
+   {
+    "t": 1785230807015
+   },
+   {
+    "t": 1785230823949
+   },
+   {
+    "t": 1785230839472
+   },
+   {
+    "t": 1785230851783
+   },
+   {
+    "t": 1785230859927
+   },
+   {
+    "t": 1785230871412
+   },
+   {
+    "t": 1785230884897
+   },
+   {
+    "t": 1785230900642
+   },
+   {
+    "t": 1785230906473
+   },
+   {
+    "t": 1785230922401
+   },
+   {
+    "t": 1785230937622
+   },
+   {
+    "t": 1785230950497
+   },
+   {
+    "t": 1785230957074
+   },
+   {
+    "t": 1785230965347
+   },
+   {
+    "t": 1785230971339
+   },
+   {
+    "t": 1785230978268
+   },
+   {
+    "t": 1785230978876
+   },
+   {
+    "t": 1785230979279
+   },
+   {
+    "t": 1785230979687
+   },
+   {
+    "open": false,
+    "plan": "synthesis",
+    "t": 1785230981682
+   },
+   {
+    "closeAll": true,
+    "t": 1785231001341
+   }
+  ]
+ }
+}

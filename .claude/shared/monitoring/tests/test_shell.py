@@ -218,6 +218,178 @@ def test_docs_static():
     # M-2: signalling the watcher is safe because it drains first.
     check("ORCH_DRAIN_SECS" in md and "DRAIN" in md,
           "monitoring.md documents the shutdown drain and its window")
+    # M1/M14 (WRITE-SIDE-12/-13): the token-tick cadence knob, under BOTH
+    # spellings — the env var that PINS it and the orch-config key the watcher
+    # re-reads live. An operator who finds only one of them cannot tune a run.
+    check("ORCH_TOKEN_TICK_SECS" in md,
+          "monitoring.md documents the ORCH_TOKEN_TICK_SECS env knob")
+    check("token_tick_secs" in md,
+          "monitoring.md documents the token_tick_secs orch-config key")
+    # The cadence is a CEILING. A future reader who mistakes it for a heartbeat
+    # interval erases every stall segment the timeplan derives from gaps.
+    check("ceiling, never a floor" in md,
+          "monitoring.md states the cadence is a ceiling, not a heartbeat")
+    # M14 (DATA-MODEL-11): the token asymmetry. `tokens` is a delta and
+    # `agent.tokens` is absolute; the doc used to say so for only one of them,
+    # and a reader who assumes symmetry is wrong in one direction or the other.
+    check("**delta** (not absolute)" in md,
+          "monitoring.md still says the top-level tokens value is a delta")
+    check("ABSOLUTE running total, last-event-wins" in md,
+          "monitoring.md says agent.tokens is the absolute running total")
+    # M14 (WS-PROTOCOL-11): the reserved control key and the v1/v2 framing. The
+    # file schema is normative and unchanged; `m` is the one name spent so that
+    # additive EVENT keys stay legal.
+    check("Wire framing" in md,
+          "monitoring.md has a wire-framing section for the /ws protocol")
+    check("Reserved control key `m`" in md and "Events never carry `m`" in md,
+          "monitoring.md reserves the control key `m` and bars it from events")
+    check("additive event keys remain legal" in md,
+          "monitoring.md keeps additive event keys legal beside the reserved key")
+    check("server-declared, never sniffed" in md,
+          "monitoring.md pins version negotiation to the server's first frame")
+    # The refusal is quoted by the DISCRIMINATOR the server really sends, not
+    # by an abbreviated frame literal a reader could turn into a wrong assert:
+    # the shipped hello also carries v/task/foldGen (`_stream_v2`'s
+    # unknown-task branch).
+    check('"error":"unknown-task"' in md,
+          "monitoring.md documents the v2 unknown-task refusal")
+    # Its ENVELOPE is pinned by names in proximity, not by the 62 characters of
+    # contiguous pseudo-JSON the doc happens to print today: the literal sits
+    # inside a hand-wrapped numbered list, and re-wrapping it — or spelling the
+    # placeholder `"task":"<name>"` instead of `"task":…` — must not fail a test
+    # whose subject is still true. What matters is that the refusal is shown as
+    # a `hello` carrying the fold generation, not as a bare error string.
+    check(re.search(r'"m":"hello".{0,60}"error":"unknown-task"', md, re.S)
+          and '"foldGen"' in md,
+          "monitoring.md prints the unknown-task refusal as a hello with foldGen")
+    # Whitespace-normalised: the sentence is prose and may re-wrap; what must
+    # not change is that the catalogue is closed at these four names TODAY
+    # while unknown `m` values stay ignorable — a reader that treats an
+    # unrecognised control frame as an event breaks on the next added shape.
+    check(re.search(r"control catalogue is exactly four shapes — `hello`,\s+"
+                    r"`snapshot`,\s+`tail`,\s+`cursor`", md),
+          "monitoring.md enumerates the four v2 control frames")
+    check(re.search(r"\*\*ignore\*\* any other\s+`m` value rather than treat "
+                    r"it as an event", md),
+          "monitoring.md keeps the `m` space forward-compatible for readers")
+    # The resume rule: content sig + BYTE offset, and a wipe-and-rerun is
+    # refused rather than silently tailing a foreign stream at a stale offset.
+    # Pinned by the two JSON NAMES, not by a pseudo-JSON spelling: the doc
+    # prints proper `"key": value` literals, and an assert keyed on the exact
+    # punctuation would break on any later reflow of the same true claim.
+    check("sig-mismatch" in md and "fromApplied" in md,
+          "monitoring.md ties wipe-and-rerun to the sig-based resume refusal")
+    check(re.search(r"`offset` is a\s+\*\*byte\*\* offset — never a line number",
+                    md),
+          "monitoring.md pins the cursor offset to bytes, not line numbers")
+    # A digest over less than SIG_BYTES is not an identity yet (`_scan`'s
+    # `sig_short` / `sig_is_identity` pair) — a doc that omits this teaches a
+    # reader to trust a young stream's sig across an append.
+    check("sig_short" in md,
+          "monitoring.md notes the short-head sig caveat")
+    # WS-PROTOCOL-14: the tail poll is no longer a fixed 0.5 s. The doc must
+    # not pin a constant the server contradicts after 60 s of quiet.
+    check(re.search(r"0\.5 s while the stream is moving and back off to\s+"
+                    r"2 s after ~60 s of quiet", md),
+          "monitoring.md documents the idle poll backoff, not a fixed 0.5 s")
+    # The v1/v2 switch is `params.get("v") == "2"`, so `v=1`, `v=3` and
+    # `v=banana` all take the v1 path. "no `v` in the query" read as if only the
+    # absent parameter did, leaving a client that pins `v=1` — the natural
+    # reading of "protocol v1" — undocumented.
+    check(re.search(r"\*\*v1 — anything but `v=2` in the query", md),
+          "monitoring.md scopes v1 to anything but the exact string v=2")
+    # There is NO truncation frame: `read_events`' `-1` is server-internal, it
+    # trips `_reset`, which sets `sub.closed`; the socket then gets the same
+    # bare CLOSE any teardown sends. A client implementer must not go hunting
+    # for a sentinel frame that never travels.
+    check(re.search(r"no sentinel\s+\*frame\* on the wire", md)
+          and "server-internal" in md,
+          "monitoring.md does not invent a truncation sentinel frame")
+    # `snap` grammar: `1` is legal AND the default, and an unrecognised value is
+    # coerced to `1` and named in `ignored` — the hello paragraph promises every
+    # unhonoured parameter is named, so the one that can be silently rewritten
+    # has to say so.
+    check("[&snap=0|1|verify]" in md,
+          "monitoring.md's v2 grammar admits the default snap=1")
+    check(re.search(r"an unrecognised `snap` value falls back to\s+`1` and is "
+                    r"listed in the hello's `ignored`", md),
+          "monitoring.md states the snap coercion and its disclosure")
+    # An accepted resume is NOT "no frames": the gap between the client's
+    # cursor and the server's offset still travels as ordinary array frames
+    # (`_stream_v2`'s `if from_applied:` branch sets `replay_from`). The old
+    # wording said "neither".
+    check(re.search(r"An accepted resume sends no snapshot; if\s+the client's "
+                    r"cursor is behind the server's offset, the gap travels "
+                    r"first as\s+ordinary array frames", md),
+          "monitoring.md states that an accepted resume still ships the gap")
+    # The cursor follows every tick that CONSUMED events, poison included
+    # (`_tail_loop_client`'s `if sent and v2:` guard) — a reader keyed on
+    # "n > 0" resumes stale.
+    check(re.search(r"after every tick that \*\*consumed\*\* events", md)
+          and "`n: 0`" in md,
+          "monitoring.md ties the cursor frame to consumed, not delivered, events")
+    # `0` disables the ceiling; it does not turn the watcher into a heartbeat.
+    check(re.search(r"a line on every poll\s+tick that has a non-zero delta",
+                    md),
+          "monitoring.md keeps `0` behind the non-zero-delta guard")
+    # A rejected resume gets the prelude ITS MODE calls for — under `snap=0`
+    # that is raw history, no snapshot at all (`_stream_v2`'s else-branch sets
+    # `replay_from = 0`). "Always a snapshot" is wrong in the one mode an
+    # operator reaches for when a resume is misbehaving.
+    check(re.search(r"answered with the full\s+prelude the mode calls for", md),
+          "monitoring.md does not promise a snapshot for every rejected resume")
+    # M14/M1 cross-section consistency: the TIMEPLAN's cadence rationale and
+    # the Token-math knob description must quote the SAME ceiling. They sit
+    # ~40 lines apart and the old "every few seconds" line survived one edit
+    # pass while its sibling was fixed — the two readings cannot both be true,
+    # and an operator holding the stale one mis-reads short gaps as outages.
+    check(re.search(r"Token ticks land at most once per\s+agent per "
+                    r"`token_tick_secs` \(default 15 s\)", md),
+          "monitoring.md's timeplan section quotes the real tick ceiling")
+    # The Token-math half needs its OWN verbatim pin: a count alone cannot
+    # detect the half-applied fix it is supposed to guard (the token occurs in
+    # the orch-config row and the quiet bullet too, so a `>= 2` survives
+    # deleting BOTH sections this assert names).
+    check(re.search(r"Live ticks are throttled per agent\s+"
+                    r"\(`token_tick_secs`, default 15 s\)", md),
+          "monitoring.md's Token-math section quotes the same tick ceiling")
+    check(md.count("`token_tick_secs`") >= 3,
+          "monitoring.md names token_tick_secs in the config row, the timeplan "
+          "and token math")
+    # The THIRD statement of the same ceiling: the Timestamps bullet. It used to
+    # promise "live events lag ≤1 s", which the shipped cadence misses by 15× —
+    # the ceiling gates the transcript READ (`token_tick_due` sits before
+    # `agent_tokens`) and the tick is emitted with no `ts`, so `emit()` stamps
+    # the observation moment. 91 % of a measured stream is `stage=="tokens"`,
+    # so this is the common case, not an edge one.
+    check("live events lag ≤1 s" not in md,
+          "monitoring.md no longer promises a ≤1 s stamp for every live event")
+    check(re.search(r"a token tick up\s+to `token_tick_secs` \(default 15 s\) "
+                    r"after the transcript growth", md),
+          "monitoring.md's Timestamps bullet dates a token tick by the ceiling")
+    # …and the socket poll is attributed to the SOCKET. `POLL_SECS`/
+    # `IDLE_POLL_SECS` are monitor_server.py constants: they change when the
+    # page is told, never a timestamp already on disk (the watcher's own
+    # journal poll is `poll_sleep(seconds=1.0)`, deliberately left at 1 s).
+    check(re.search(r"Delivery to the page adds the socket poll", md)
+          and re.search(r"cannot move a stamp already\s+written to disk", md),
+          "monitoring.md separates delivery latency from the watcher's stamp")
+    # An accepted resume skips the SNAPSHOT, not "the prelude": `hello` and the
+    # ONE `{"m":"tail",…}` boundary are written unconditionally (`_stream_v2`).
+    # The Behavior-notes summary is what most readers actually read, so it must
+    # not restate the error the normative section above it already corrects.
+    check(re.search(r"carries a valid cursor skips the \*\*snapshot\*\*", md)
+          and "boundary frame, then resumes the tail" in md,
+          "monitoring.md's reconnect summary skips the snapshot, not the prelude")
+    # The LAST "full replay on connect" claim in the file (the completed-tasks
+    # bullet) describes the same act as the connect bullet 60 lines above it,
+    # which v2 turned into a hydration. Both or neither — a survivor here is the
+    # same half-applied-fix shape as the timeplan/token-math pair above.
+    check(re.search(r"hydrates \(or, on a\s+v1 socket or under `\?snap=0`, "
+                    r"replays\) the full event history on connect", md),
+          "monitoring.md's never-delete bullet describes hydration, not replay")
+    check(re.search(r"replays the full\s+event history on connect", md) is None,
+          "no unconditional full-replay-on-connect claim survives in monitoring.md")
 
 
 # --- R-39: every status.sh line is attributed to its writer
