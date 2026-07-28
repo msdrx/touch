@@ -459,7 +459,7 @@ const plans = new Map();
 // a fold rule changes; a snapshot whose foldGen we do not recognise is
 // DISCARDED and a full replay (?snap=0) requested, so drift fails safe instead
 // of rendering a state built by other rules (DATA-MODEL-9).
-const FOLD_GEN = 1;
+const FOLD_GEN = 2;
 // Per-plan DOM/buffer cap for the log. Every growing collection on this page is
 // capped and every cap is disclosed on screen (LOG_CAP here, TP_TAIL_MAX for
 // the timeplan reorder window) — Touch's LOG_MAX/OLDER_MAX/SEEN_MAX house rule.
@@ -2430,6 +2430,15 @@ function applySnapshot(snap) {
   for (const pair of (Array.isArray(snap.plans) ? snap.plans : [])) {
     if (!Array.isArray(pair)) continue;
     hydratePlan(planEl(pair[0]), pair[1] || {});
+  }
+  // Roster is fold state on the orchestrator card (FOLD_GEN 2): without this
+  // a hydrated view silently drops the planned-sub-plans list a replayed view
+  // shows — the exact class of skew GD-C forbids.
+  if (Array.isArray(snap.roster) && snap.roster.length && plans.has("orchestrator")) {
+    const o = plans.get("orchestrator");
+    o.roster = snap.roster.filter((x) => typeof x === "string" && x)
+      .slice(0, 200).map((s) => s.slice(0, 300));
+    o.subplansKey = "";
   }
   if (verifyState) verifyState.armed = true;
   render();        // ONE render for the whole snapshot

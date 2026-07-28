@@ -1,6 +1,6 @@
 {
  "evCount": 1200,
- "foldGen": 1,
+ "foldGen": 2,
  "kind": "monitor-snapshot",
  "logTruncated": false,
  "m": "snapshot",
@@ -1240,6 +1240,7 @@
   ]
  ],
  "quietCount": 1080,
+ "roster": [],
  "sig": "dd32dd510f3fa036",
  "timeplan": {
   "atRuns": 1,

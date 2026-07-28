@@ -748,6 +748,10 @@ def roster_guards(src):
         "ROSTER: an entry whose loop already has a card must not render twice"
     assert ".subplans li.planned .dot" in src, \
         "ROSTER: planned bullets need their hollow-dot style"
+    snap_slice = _slice(src, "function applySnapshot(", "function snapNum")
+    assert "snap.roster" in snap_slice, \
+        "ROSTER: v2 snapshot hydration must apply the fold's roster (FOLD_GEN 2) — " \
+        "without it a hydrated view drops what a full replay shows"
 
 
 if __name__ == "__main__":

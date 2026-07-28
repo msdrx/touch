@@ -103,7 +103,7 @@ DEFAULT_TASK = os.path.basename(STATE_DIR.rstrip(os.sep)) or "default"
 # recognise discards the snapshot and asks for `?snap=0` (full replay) instead
 # of silently rendering a state built by different rules (DATA-MODEL-9).
 # --------------------------------------------------------------------------
-FOLD_GEN = 1
+FOLD_GEN = 2
 
 # Timeplan thresholds. Mirrored literals of monitor.html:962/964 — the server
 # derives the same segments the page would derive, so they MUST agree; they are
@@ -482,6 +482,7 @@ class Fold:
         self.ev_count = 0
         self.quiet_count = 0
         self.plan_total = 0
+        self.roster = []             # planned sub-plan roster (latest wins)
         self.log_truncated = False   # set by snapshot(): did the budget cut?
         self.tp = TimePlan()
 
@@ -634,6 +635,12 @@ class Fold:
                 n = None
             if n is not None and n > self.plan_total and n <= 9999:
                 self.plan_total = n        # monotonic max, bounded (untrusted)
+        if pid == "orchestrator" and isinstance(ev.get("roster"), list):
+            # Planned sub-plan roster (driver-emitted, latest wins). Part of
+            # the fold — a snapshot must carry it or hydration drops it
+            # (FOLD_GEN 2). Untrusted: strings only, bounded count + length.
+            self.roster = [str(x)[:300] for x in ev["roster"]
+                           if isinstance(x, str) and x][:200]
         agent = ev.get("agent")
         if isinstance(agent, dict) and agent.get("id"):
             self._upsert_agent(p, agent, ts, ts_ms)
@@ -751,7 +758,7 @@ class Fold:
                 "sig": sig, "offset": offset,
                 "evCount": self.ev_count, "quietCount": self.quiet_count,
                 "planTotal": self.plan_total, "parseFailures": self.parse_failures,
-                "logTruncated": self.log_truncated,
+                "logTruncated": self.log_truncated, "roster": self.roster,
                 "plans": plans, "timeplan": self.tp.build()}
 
     def status(self) -> dict:
