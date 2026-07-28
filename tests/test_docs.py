@@ -153,7 +153,7 @@ def test_claude_md_pointers_and_no_omnigent():
     print("test_claude_md_pointers_and_no_omnigent")
     text = read(CLAUDE)
     for token in ("inception.md", "touch-aggregator-plan.md",
-                  "touch-full-recon-plan.md", "touch-orchestrate"):
+                  "touch-full-recon-plan.md", "plugin/touch/skills/orchestrate"):
         check(token in text, f"CLAUDE.md points at {token}")
     check("omnigent" not in text.lower(),
           "CLAUDE.md does not claim the run history came from `omnigent`")

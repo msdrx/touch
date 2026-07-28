@@ -132,7 +132,7 @@ empty ones carry a `.gitkeep`.
 - Handoff between attempts is via `findings/<plan>-<gate>-attempt-<N>.md` file
   paths, not inlined text.
 - Never resume/continue/`SendMessage` a prior agent — always a fresh subagent.
-- `.claude/skills/touch-orchestrate/SKILL.md` is the companion standard for
+- `plugin/touch/skills/orchestrate/SKILL.md` is the companion standard for
   spawning agents Touch can see and stop (hierarchical names, `[touch]` marker,
   spawn ledger, control-file loop).
 

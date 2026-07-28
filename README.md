@@ -1,7 +1,7 @@
 # Touch
 
 <p align="center">
-  <img src="resources/touch_the_agent.jpg" alt="The Creation of Adam — touch the agent" width="820">
+  <img src="https://github.com/msdrx/touch/blob/main/resources/touch_the_agent.png" alt="The Creation of Adam — touch the agent" width="820">
 </p>
 
 Touch shows you what the subagents in a Claude Code session are actually
