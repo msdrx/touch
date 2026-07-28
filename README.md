@@ -1,16 +1,126 @@
 # Touch
 
-A web page for visualizing and managing subagents in a Claude Code session.
+<p align="center">
+  <img src="resources/touch_the_agent.jpg" alt="The Creation of Adam — touch the agent" width="820">
+</p>
 
-Two components: **aggregator** (Python, reads `~/.claude` and this repo's run
-folders, serves HTTP + WebSocket) and **touch-visual** (the page: session
-sidebar, agent/loop views, n8n-like run graphs). The "loops" Touch renders are
-exactly the ones the `execute-research` and `implement-plan` skills in
-`.claude/skills/` define — task, plan, sub-plan, agent, attempt, gate.
+Touch shows you what the subagents in a Claude Code session are actually
+doing: a session sidebar, the live agent tree, per-loop cards and running
+token counters, served as a local web page over the transcripts the CLI
+already writes. It ships as a Claude Code plugin, together with four
+orchestration skills whose research → plan → implementation loops report to
+the same dashboards that render them.
 
 Touch never writes to `~/.claude`. It tails it, keeps its own history under
-`.touch/` (because the CLI's retention sweep deletes transcripts), and
+`.touch/` in your project (the CLI's retention sweep deletes transcripts), and
 optionally mirrors that history into a local MongoDB.
+
+Version 0.1.0 is **read-only**: it renders no button it cannot honestly
+honour, so nothing here starts, stops or restarts anything yet.
+
+## Install
+
+From any Claude Code session:
+
+```
+/plugin marketplace add msdrx/touch-plugin
+/plugin install touch@msdrx-tools
+```
+
+Then `/reload-plugins`. Touch installs **disabled** (`defaultEnabled: false`)
+because it carries a `PreToolUse` hook — enable it from `/plugin` after
+reading the plugin's own [README](plugin/touch/README.md), which discloses
+what it reads, what it writes, what it serves, and what the hook costs. The
+same file ships inside the plugin.
+
+Want to read the code before registering anything? Run it straight from a
+clone of this repository, for one session, with nothing installed:
+
+```
+claude --plugin-dir plugin/touch
+```
+
+### Verify the install
+
+From the project you want to use it in:
+
+```
+touch-selfcheck
+```
+
+Eight checks, one `PASS`/`FAIL` line each — the Python 3.11 floor, the right
+aggregator on the import path, the web assets, the project root, task state
+resolving into your project (never into the plugin's own directory), a
+bindable loopback port, intact exec bits, and one event surviving a real
+write-and-read round trip. It exits non-zero on any failure and ends with the
+command to run next.
+
+## Use
+
+```
+touch-serve
+```
+
+It prints a loopback URL carrying a per-boot token —
+`http://127.0.0.1:8932/?token=<per-boot token>` — and writes the same URL to
+`.touch/server.json`. Open it and you get the sessions of the project you
+started it in. Every route except `/health` requires the token; the server
+binds `127.0.0.1` only, and the wrappers refuse to open a public bind on your
+behalf. To reach the page from another machine, forward the port over SSH
+(`ssh -L 8932:127.0.0.1:8932 you@host`) instead of exposing it.
+
+The four skills invoke under the plugin's namespace:
+
+| skill | what it does |
+|---|---|
+| `/touch:execute-research` | parallel read-only researchers, then one synthesizer that writes a single complete plan |
+| `/touch:implement-plan` | divide a plan by file ownership, then run gated implement → test → critique loops per sub-plan |
+| `/touch:orchestrate` | the naming, spawn-ledger and control-file standards that make subagents visible to the dashboard |
+| `/touch:m-orchestrator` | wire live monitoring into an orchestrator you write yourself |
+
+Orchestration runs get their own dashboard: `touch-monitor` (port 8931, same
+loopback-and-token posture), plus `touch-status`, `touch-watcher` and
+`touch-cycle-reporter`. The skills call these by name; you rarely need to.
+
+## Update / uninstall
+
+Third-party marketplaces do **not** auto-update by default, so a new release
+reaches you when you ask for it:
+
+```
+/plugin marketplace update msdrx-tools
+/plugin update touch@msdrx-tools
+/reload-plugins
+```
+
+To remove it, uninstall `touch` from `/plugin` → installed plugins, then
+`/reload-plugins`. Beyond the plugin cache, the only things Touch leaves
+behind are `.touch/` and any `.claude/local-orchestrators/<task>/` run
+folders in the projects you used it in; delete those if you want the history
+gone too.
+
+## Running from this repository
+
+The aggregator is plain Python 3 stdlib — nothing to install:
+
+```bash
+python3 -m aggregator.server                 # binds 127.0.0.1:8932
+# prints:  open: http://127.0.0.1:8932/?token=<per-boot token>
+#          token written to .touch/server.json (0600)
+```
+
+Every route except `/health` requires that per-boot token, and the WebSocket
+upgrade enforces an Origin/Host allowlist.
+
+Tests — stdlib only, no pytest; every file is a standalone executable:
+
+```bash
+tests/run_all.sh              # both suites; --keep-going to see every failure
+python3 tests/test_docs.py    # any single file runs alone
+```
+
+Development details — repository layout, the shipping subtree, the release
+gate, how to add a test — live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What works today
 
@@ -49,48 +159,6 @@ Workflow runs via the launch `toolUseResult.taskId` and stops the whole loop; a
 agent's own 17-hex id. A Workflow agent renders its per-agent stop disabled,
 with that reason. Full ladder and session classes: `docs/control-semantics.md`.
 
-## Running it
-
-Two servers exist in this repo. They are different programs on **reserved**
-ports — reserved by convention, not occupied by default; start what you need.
-
-**Touch (port 8932)** — the aggregator + touch-visual:
-
-```bash
-python3 -m aggregator.server                 # binds 127.0.0.1:8932
-# prints:  open: http://127.0.0.1:8932/?token=<per-boot token>
-#          token written to .touch/server.json (0600)
-```
-
-Every route except `/health` requires that per-boot token, and the WebSocket
-upgrade enforces an Origin/Host allowlist. To reach it from outside the
-sandbox, opt in explicitly and publish the port from the **host**:
-
-```bash
-python3 -m aggregator.server --open --allow-origin http://<host>:8932
-sbx ports "$SANDBOX_VM_ID" --publish 8932:8932/tcp     # run on the host
-```
-
-**Legacy orchestrator monitor (port 8931)** — the older, read-only dashboard in
-`.claude/shared/monitoring/`, which is what live orchestration runs report to:
-
-```bash
-TASK=$PWD/.claude/local-orchestrators/<task-name>
-ORCH_STATE_DIR="$TASK" python3 .claude/shared/monitoring/monitor_server.py &
-ORCH_STATE_DIR="$TASK" python3 .claude/shared/monitoring/decision_watcher.py &
-sbx ports "$SANDBOX_VM_ID" --publish 8931:8931/tcp     # run on the host
-```
-
-When a run ends, stop its watcher; leave its state files in place — a finished
-task folder is history the dashboard replays.
-
-Tests (stdlib only, no pytest — each file is a standalone executable):
-
-```bash
-tests/run_all.sh              # both suites; --keep-going to see every failure
-python3 tests/test_docs.py    # just one file, like any other
-```
-
 ## Optional: the Mongo mirror
 
 Touch works with **no database at all**. Mongo is a write-behind projection of
@@ -102,9 +170,10 @@ degrade.
 If you want it, `docs/mongo.md` has the exact recipe. Two rules from it, here
 so nobody has to go looking: the database binds **loopback only**
 (`-p 127.0.0.1:27017:27017`, `--auth`, a named volume) — Touch refuses to
-mirror into a mongod with zero configured users — and **`sbx ports` must never
-publish 27017**. The mirror holds the same unredacted transcripts the token
-posture exists to protect; use `docker exec touch-mongo mongosh …` instead.
+mirror into a mongod with zero configured users — and the database port is
+**never** published (no `sbx ports … 27017`, not "just for a minute"); the
+mirror holds the same unredacted transcripts the token posture exists to
+protect, so use `docker exec touch-mongo mongosh …` instead.
 
 **"Separate collections for separate session datas" — asked, and declined.**
 What you get instead is per-session *isolation*: one collection per entity type
@@ -115,31 +184,15 @@ means 7+ collections, the sidebar's "all sessions, newest first" becomes an
 N-collection scan, and every collection duplicates every index. Nothing is
 lost — the isolation you asked for is a filter, not a namespace.
 
-Storage is kept forever in v0 (no TTL index anywhere, by rule): sessions,
-agents, runs, run_nodes, usage and custom state are all small; measured
-baseline is 15.7 MB / 3 936 records (≈4 KB per record, ≈1.3 MB h⁻¹ per active
-session), and the mirror costs about 0.53× the raw text on disk. Pruning is
-revisited at the growth threshold, not before.
-
 ## Where the design lives
 
-Authority ladder — read them in this order when they disagree:
-
-1. `.claude/local-orchestrators/touch-mongo-live/plan/touch-mongo-live-plan.md`
-   — the amendment (Mongo, live flow; GD-21…GD-30, R-38…R-58).
-2. `.claude/local-orchestrators/touch-full-recon/plan/touch-full-recon-plan.md`
-   — the normative plan (GD-1…GD-20, R-01…R-37).
-3. `.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md`
-   — design law D1–D14, as amended above.
-4. `inception.md` — the summary of everything verified about the substrate.
-5. this README — intent and how to run it.
-6. `CLAUDE.md` — the session guide for working in this repo.
-
-Also: `docs/control-semantics.md` (verb ladder, session classes),
-`docs/mongo.md` (database), `.claude/shared/monitoring/monitoring.md`
-(legacy monitor event schema), and
-`.claude/local-orchestrators/touch-full-recon/report/probes.md` (what was
-probed, when, and with which command).
+- `docs/control-semantics.md` — the verb ladder and session classes.
+- `docs/mongo.md` — the database recipe and its security baseline.
+- `inception.md` — everything verified about the substrate, summarized.
+- `CLAUDE.md` — the session guide, and the authority ladder over the full
+  design record (whose run folders are local history, absent from a clean
+  checkout by design).
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to work on the code.
 
 ## Original intent (verbatim, 2026-07-25)
 

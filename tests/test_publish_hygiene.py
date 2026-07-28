@@ -45,6 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 ROOT_ALLOWLIST = frozenset({
     ".gitignore",
     "CLAUDE.md",
+    "CONTRIBUTING.md",
     "README.md",
     "inception.md",
     "LICENSE",
