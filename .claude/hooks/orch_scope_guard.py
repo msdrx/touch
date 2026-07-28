@@ -51,6 +51,22 @@ def find_active(start):
         d = parent
 
 
+def find_halt(start):
+    """Walk up from `start` to a HALT sentinel next to ACTIVE. While it
+    exists, EVERY subagent tool call is denied — the user's emergency brake
+    for an orchestration run that has no reachable kill handle. Deleting the
+    file lifts the freeze; the main terminal agent is never affected."""
+    d = start
+    while True:
+        p = os.path.join(d, ".claude", "local-orchestrators", "HALT")
+        if os.path.isfile(p):
+            return p
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
 def main():
     try:
         hook = json.load(sys.stdin)
@@ -58,6 +74,18 @@ def main():
         return  # a broken payload must never block work
     if not hook.get("agent_id"):
         return  # main terminal agent: unrestricted
+    halt = find_halt(hook.get("cwd") or os.getcwd())
+    if halt:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "RUN HALTED by the user: the orchestration run this subagent "
+                "belongs to was ordered stopped. Do not retry any tool call. "
+                "Return immediately with a short note that the run is halted. "
+                f"(sentinel: {halt})"),
+        }}))
+        return
     active = find_active(hook.get("cwd") or os.getcwd())
     if not active:
         return
