@@ -13,7 +13,9 @@ session, with two components — **aggregator** (Python) and **touch-visual**
 Repository layout. **`plugin/touch/` is the single canonical home** for
 everything Touch ships (GD-U1): there is no second copy of any of it at the
 repo root any more, and no sync script. What is not under `plugin/touch/` is
-development-only material that deliberately never ships.
+development-only material that deliberately never ships — with one exception,
+`.claude-plugin/marketplace.json` at the repo root, which is not payload but a
+catalog *about* the payload, and the substrate reads it only from there.
 
 | path | what it is |
 |---|---|
@@ -25,14 +27,15 @@ development-only material that deliberately never ships.
 | `plugin/touch/skills/` | the ten skills (four orchestration + six engineering-practice), one directory each |
 | `plugin/touch/bin/` | the six wrappers Touch puts on `PATH`: `touch-serve`, `touch-monitor`, `touch-watcher`, `touch-status`, `touch-cycle-reporter` — the five programs a session runs (GD-U4) — plus `touch-selfcheck`, which verifies an installation and is run by hand |
 | `plugin/touch/hooks/` | `orch_scope_guard.py`, the run-scope `PreToolUse` hook, plus the `hooks/hooks.json` that registers it — the one and only registration (GD-U5) |
-| `plugin/touch/.claude-plugin/` | `plugin.json` (the ONE place a version is declared) and `marketplace.json` — exactly two files; the hook manifest is NOT here |
+| `plugin/touch/.claude-plugin/` | `plugin.json` (the ONE place a version is declared) — exactly one file; neither the hook manifest nor the marketplace catalog is here |
+| `.claude-plugin/` (repo root) | `marketplace.json`, the catalog: marketplace `msdrx-tools`, one entry, `"source": "./plugin/touch"`. It is at the ROOT because `/plugin marketplace add msdrx/touch` clones the repo and reads `<clone>/.claude-plugin/marketplace.json` and nothing else — there is no subdirectory form of a remote marketplace source (verified, CLI 2.1.220). This repo therefore IS the marketplace |
 | `tests/` | one standalone executable per module + `run_all.sh` + `fixtures/` (frozen corpora with a sha256 manifest) + `_roots.py`, the one anchor every test names the canonical trees through |
 | `tests/monitoring/` | the monitoring module's own dev-only suite and fixtures, moved out of the module so the payload boundary stays the directory boundary (GD-U6) |
 | `scripts/` | `release.sh` — the release checklist, executable, and there is deliberately no RELEASE.md |
 | `README.md` | intent, the honest verb table, how to run it |
 | `CONTRIBUTING.md` | layout, ground rules, the test law, the release gate |
 | `inception.md` | everything verified about the substrate (CLI 2.1.220), summarized — a dated snapshot, so its pre-plugin paths are history, not directions |
-| `.claude/` | `settings.json` (status line + `enabledPlugins`), `statusline.sh`, two unrelated `shared/scripts/*-sox-installation.sh` helpers — those four files are all `git ls-files .claude` returns — and this repo's untracked run history under `local-orchestrators/` |
+| `.claude/` | `settings.json` (status line + `enabledPlugins` + the local `extraKnownMarketplaces` entry), `statusline.sh`, two unrelated `shared/scripts/*-sox-installation.sh` helpers — those four files are all `git ls-files .claude` returns — and this repo's untracked run history under `local-orchestrators/` |
 
 `LICENSE` is the one deliberate duplicate — repo root and plugin root, required
 by the plugin spec, machine-checked byte-for-byte by `tests/test_plugin_tree.py`
@@ -108,9 +111,12 @@ Workflow journal ───┘        (append-only,          (HTTP + WebSocket)
   known; readers ignore unknown keys.
 
 Other `.claude/` files worth knowing: `.claude/settings.json` (committed,
-session-wide — the status line and `"enabledPlugins": {"touch@inline": true}`,
-so every `--plugin-dir plugin/touch` session auto-enables Touch; it registers
-NO hooks, GD-U5) and `.claude/statusline.sh` (which shells out to `jq`; that is
+session-wide — the status line, `"enabledPlugins": {"touch@inline": true}` so
+every `--plugin-dir plugin/touch` session auto-enables Touch, plus an
+`extraKnownMarketplaces` entry pointing `msdrx-tools` at `"path": "./"` — the
+repo root, i.e. this checkout's own catalog, which is why the path is NOT
+`./plugin/touch`; it registers NO hooks, GD-U5) and `.claude/statusline.sh`
+(which shells out to `jq`; that is
 a **status-line-only** exception and is not a licence for `jq` anywhere in
 Touch's own code or tests).
 

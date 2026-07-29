@@ -141,7 +141,7 @@ payload that refuses to publish one carrying secrets, caches or fixtures.
 ## Install
 
 ```
-/plugin marketplace add msdrx/touch-plugin
+/plugin marketplace add msdrx/touch
 /plugin install touch@msdrx-tools
 ```
 
@@ -149,10 +149,10 @@ Then `/reload-plugins`. Touch ships `defaultEnabled: false` because it carries
 a hook — installing it does not enable it, so enable it deliberately from
 `/plugin` after you have read the section above.
 
-Two alternatives, for the record. Clone the release repo and run against the
-working copy with `claude --plugin-dir <clone-path>` — the release repo is
-flat, so the clone itself is the plugin directory, and the flag also takes a
-`.zip`: zero infrastructure, nothing registered, good for reading the code
+Two alternatives, for the record. Clone the repository and run against the
+working copy with `claude --plugin-dir <clone-path>/plugin/touch` — the plugin
+is that subdirectory, and the flag also takes a `.zip`: zero infrastructure,
+nothing registered, good for reading the code
 first. Or `claude --plugin-url https://…/touch.zip`, which fetches an
 archive for that session only, never installs and never updates — only
 worth it against a **published sha256**, since an unverified zip is exactly the

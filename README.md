@@ -47,7 +47,7 @@ folder while a run is active and is inert when none is.
 ## Install
 
 ```
-/plugin marketplace add msdrx/touch-plugin
+/plugin marketplace add msdrx/touch
 /plugin install touch@msdrx-tools
 ```
 

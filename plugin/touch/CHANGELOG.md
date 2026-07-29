@@ -39,6 +39,15 @@ more skills than 0.1.0 did.
   presents changes — the directories a consumer receives are the same ones this
   release ships from (the six new skills above are the release's only addition
   to what lands on disk).
+- **A different install command.** The marketplace `msdrx-tools` is now served
+  from the project repository itself, so the first line is
+  `/plugin marketplace add msdrx/touch` (it was `msdrx/touch-plugin`, a
+  separate payload-only repo). Everything after it is unchanged —
+  `/plugin install touch@msdrx-tools`, then `/reload-plugins` — and so is the
+  update path. The catalog has to sit at that repository's root because a
+  cloned marketplace is read from `<repo>/.claude-plugin/marketplace.json` and
+  nowhere else; it names this payload with `"source": "./plugin/touch"`, and
+  what lands in your plugin cache is still exactly this directory.
 - The pre-install description and keywords now name the second skill family,
   so nothing in the skill list is a surprise after enabling.
 

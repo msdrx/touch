@@ -787,17 +787,26 @@ def test_canary_goes_red(label, entries):
 
 
 # --------------------------------------------------------------------------
-# (7) the manifests, on the STAGED bytes, by explicit path
+# (7) the manifest, on the STAGED bytes, by explicit path
 # --------------------------------------------------------------------------
 def test_staged_manifests_validate(label, root):
     print(f"test_staged_manifests_validate [{label}]")
     if root is None:
         skip("the stage could not be extracted — manifest validation not run")
         return
+    # ONE manifest ships. `marketplace.json` is a catalog ABOUT this payload and
+    # lives at the repo root, where a cloned marketplace is read from; the stage
+    # is `HEAD:plugin/touch`, so a copy appearing in here means someone put the
+    # catalog back inside the payload. That check needs no CLI, so it runs above
+    # the `have_cli()` skip — the arm that would notice the regression must not
+    # be the arm that silently skips on a CI image without `claude`.
+    check(not (root / ".claude-plugin" / "marketplace.json").exists(),
+          "the stage carries NO .claude-plugin/marketplace.json (the catalog is "
+          "not payload)")
     if not have_cli():
         skip("`claude` CLI not on PATH — staged manifest validation not run")
         return
-    for name in ("plugin.json", "marketplace.json"):
+    for name in ("plugin.json",):
         path = root / ".claude-plugin" / name
         if not path.is_file():
             check(False, f"the stage carries .claude-plugin/{name}")

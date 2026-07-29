@@ -28,6 +28,18 @@ Two properties survive the move, and one is new:
                           creep back across the directory boundary.
   the manifests           name, version, description, disclosure clauses,
                           component keys, the single marketplace entry.
+
+                          The two manifests live in DIFFERENT trees and this
+                          file is where that is asserted. `plugin.json` is
+                          payload — it ships, and the cache copy is what a
+                          consumer loads. `marketplace.json` is a CATALOG about
+                          the payload, and a git-cloned catalog is only ever
+                          read from `<repo>/.claude-plugin/marketplace.json`:
+                          there is no subdirectory form (CLI 2.1.220 refuses
+                          `owner/repo/sub/dir` outright and looks nowhere else
+                          after cloning). So it sits at the repo root, naming
+                          the payload with `"source": "./plugin/touch"`, and
+                          the payload must NOT carry a second copy of it.
   LICENSE (new, GD-U7)    PLUGIN-SPEC-17 wants a LICENSE at the repo root AND
                           at the plugin root, so it is the ONE deliberate
                           duplicate in the tree. The byte-equality check the
@@ -49,7 +61,14 @@ from _roots import PAYLOAD, REPO                        # noqa: E402
 
 PLUGIN = PAYLOAD
 MANIFEST = PLUGIN / ".claude-plugin" / "plugin.json"
-MARKETPLACE = PLUGIN / ".claude-plugin" / "marketplace.json"
+#: The catalog, at the REPO root — not beside `plugin.json`. `/plugin
+#: marketplace add msdrx/touch` clones this repository and reads exactly
+#: `<clone>/.claude-plugin/marketplace.json`; a manifest anywhere else is
+#: invisible to it.
+MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
+
+#: What that entry's `source` must say, and the tree it must resolve to.
+MARKETPLACE_SOURCE = "./plugin/touch"
 
 #: The payload's monitoring tree holds exactly these five files and nothing
 #: else. Stated positively (an exact set, not a denylist) because that is the
@@ -188,10 +207,16 @@ def test_plugin_manifest():
     check("~/.claude/projects" in desc,
           "description names the transcript directory it reads (GD-T8)")
     check(m.get("license") == "MIT", "license is MIT")
-    check(m.get("homepage", "").endswith("msdrx/touch-plugin"),
-          "homepage points at the release repo (GD-T3)")
-    check(str(m.get("repository", "")).endswith("msdrx/touch-plugin"),
-          "repository points at the release repo, never the dev repo (GD-T3)")
+    # This repository IS the marketplace: its root carries the catalog and the
+    # catalog names `./plugin/touch`, so an install clones THIS repo and both
+    # links have to point at it. They named `msdrx/touch-plugin` — a separate,
+    # empty-history release repo — while that was the publish target; anyone
+    # reviving that model changes these two lines and the catalog together, or
+    # the plugin page links somewhere the plugin no longer comes from.
+    check(m.get("homepage", "").endswith("msdrx/touch"),
+          "homepage points at the marketplace repo")
+    check(str(m.get("repository", "")).endswith("msdrx/touch"),
+          "repository points at the repo the catalog is served from")
     check(isinstance(m.get("keywords"), list) and m["keywords"],
           "keywords is a non-empty list")
     # PLUGIN-SPEC-14: a plugin whose hook fires on every tool call installs
@@ -219,7 +244,15 @@ def test_plugin_manifest():
 def test_marketplace_manifest():
     print("test_marketplace_manifest")
     check(MARKETPLACE.is_file(),
-          "plugin/touch/.claude-plugin/marketplace.json exists")
+          ".claude-plugin/marketplace.json exists at the REPO root")
+    # The payload must not carry a second catalog. Two files declaring the
+    # marketplace name `msdrx-tools` is one catalog too many — a user adding
+    # both gets whichever came last (same name replaces), and nothing keeps the
+    # two equal. This is the arm that fails if the old plugin-local copy comes
+    # back rather than moves.
+    stowaway = PLUGIN / ".claude-plugin" / "marketplace.json"
+    check(not stowaway.exists(),
+          "the payload carries NO marketplace.json — the catalog is not payload")
     if not MARKETPLACE.is_file():
         return
     m = load_json(MARKETPLACE)
@@ -240,9 +273,19 @@ def test_marketplace_manifest():
     # PLUGIN-SPEC-14: keep the entry name and plugin.json's name identical, so
     # the "which name namespaces components" ambiguity cannot bite.
     check(e.get("name") == "touch", "entry name matches plugin.json's name")
-    # DISTRIBUTION-1/GD-T3: the release repo is FLAT — repo root == plugin root
-    # == marketplace root.
-    check(e.get("source") == "./", "entry source is './' (flat release repo)")
+    # The marketplace root is the REPO root, and relative sources resolve
+    # against it (never against `.claude-plugin/`), so the entry names the
+    # payload subtree. `../` is rejected by the validator; `./` would offer the
+    # whole development repo as the plugin.
+    check(e.get("source") == MARKETPLACE_SOURCE,
+          f"entry source is '{MARKETPLACE_SOURCE}' (got {e.get('source')!r})")
+    # And it resolves to a real plugin: a catalog pointing at a directory with
+    # no manifest installs nothing, and no schema check catches that.
+    resolved = (MARKETPLACE.parent.parent / str(e.get("source", ""))).resolve()
+    check(resolved == PLUGIN.resolve(),
+          f"the source resolves to the payload tree ({resolved})")
+    check((resolved / ".claude-plugin" / "plugin.json").is_file(),
+          "the resolved source carries .claude-plugin/plugin.json")
     # DISTRIBUTION-5: version resolution is plugin.json > entry > commit SHA,
     # first set wins. Two versions is a way to ship a stale one forever.
     check("version" not in e,

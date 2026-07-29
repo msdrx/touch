@@ -754,7 +754,7 @@ def test_plugin_readme_install_and_update_commands():
     text = read(PLUGIN_README)
     # Verbatim, because the `/plugin` UI never shows a README: whatever a user
     # types comes from this file, and a paraphrase does not run (DISTRIBUTION-7).
-    for line in ("/plugin marketplace add msdrx/touch-plugin",
+    for line in ("/plugin marketplace add msdrx/touch",
                  "/plugin install touch@msdrx-tools",
                  "/reload-plugins"):
         check(line in text, f"the shipped README carries the install line `{line}`")
@@ -992,17 +992,15 @@ def test_release_script_uses_no_jq_and_never_copies_the_working_tree():
           "the version is read with a stdlib `python3 -c`, not a JSON tool")
     check(re.search(r"\bcp\s+-[a-zA-Z]*[rR]", code) is None,
           "scripts/release.sh never `cp -r`s a tree")
-    # The one legitimate copy, and what it copies out of: the git-built stage.
+    # ZERO copies now, not one. While releases were assembled in a separate
+    # flat repo the script had exactly one legitimate `cp` — out of the
+    # git-built stage into that clone. Publishing from this repo removed the
+    # destination: the stage exists only to be SCANNED, and any `cp` at all
+    # means someone started hand-assembling a payload again.
     copies = cp_commands(code)
-    check(len(copies) == 1, f"exactly one `cp` invocation in the script (found {len(copies)}: {copies})")
-    check(all("$STAGE" in c for c in copies),
-          f"the only `cp` copies out of the git-built stage, never the working tree (found {copies})")
-    # Stated positively as well as negatively: `$STAGE` present is satisfiable
-    # by a second `cp` that ALSO names the working-tree subtree, and that copy
-    # is the whole failure mode.
-    working_tree = [c for c in copies if "$PLUGIN" in c or "plugin/touch" in c]
-    check(not working_tree,
-          f"no `cp` in the script names the working-tree subtree (bad: {working_tree})")
+    check(not copies,
+          f"the script copies nothing — the stage is scanned, never assembled "
+          f"(found {len(copies)}: {copies})")
     check("git archive" in code and ("HEAD:$PLUGIN" in code or "HEAD:plugin/touch" in code),
           "the payload is built by `git archive` of a committed tree")
 
@@ -1018,18 +1016,23 @@ def test_release_script_is_the_checklist():
           "the script says why there is no separate RELEASE.md (GD-T9)")
     # The manual half: what the sandbox cannot verify is printed and confirmed,
     # cited as the COMMAND that measures it rather than a count that drifts
-    # (PRIOR-AUDIT-12).
-    for token in ("rev-parse origin/main", "rev-list --all --objects", "mytok",
-                  "rotate", "release repo", "touch-selfcheck"):
+    # (PRIOR-AUDIT-12). `CLONES THIS REPOSITORY` is the item the whole layout
+    # turns on — serving the catalog from here means the history goes with it,
+    # and that sentence is the operator's last chance to reconsider.
+    for token in ("CLONES THIS REPOSITORY", "rev-list --all --objects", "mytok",
+                  "rotate", "filter-repo", "touch-selfcheck"):
         check(token in text, f"the preflight checklist names {token}")
     counted = [ln.strip()[:60] for ln in text.splitlines()
                if re.search(r"mytok|mongodb://", ln) and re.search(r"\b\d{2,}\b", ln)]
     check(not counted,
           f"no line pairs the contamination with a hard count — counts drift, commands do not (bad: {counted})")
-    # The automated half, in order.
+    # The automated half, in order. The last three are the publish half: the
+    # remote is resolved, HEAD is compared against its upstream, and the push
+    # IS the release — there is no second repository to assemble any more.
     for token in ("status --porcelain", "tests/run_all.sh", "CHANGELOG.md",
-                  "plugin validate", "--strict", "--diff-filter=D",
-                  "rev-list --all --count", "plugin tag", "--dry-run"):
+                  "plugin validate", "--strict", "git archive",
+                  "remote get-url", "rev-list --left-right --count",
+                  "git push", "plugin tag", "--dry-run"):
         check(token in code, f"the script runs the `{token}` gate")
     check("--check" in code, "the script has a `--check` dry-run mode")
 
@@ -1070,39 +1073,33 @@ def test_release_script_avoids_the_shapes_that_reported_wrong_answers():
     # a release missing a file while every gate reports green.
     check("status --porcelain" in code or "ls-files --others" in code,
           "the dirty-tree gate counts untracked files as dirty")
-    # The dev-remote gate compares repo identities, not URL spellings: the SSH
-    # and HTTPS forms of the same repository must not compare unequal.
+    # Repo identity is compared, never URL spelling: `https://…/touch.git` and
+    # `git@github.com:msdrx/touch` are one repository, and step 7 asks whether
+    # the remote it is about to push to is the one `plugin.json` sends readers
+    # to. Both sides go through the same normaliser or the answer is spelling.
     check("norm_urls" in code and code.count("| norm_urls") >= 2,
-          "both remote URL lists pass through the same normaliser before comparison")
-    # Step 7's gates are only worth their comments if they actually run. Sniffing
-    # for a `.git` DIRECTORY skips all of them in silence for a path INSIDE a
-    # clone and for a linked worktree (whose `.git` is a file) — while steps 8-10
-    # keep working, against the ENCLOSING repository: `git rm -rq .`, commit,
-    # push. The repository must be resolved positively instead.
-    check(re.search(r"-d\s+[\"']?\$(REL|\{REL\})/\.git", code) is None,
-          "the release clone is not identified by sniffing for a `.git` directory "
-          "(a worktree's is a file; a path inside a clone has none)")
-    check("rev-parse --show-toplevel" in code,
-          "the release clone is resolved with `rev-parse --show-toplevel` and must BE that toplevel")
-    # Untracked-aware cleanliness is owed to BOTH trees. `git rm -rq .` removes
-    # tracked files only, so anything untracked in the release clone survives it
-    # and is published by the next `git add -A`.
-    check(code.count("status --porcelain") >= 2,
-          "the release clone gets the same untracked-aware clean check the dev repo does, "
-          "before anything is written into it")
-    # The identity gate, spelled discriminatingly. A bare `user.email` substring
-    # passes for `git config user.email`, for `--global user.email`, and for a
-    # line that merely mentions the key — and the bare spelling is exactly the
-    # bug: `git config` reads the whole cascade, so on any machine with a global
-    # identity it reports a per-repo identity that is not there, and the
-    # operator's personal address lands in a public release commit. The flag IS
-    # the gate, so the flag is what this asserts.
-    check(re.search(r"config\s+--local\s+user\.email", code) is not None,
-          "the release clone's identity is read with `config --local` — a bare "
-          "`git config user.email` answers from the GLOBAL config and reports a "
-          "per-repo identity that is not there")
-    check(re.search(r"config\s+(?!--local\b)[^\n]*user\.email", code) is None,
-          "no `git config … user.email` reads the cascade (only the --local form)")
+          "both URLs pass through the same normaliser before comparison")
+    # The push is the point of no return and it is ordinary: a release that can
+    # rewrite the published branch is a release that can un-publish a version
+    # users already installed.
+    check(re.search(r"git\s+push[^\n]*(--force|--mirror|\s-f\b)", code) is None,
+          "no `git push --force`/`--mirror` — publishing only ever adds commits")
+    # The `git push` that publishes must name the remote and branch explicitly.
+    # A bare `git push` obeys `push.default` and the branch's configured
+    # upstream, so on a machine configured differently it can publish something
+    # other than the branch every gate above just measured.
+    pushes = re.findall(r"^\s*git\s+push[^\n]*$", code, re.M)
+    check(pushes and all(("$REMOTE" in p and "$branch" in p) for p in pushes),
+          f"every `git push` names $REMOTE and $branch explicitly (found: {pushes})")
+    # A message about a push must not BE one. Backticks inside a double-quoted
+    # string are command substitution, and this line once read
+    # `note "… will need `git push -u $REMOTE $branch`"` — which pushes.
+    quoted_backticks = [ln.strip() for ln in code.splitlines()
+                        if re.match(r'\s*(note|ok|fail|skip)\s+"', ln)
+                        and re.search(r'(?<!\\)`', ln)]
+    check(not quoted_backticks,
+          f"no unescaped backtick inside a double-quoted message — that is "
+          f"command substitution, not formatting (bad: {quoted_backticks})")
 
 
 # ---------------------------------------------------------------------------
@@ -1159,15 +1156,19 @@ def _release_fixture(tmp):
     (dev / "scripts").mkdir(parents=True)
     (dev / "tests").mkdir()
     (dev / "plugin/touch/.claude-plugin").mkdir(parents=True)
+    (dev / ".claude-plugin").mkdir()
     shutil.copy2(RELEASE_SH, dev / "scripts/release.sh")
     runner = dev / "tests/run_all.sh"
     runner.write_text("#!/bin/sh\necho 'stub suite (fixture)'\nexit 0\n", encoding="utf-8")
     runner.chmod(0o755)
     (dev / "plugin/touch/.claude-plugin/plugin.json").write_text(
         json.dumps({"name": "touch", "version": "0.1.0"}) + "\n", encoding="utf-8")
-    (dev / "plugin/touch/.claude-plugin/marketplace.json").write_text(
+    # The catalog at the REPO root, where a cloned marketplace is read from,
+    # naming the payload subtree — the layout the script now gates on. A copy
+    # of it inside `plugin/touch/` is what step 6 refuses.
+    (dev / ".claude-plugin/marketplace.json").write_text(
         json.dumps({"name": "msdrx-tools",
-                    "plugins": [{"name": "touch", "source": "./"}]}) + "\n",
+                    "plugins": [{"name": "touch", "source": "./plugin/touch"}]}) + "\n",
         encoding="utf-8")
     (dev / "plugin/touch/CHANGELOG.md").write_text(
         "# Changelog\n\n## 0.1.0\n", encoding="utf-8")
@@ -1189,13 +1190,21 @@ def _release_fixture(tmp):
     env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "Fixture"
     env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "fixture@example.invalid"
     env["PATH"] = str(stub_bin) + os.pathsep + env.get("PATH", "")
-    for var in ("RELEASE_CONFIRM", "RELEASE_COMMITS_EXPECTED",
-                "GIT_DIR", "GIT_WORK_TREE"):
+    for var in ("RELEASE_CONFIRM", "RELEASE_REMOTE", "GIT_DIR", "GIT_WORK_TREE"):
         env.pop(var, None)
 
     _git(["init", "-q", "-b", "main", "."], dev, env)
     _git(["add", "-A"], dev, env)
     _git(["commit", "-q", "-m", "fixture"], dev, env)
+    # A publish target, because publishing is now a push of THIS repo: step 7
+    # resolves `origin`, fetches it and compares HEAD against its upstream. A
+    # bare repo on disk plays the remote — no network, and `git push` against
+    # it is a real push, which is what makes the ahead/behind arms below mean
+    # anything.
+    origin = tmp / "origin.git"
+    _git(["init", "-q", "--bare", "-b", "main", str(origin)], tmp, env)
+    _git(["remote", "add", "origin", str(origin)], dev, env)
+    _git(["push", "-q", "-u", "origin", "main"], dev, env)
     return dev, env
 
 
@@ -1251,10 +1260,7 @@ def test_release_script_check_mode_runs_its_gates_for_real():
         dev, env = _release_fixture(tmp)
         script = dev / "scripts/release.sh"
 
-        clone = tmp / "relclone"
-        clone.mkdir()
-        _git(["init", "-q", "-b", "main", "."], clone, env)
-        clean = _run([script, "--check", "--release-clone", clone], dev, env)
+        clean = _run([script, "--check"], dev, env)
 
         section = _step_section(clean.stdout, 7)
         # The transcript is printed only when it is evidence of a failure: a
@@ -1264,35 +1270,54 @@ def test_release_script_check_mode_runs_its_gates_for_real():
             print(clean.stdout)
         check(clean.returncode == 0,
               f"a clean fixture passes every gate through step 7 (rc={clean.returncode})")
-        # Step 7's gates once lived inside an `if [ -d "$REL/.git" ]` with no
-        # `else`, so on a release clone git could still reach they printed
-        # NOTHING and the run reported "every gate through step 7 is green".
-        # An empty section is therefore a failure in its own right.
-        check(len(_gate_lines(section)) >= 4,
+        # A step whose gates all sit inside one `if` that quietly does not hold
+        # prints NOTHING while the run still reports "every gate through step 7
+        # is green" — that is how the release-clone version of this step failed
+        # for three review rounds. An empty section is a failure in its own
+        # right, whatever the step is checking now.
+        check(len(_gate_lines(section)) >= 3,
               f"step 7 actually printed its gates ({len(_gate_lines(section))} lines)")
-        check("no per-repo user.email" in section,
-              "the identity advisory fires for a clone whose only identity is the GLOBAL "
-              "git config — the environment where a release is really cut")
-        check("resolves to its own repository root" in section,
-              "the release clone is resolved positively, and says so")
+        check("level with" in section,
+              "step 7 says the branch is already published rather than implying "
+              "a push happened")
+        # Step 6's new arm: the catalog is not payload. Put a copy back inside
+        # the shipping subtree and the run must refuse it — this is the exact
+        # regression the root-catalog layout replaced, and nothing else in the
+        # script would notice a second file declaring the same marketplace.
+        stow = dev / "plugin/touch/.claude-plugin/marketplace.json"
+        stow.write_text('{"name": "msdrx-tools", "plugins": []}\n', encoding="utf-8")
+        _git(["add", "-A"], dev, env)
+        _git(["commit", "-q", "-m", "stowaway"], dev, env)
+        rc_stow = _run([script, "--check"], dev, env)
+        check(rc_stow.returncode != 0
+              and "the catalog is NOT payload" in rc_stow.stdout,
+              "a marketplace.json inside the payload is refused (it would be a "
+              "second catalog under the same marketplace name)")
+        _git(["rm", "-q", str(stow)], dev, env)
+        _git(["commit", "-q", "-m", "unstow"], dev, env)
 
-        inside = tmp / "relclone/sub/dir"
-        inside.mkdir(parents=True)
-        rc_inside = _run([script, "--check", "--release-clone", inside], dev, env)
-        check(rc_inside.returncode != 0 and "is INSIDE the repository" in rc_inside.stdout,
-              "a path inside a clone is refused, not silently skipped "
-              "(steps 8-9 would rewrite the enclosing repo)")
+        # The link-vs-source gate: `plugin.json`'s `repository` and the remote
+        # being pushed to must be one repository, compared as identity.
+        manifest = dev / "plugin/touch/.claude-plugin/plugin.json"
+        manifest.write_text(json.dumps(
+            {"name": "touch", "version": "0.1.0",
+             "repository": "https://github.com/somebody/else"}) + "\n",
+            encoding="utf-8")
+        _git(["add", "-A"], dev, env)
+        _git(["commit", "-q", "-m", "wrong repository field"], dev, env)
+        rc_link = _run([script, "--check"], dev, env)
+        check(rc_link.returncode != 0 and "link away from the repo" in rc_link.stdout,
+              "a `repository` field naming another repo is refused — the plugin "
+              "page would link away from the repo the install clones")
 
-        rc_dev = _run([script, "--check", "--release-clone", dev], dev, env)
-        check(rc_dev.returncode != 0
-              and "resolves to this development repository" in rc_dev.stdout,
-              "the development repository itself is refused as a release clone (GD-T3)")
-
-        bare = tmp / "barerel.git"
-        _git(["init", "-q", "--bare", str(bare)], tmp, env)
-        rc_bare = _run([script, "--check", "--release-clone", bare], dev, env)
-        check(rc_bare.returncode != 0 and "BARE repository" in rc_bare.stdout,
-              "a bare repo is refused AS a bare repo, not misdiagnosed as 'not a git repository'")
+        # And a remote that does not exist is a full stop, not a skipped step:
+        # a release with nowhere to push must not report green.
+        env_noremote = dict(env)
+        env_noremote["RELEASE_REMOTE"] = "nope"
+        rc_noremote = _run([script, "--check"], dev, env_noremote)
+        check(rc_noremote.returncode != 0
+              and "no remote named 'nope'" in rc_noremote.stdout,
+              "a missing publish remote fails loudly")
     except (OSError, subprocess.SubprocessError) as exc:
         skip(f"could not exercise scripts/release.sh here "
              f"({exc.__class__.__name__}: {exc})")

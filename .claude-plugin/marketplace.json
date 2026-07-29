@@ -4,12 +4,12 @@
   "description": "Michael Sadradze's Claude Code tooling.",
   "owner": {
     "name": "Michael Sadradze",
-    "url": "https://github.com/msdrx"
+    "url": "https://github.com/msdrx/touch"
   },
   "plugins": [
     {
       "name": "touch",
-      "source": "./"
+      "source": "./plugin/touch"
     }
   ]
 }

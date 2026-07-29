@@ -7,7 +7,7 @@
     "msdrx-tools": {
       "source": {
         "source": "directory",
-        "path": "./plugin/touch"
+        "path": "./"
       }
     }
   },

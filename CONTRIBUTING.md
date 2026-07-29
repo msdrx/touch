@@ -333,7 +333,8 @@ downloads (~10 MB, of which ~8 MB is `tests/fixtures/` alone).
 | `plugin/touch/skills/` | ten skills: four orchestration, six engineering-practice |
 | `plugin/touch/bin/` | the six wrappers Touch puts on `PATH` |
 | `plugin/touch/hooks/` | `orch_scope_guard.py` and the `hooks/hooks.json` that registers it — one registration, nowhere else |
-| `plugin/touch/.claude-plugin/` | `plugin.json` (the one place a version is declared) and `marketplace.json` |
+| `plugin/touch/.claude-plugin/` | `plugin.json`, the one place a version is declared — and nothing else |
+| `.claude-plugin/` (repo root) | `marketplace.json`, the catalog. It sits at the ROOT because a cloned marketplace is only ever read from `<repo>/.claude-plugin/marketplace.json`, and it names the payload with `"source": "./plugin/touch"` |
 | `tests/` | one standalone executable per module + `run_all.sh` + `fixtures/` + `_roots.py` (the anchor every test names the canonical trees through) |
 | `tests/monitoring/` | the monitoring module's own suite and fixtures, kept out of the payload |
 | `scripts/` | `release.sh` — the release checklist, executable |
@@ -436,15 +437,25 @@ printed.
 
 ## Releasing
 
-What users install is **not** this repository. `/plugin marketplace add` clones
-a repo's history, and this repo's history is permanently contaminated (a burned
-token blob, credentialed database URIs, deleted run transcripts), so releases
-are published to a separate repository created **empty** — `msdrx/touch-plugin`
-— and that repository *is* the marketplace.
-`plugin/touch/.claude-plugin/marketplace.json` names the marketplace
-`msdrx-tools` and lists the plugin. No checkout trick (`--sparse`, a subdir)
-makes the dev repo an install source — those limit the checkout, not the
-objects.
+**This repository is the marketplace.** `.claude-plugin/marketplace.json` at
+the root names the marketplace `msdrx-tools` and lists one plugin with
+`"source": "./plugin/touch"`, so `/plugin marketplace add msdrx/touch` clones
+this repo and `/plugin install touch@msdrx-tools` copies that subtree into the
+user's plugin cache. The manifest has to be at the root: a cloned marketplace
+is read from `<repo>/.claude-plugin/marketplace.json` and nowhere else, and
+there is no subdirectory form of a remote marketplace source — `--sparse`
+limits a checkout, not where the catalog is looked for.
+
+Two consequences worth naming, because an earlier model existed to avoid them
+and publishing from here accepts them deliberately:
+
+- **An install clones this repo's whole history**, which carries a burned token
+  blob and credentialed `mongodb://` URIs. Purging it (`git filter-repo`) is
+  the fix; every credential this repo has ever seen should be treated as
+  burned either way. `release.sh`'s preflight makes you confirm this.
+- **Every commit is a marketplace update.** Users who have auto-update on
+  re-clone this repo, dev noise included. Only a `version` bump in
+  `plugin.json` actually delivers a new payload to them.
 
 `scripts/release.sh` **is** the checklist; there is deliberately no RELEASE.md.
 
@@ -452,21 +463,16 @@ objects.
    place a version is declared — and give `CHANGELOG.md` a top entry naming the
    same version (a guard enforces the agreement). That bump is the only thing
    that delivers an update to installed users.
-2. Commit. The payload is built by `git archive` from the **committed** tree;
-   the working tree is never copied.
+2. Commit. The gates read the **committed** tree (`git archive HEAD:plugin/touch`
+   builds the payload they scan); the working tree is never what ships.
 3. Dry-run every gate: `scripts/release.sh --check`. It stops before the point
-   of no return, touches no release repo, and reports every failure rather than
-   the first. Run it early and often.
-4. Clone the release repository locally, then run
-   `scripts/release.sh --release-clone <path-to-that-clone>`. A green run
-   stages the payload, commits it in the release clone, and pushes — that push
-   is the upload.
+   of no return, pushes nothing, and reports every failure rather than the
+   first. Run it early and often.
+4. `scripts/release.sh`. A green run pushes this repo — that push is the
+   publish, because the marketplace *is* the repo.
 5. Users pick it up with `/plugin marketplace update msdrx-tools` then
    `/plugin update touch@msdrx-tools`; third-party marketplaces do not
-   auto-update.
-
-Never `cp -r` the payload into the release repo by hand — that shortcut is
-exactly what the gates exist to prevent.
+   auto-update by default.
 
 ## If you run the orchestration skills here
 

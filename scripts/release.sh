@@ -24,55 +24,53 @@
 # tree does NOT ship, and the release otherwise looks perfectly successful — so
 # step 1 refuses a dirty tree outright rather than letting you find out later,
 # and it counts UNTRACKED files as dirty, because a new payload file nobody
-# `git add`ed is the version of this accident that leaves no other trace. The
-# only `cp` in this file
-# (step 8) copies out of that git-built stage, never out of the working tree;
-# `cp -r` of `plugin/touch/` is exactly the shortcut this file exists to
-# prevent (probe E6 shipped a tracked `.touch/leak.txt` and a `__pycache__/`
-# that way).
+# `git add`ed is the version of this accident that leaves no other trace. There
+# is no `cp` in this file at all: the stage exists to be SCANNED, never to be
+# copied anywhere, and `cp -r` of `plugin/touch/` is exactly the shortcut this
+# file exists to prevent (probe E6 shipped a tracked `.touch/leak.txt` and a
+# `__pycache__/` that way).
 #
-# THE DEV REPO IS NEVER AN INSTALL SOURCE
-# ---------------------------------------
-# `/plugin marketplace add owner/repo` CLONES HISTORY. This repository's
-# history is permanently contaminated (a burned token blob, credentialed
-# `mongodb://` URIs, hundreds of deleted run-transcript paths) and no checkout
-# trick — `--sparse`, `git-subdir` — is a privacy boundary; both limit the
-# checkout, not the objects. Releases therefore go to a SEPARATE repo created
-# EMPTY (`msdrx/touch-plugin`), never a fork, never a remote of this one. Step
-# 7 proves that property about the other repo before anything is pushed into
-# it, because no unit test in this repo can (DISTRIBUTION-2).
+# THIS REPOSITORY IS THE MARKETPLACE
+# ----------------------------------
+# `.claude-plugin/marketplace.json` at the ROOT names `msdrx-tools` and lists
+# one plugin with `"source": "./plugin/touch"`, so `/plugin marketplace add
+# msdrx/touch` clones THIS repo and the install copies that subtree into the
+# user's plugin cache. The manifest cannot live beside `plugin.json`: a cloned
+# marketplace is read from `<clone>/.claude-plugin/marketplace.json` and
+# nowhere else, and `owner/repo/sub/dir` is not a source form (CLI 2.1.220).
+# Publishing is therefore an ordinary `git push` of this repo — step 7.
 #
-# usage: scripts/release.sh [--check] [--release-clone <path>] [--tag-push] [-h]
+# WHAT THAT COSTS, STATED ONCE
+# ----------------------------
+# `/plugin marketplace add owner/repo` CLONES HISTORY, and this repository's
+# history carries a burned token blob and credentialed `mongodb://` URIs. No
+# checkout trick — `--sparse`, `git-subdir` — is a privacy boundary; both limit
+# the checkout, not the objects. An earlier model published a payload-only
+# tree to a separate EMPTY repo for exactly this reason; serving the catalog
+# from here trades that away, so the fix is to purge the history rather than to
+# route around it, and preflight (b) is where that decision gets re-confirmed
+# every single release. Treat every credential this repo has ever seen as
+# burned (DISTRIBUTION-2).
+#
+# usage: scripts/release.sh [--check] [--tag-push] [-h]
 #   default          the real thing: every gate is fatal on the spot, and a
-#                    green run commits and pushes the release clone.
-#   --check          dry run. Stops after step 7, touches no release repo (a
-#                    throwaway `git init` stands in when you name none), never
-#                    commits, never pushes. Unlike the real run it does NOT
-#                    stop at the first red gate — it runs them all and reports
-#                    every failure, then exits non-zero if any failed. That is
-#                    the same bargain `tests/run_all.sh --keep-going` makes:
-#                    you want the whole list before you start fixing.
-#   --release-clone  path to a local clone of the release repo. Required for a
-#                    real run; optional under --check.
+#                    green run pushes this repository.
+#   --check          dry run. Stops after step 7, pushes nothing. Unlike the
+#                    real run it does NOT stop at the first red gate — it runs
+#                    them all and reports every failure, then exits non-zero if
+#                    any failed. That is the same bargain `tests/run_all.sh
+#                    --keep-going` makes: you want the whole list before you
+#                    start fixing.
 #   --tag-push       also `claude plugin tag --push` after a successful
 #                    release. Optional and rarely wanted: the `{name}--v{ver}`
 #                    tag matters only for plugin *dependency* constraints, and
-#                    Touch has none. The dry-run tag check (step 10) runs
+#                    Touch has none. The dry-run tag check (step 8) runs
 #                    either way, for its version-agreement and dirty checks.
 #
 # environment:
 #   RELEASE_CONFIRM=yes            answer the preflight non-interactively (for
 #                                  a run whose stdin is not a terminal).
-#   RELEASE_COMMITS_EXPECTED=<n>   enforce step 7's commit count instead of
-#                                  printing it as an advisory. <n> is the
-#                                  release repo's initial commit plus one per
-#                                  release already published — i.e.
-#                                  releases-so-far + 1, measured BEFORE this
-#                                  run commits. It therefore grows by one with
-#                                  every published release: bump it after each
-#                                  one, or the next run fails step 7 on a
-#                                  perfectly healthy repo. Step 9 prints the
-#                                  value to use next time.
+#   RELEASE_REMOTE=<name>          the remote to publish to (default `origin`).
 #
 # exit status: 0 = done / dry run clean, 1 = a gate failed, 2 = bad usage.
 
@@ -82,8 +80,12 @@ set -uo pipefail
 # on the checkout when this script is reached through a link on $PATH.
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 PLUGIN="plugin/touch"
+#: Payload-relative — the stage's own root looks like this.
 MANIFEST=".claude-plugin/plugin.json"
+#: REPO-relative, and deliberately not under $PLUGIN: the catalog is not
+#: payload. Step 6 validates it where it lives.
 MARKETPLACE=".claude-plugin/marketplace.json"
+REMOTE="${RELEASE_REMOTE:-origin}"
 
 # The commit whose TREE still carries the burned `mytok2` blob. Named here as
 # an anchor for the preflight's first line, not as a count: every quantitative
@@ -93,12 +95,10 @@ MARKETPLACE=".claude-plugin/marketplace.json"
 TOKEN_TIP="f3b10a7"
 
 mode=real
-REL=""
 tag_push=no
 while [ $# -gt 0 ]; do
     case "$1" in
         --check|-c)      mode=check ;;
-        --release-clone) shift; [ $# -gt 0 ] || { echo "release.sh: --release-clone needs a path" >&2; exit 2; }; REL="$1" ;;
         --tag-push)      tag_push=yes ;;
         -h|--help)       sed -n '2,${/^#/!q;p;}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "release.sh: unknown argument '$1' (try -h)" >&2; exit 2 ;;
@@ -107,10 +107,8 @@ while [ $# -gt 0 ]; do
 done
 
 STAGE=""
-TMPREL=""
 cleanup() {
     [ -n "$STAGE" ] && rm -rf "$STAGE"
-    [ -n "$TMPREL" ] && rm -rf "$TMPREL"
     return 0
 }
 trap cleanup EXIT
@@ -157,36 +155,38 @@ fail() {
 cd "$REPO" || { echo "release.sh: cannot cd to $REPO" >&2; exit 2; }
 
 # --- 0. preflight: the part no script can verify ---------------------------
-# Five things stand between this repository and a safe publish that neither a
-# test nor this script can check from in here: two of them are about the OTHER
-# repo, one is about a database, one is about GitHub, and one has to happen on
-# a machine where `claude plugin install` may write under ~/.claude (which this
-# repo's law forbids doing here — GD-T7). So they are printed, with the command
-# that measures each, and confirmed by a human.
+# Four things stand between this repository and a safe publish that neither a
+# test nor this script can check from in here: two are about history that is
+# already public, one is about a database, and one has to happen on a machine
+# where `claude plugin install` may write under ~/.claude (which this repo's
+# law forbids doing here — GD-T7). So they are printed, with the command that
+# measures each, and confirmed by a human.
+#
+# (b) carries more weight than it used to. While releases went to a separate
+# empty repo, this repo's history was a private embarrassment; now that the
+# catalog is served from here, every `/plugin marketplace add msdrx/touch`
+# clones it. The item did not get easier — the blast radius grew.
 step 0 "Preflight — the manual checklist"
 cat <<'CHECKLIST'
    Confirm each of these has actually been done. Commands are given so you can
    re-measure rather than trust a number written down some other day.
 
-   (a) The dev repo's tip no longer carries the burned token blob, i.e. the
-       local commits are pushed:
-           git rev-parse origin/main        # must NOT be the token commit
+   (a) You accept that installing Touch CLONES THIS REPOSITORY, history and
+       all. That is what serving the catalog from here means; there is no
+       subdirectory or sparse form of a marketplace source that changes it.
    (b) The decision about this repo's HISTORY is executed — purge with
-       `git filter-repo`, or make the dev repo private and treat the release
-       repo as the only public artifact. Either way, the check is:
+       `git filter-repo` (the fix), or publish knowing what is in there. The
+       check is:
            git rev-list --all --objects | grep -i mytok
            git grep -aIhE 'mongodb://[^/[:space:]"<]+:[^@[:space:]"<]+@' $(git rev-list --all)
    (c) The MongoDB password that appears in those history blobs is rotated.
        Treat every credential this repo has ever seen as burned.
-   (d) The release repo exists, was created EMPTY, and is not a fork of or a
-       remote of this one. Step 7 re-proves the last part; the first two are
-       yours.
-   (e) Install-path verification was done ONCE on your own machine: install
+   (d) Install-path verification was done ONCE on your own machine: install
        from the marketplace, confirm the bin/ wrappers kept their exec bits
        through the cache copy, and run `touch-selfcheck`. It cannot happen
        here — every `claude plugin install` writes under ~/.claude.
 CHECKLIST
-note "local view of (a): origin/main = $(git rev-parse --short origin/main 2>/dev/null || echo '<no origin/main ref here>') (token commit: $TOKEN_TIP; a local ref can be stale — check on the host)"
+note "local view of (a): a clone of this repo is what an install downloads — $(git rev-list --all --count 2>/dev/null || echo '?') commit(s) of history come with it"
 # NOT `git rev-list … | grep -q`. Under `pipefail` a `-q` consumer exits on the
 # first hit, git dies of SIGPIPE, and the pipeline returns 141 — so the shape
 # reports "no match" exactly when it MATCHED, and only once the history is big
@@ -195,7 +195,7 @@ note "local view of (a): origin/main = $(git rev-parse --short origin/main 2>/de
 # NUL-bearing stream as binary.
 tokenblobs="$(git rev-list --all --objects 2>/dev/null | grep -ai mytok || true)"
 if [ -n "$tokenblobs" ]; then
-    note "local view of (b): the token blob IS still reachable in this clone's history"
+    note "local view of (b): the token blob IS still reachable in this clone's history — and this clone is now the install source (commit $TOKEN_TIP carries it in its TREE)"
 else
     note "local view of (b): no token-named blob reachable in this clone's history"
 fi
@@ -207,7 +207,7 @@ else
     if [ ! -t 0 ]; then
         fail "preflight needs a terminal — re-run interactively or set RELEASE_CONFIRM=yes"
     fi
-    printf '   Type "yes" to confirm all five: '
+    printf '   Type "yes" to confirm all four: '
     read -r answer
     [ "$answer" = yes ] || fail "preflight not confirmed"
 fi
@@ -323,8 +323,10 @@ fi
 
 # The payload is copies, only ever copies — and the count above is exactly why
 # this needs its own gate: `find -type f` does not count symlinks, so a stage
-# whose components are all dangling links reports a plausible number and sails
-# on to step 8's `cp -a`, which copies the dangle into the release clone.
+# whose components are all dangling links reports a plausible number and every
+# later gate reads a payload that is mostly not there. Installing copies
+# `plugin/touch/` out of the marketplace clone into `~/.claude/plugins/cache/`,
+# so a link that escapes the payload has nothing to point at once it lands.
 #
 # GD-U2, the CORRECTED law (probed three ways on CLI 2.1.220, 2026-07-28; the
 # old "a symlink is SKIPPED under --plugin-dir" rationale is REFUTED and must
@@ -365,7 +367,18 @@ fi
 # `sk-ant-` blobs without a murmur, which is why step 2's payload gate is the
 # leak gate. Always by explicit file path: a directory-level run does not check
 # remote-source marketplace entries, and the explicit form is immune to that.
-step 6 "claude plugin validate --strict (both manifests, staged copies)"
+#
+# The two manifests are read from two different places, and that asymmetry is
+# the layout, not an oversight:
+#   $STAGE/$MANIFEST     the STAGED plugin.json — bytes from HEAD, the copy a
+#                        consumer's cache receives.
+#   $REPO/$MARKETPLACE   the catalog IN PLACE. It is not payload, so it is not
+#                        in the stage; and it must be validated where it sits,
+#                        because a relative `source` resolves against the
+#                        marketplace root — copy the file to a temp directory
+#                        and `./plugin/touch` resolves to nothing. Step 1
+#                        already refused a dirty tree, so on-disk == HEAD here.
+step 6 "claude plugin validate --strict (plugin.json staged, marketplace.json in place)"
 if [ "$staged" != yes ]; then
     # Same one-fault-one-diagnosis rule as step 4: without this, a failed step 5
     # reports again here as "the stage carries no .claude-plugin/plugin.json",
@@ -378,191 +391,107 @@ elif ! command -v claude >/dev/null 2>&1; then
         fail "\`claude\` CLI not on PATH — a release is not cut without validating the manifests"
     fi
 else
-    for m in "$MANIFEST" "$MARKETPLACE"; do
-        if [ ! -f "$STAGE/$m" ]; then
-            fail "the stage carries no $m"
-        elif claude plugin validate "$STAGE/$m" --strict; then
-            ok "$m validates"
+    if [ ! -f "$STAGE/$MANIFEST" ]; then
+        fail "the stage carries no $MANIFEST"
+    elif claude plugin validate "$STAGE/$MANIFEST" --strict; then
+        ok "$MANIFEST validates (staged bytes)"
+    else
+        fail "$MANIFEST fails --strict validation"
+    fi
+    # A catalog that ships inside the payload is a second copy of itself under
+    # the same marketplace name. Cheap to check, and it is the exact regression
+    # the root-catalog layout replaced.
+    if [ -e "$STAGE/$MARKETPLACE" ]; then
+        fail "the stage carries $MARKETPLACE — the catalog is NOT payload; it belongs at the repo root only"
+    else
+        ok "the stage carries no marketplace.json (the catalog is not payload)"
+    fi
+    if [ ! -f "$REPO/$MARKETPLACE" ]; then
+        fail "no $MARKETPLACE at the repo root — a cloned marketplace is read from there and nowhere else"
+    elif claude plugin validate "$REPO/$MARKETPLACE" --strict; then
+        ok "$MARKETPLACE validates (repo root)"
+    else
+        fail "$MARKETPLACE fails --strict validation"
+    fi
+fi
+
+# --- 7. the publish target --------------------------------------------------
+# Publishing is a `git push` of THIS repository: the catalog sits at its root,
+# so whatever the remote's default branch holds is what the next `/plugin
+# marketplace add msdrx/touch` clones and what `/plugin marketplace update`
+# pulls. The gates here are therefore about this repo's remote — the old
+# "prove things about the OTHER repo" step has no subject any more, and the
+# properties it checked (fresh history, no dev remote, no deletions) were
+# statements about a publishing model that no longer exists. Do not reconstruct
+# them here: a deletion in THIS history is ordinary, and a dev remote is the
+# publish target.
+step 7 "The publish target ($REMOTE)"
+publishable=no
+remote_url="$(git remote get-url "$REMOTE" 2>/dev/null)"
+if [ -z "$remote_url" ]; then
+    fail "no remote named '$REMOTE' — add it, or name another with RELEASE_REMOTE=<name>; there is nowhere to publish"
+else
+    ok "$REMOTE = $remote_url"
+
+    # The `repository` field on the plugin page and the repo an install
+    # actually clones must be ONE repository. They are two independently-edited
+    # strings, and the day they drift the page links somewhere the plugin does
+    # not come from. Compared as identity, not spelling: `https://…/touch.git`
+    # and `git@github.com:msdrx/touch` are the same place.
+    remote_id="$(printf '%s\n' "$remote_url" | norm_urls)"
+    repo_field=""
+    if [ -n "${manifest_json:-}" ]; then
+        repo_field="$(python3 -c '
+import json,sys
+try:
+    r = json.load(sys.stdin).get("repository")
+except Exception:
+    r = None
+if isinstance(r, dict):
+    r = r.get("url")
+print(r if isinstance(r, str) else "")' <<<"$manifest_json" 2>/dev/null)"
+    fi
+    if [ -z "$repo_field" ]; then
+        note "HEAD:$PLUGIN/$MANIFEST declares no .repository — nothing to compare the remote against"
+    else
+        repo_id="$(printf '%s\n' "$repo_field" | norm_urls)"
+        if [ "$repo_id" = "$remote_id" ]; then
+            ok "plugin.json .repository names the repo being published ($repo_id)"
         else
-            fail "$m fails --strict validation"
+            fail "plugin.json .repository is $repo_field but $REMOTE is $remote_url — the plugin page would link away from the repo the install clones"
         fi
-    done
-fi
-
-# --- 7. freshness gates on the release clone -------------------------------
-# The one property no test in this repo can express, because it belongs to the
-# other repo (DISTRIBUTION-2). Under --check with no clone named, a throwaway
-# `git init` stands in: the gates then prove only that they run, which is still
-# the thing a dry run is for.
-step 7 "Freshness gates on the release clone"
-if [ -z "$REL" ]; then
-    if [ "$mode" = check ]; then
-        TMPREL="$(mktemp -d)"
-        REL="$TMPREL/release"
-        git init -q "$REL" && note "no --release-clone given; using a throwaway empty repo"
-    else
-        fail "--release-clone <path> is required for a real release"
-    fi
-fi
-
-# Resolve the release repository POSITIVELY. The obvious spelling — `[ -d
-# "$REL/.git" ]` — is false in two entirely ordinary situations, and in both of
-# them every gate below was skipped WITHOUT PRINTING A LINE while steps 8, 9 and
-# 10 went on working, because `git -C "$REL" …` walks up to the enclosing
-# repository and succeeds there:
-#
-#   * `$REL` is a path INSIDE a clone — the operator made the directory and the
-#     `git clone` failed or was never run. An empty directory is invisible to
-#     step 1, so nothing else catches it either.
-#   * `$REL` is a linked worktree, whose `.git` is a FILE, not a directory.
-#     Step 8's `git -C "$REL" rm -rq .` then deletes every tracked file of that
-#     worktree's branch, and step 9 commits and pushes the result.
-#
-# So: ask git what the toplevel is, require `$REL` to BE that toplevel, and
-# refuse anything that resolves to this development repository or shares its
-# object store. An unusable `$REL` is fatal in both modes — under --check a
-# silently empty step 7 printed "every gate through step 7 is green" about
-# gates that never ran, which is worse than no dry run at all.
-relok=no
-if [ -n "$REL" ]; then
-    reltop="$(git -C "$REL" rev-parse --show-toplevel 2>/dev/null)"
-    repophys="$(cd "$REPO" && pwd -P)"
-    relphys="$(cd "$REL" 2>/dev/null && pwd -P)"
-    topphys="$(cd "$reltop" 2>/dev/null && pwd -P)"
-    # Where the objects actually live: a linked worktree reports ITSELF as the
-    # toplevel, so only the common dir tells you whose history you are about to
-    # rewrite.
-    relcommon="$(cd "$REL" 2>/dev/null && d="$(git rev-parse --git-common-dir 2>/dev/null)" && cd "$d" 2>/dev/null && pwd -P)"
-    repocommon="$(cd "$REPO" && d="$(git rev-parse --git-common-dir 2>/dev/null)" && cd "$d" 2>/dev/null && pwd -P)"
-    # A BARE repo has no work tree, so `rev-parse --show-toplevel` fails there
-    # exactly as it does on a directory that is no repo at all. Both must be
-    # refused — steps 8-9 need a work tree — but they need different sentences:
-    # telling an operator to "clone the release repo there first" about a
-    # directory that IS a clone of it sends them to fix a thing that is not
-    # broken.
-    isbare="$(git -C "$REL" rev-parse --is-bare-repository 2>/dev/null)"
-    if [ ! -d "$REL" ]; then
-        fail "$REL does not exist — clone the release repo there first"
-    elif [ "$isbare" = true ]; then
-        fail "$REL is a BARE repository — steps 8-9 replace and commit a work tree; clone it non-bare"
-    elif [ -z "$topphys" ]; then
-        fail "$REL is not a git repository — clone the release repo there first"
-    elif [ "$relphys" != "$topphys" ]; then
-        fail "$REL is INSIDE the repository at $topphys, not its root — steps 8-9 would rewrite and push THAT repo"
-    elif [ "$topphys" = "$repophys" ]; then
-        fail "$REL resolves to this development repository — releases never go here (GD-T3)"
-    elif [ -n "$relcommon" ] && [ "$relcommon" = "$repocommon" ]; then
-        fail "$REL shares this repository's object store (a linked worktree?) — the release repo is a separate repository with its own history"
-    else
-        relok=yes
-        ok "release clone resolves to its own repository root at $topphys"
-    fi
-fi
-
-if [ "$relok" = yes ]; then
-    # `git rm -rq .` removes TRACKED files only, so anything untracked in the
-    # release clone survives step 8, gets swept up by step 9's `git add -A` and
-    # is pushed to a public repo. `.touch/server.json` — Touch's own per-boot
-    # token file, written into whatever directory the server was started from —
-    # is the realistic instance. Step 1 applies exactly this discipline to the
-    # dev repo; the clone that actually gets published deserves it more, and it
-    # has to run BEFORE anything is written.
-    relstate="$(git -C "$REL" status --porcelain 2>/dev/null)"
-    if [ -z "$relstate" ]; then
-        ok "the release clone is clean (tracked, staged and untracked)"
-    else
-        fail "the release clone has uncommitted or untracked files — step 9's \`git add -A\` would publish them"
-        note "first entries: $(printf '%s' "$relstate" | tr '\n' ';' | cut -c1-160)"
     fi
 
-    # A dev remote in the release clone is how contaminated history gets one
-    # `git push` away from being public. Compare against this repo's own remote
-    # URLs rather than a hardcoded name, so a rename cannot fool the gate.
-    devurls="$(git remote 2>/dev/null | while read -r r; do git remote get-url "$r" 2>/dev/null; done | norm_urls)"
-    relurls="$(git -C "$REL" remote 2>/dev/null | while read -r r; do git -C "$REL" remote get-url "$r" 2>/dev/null; done | norm_urls)"
-    # `read` over a here-string, never `for u in $devurls`: an unquoted
-    # expansion is both word-split AND pathname-expanded, so a remote URL
-    # holding a `*` or a `?` would be globbed against this repo's root and the
-    # gate would then compare directory names to URLs. A here-string keeps each
-    # line whole and the loop out of a subshell, so `shared` survives it.
-    shared=""
-    while IFS= read -r u; do
-        [ -n "$u" ] || continue
-        while IFS= read -r v; do
-            [ -n "$v" ] || continue
-            [ "$u" = "$v" ] && shared="$u"
-        done <<<"$relurls"
-    done <<<"$devurls"
-    if [ -n "$shared" ]; then
-        fail "the release clone has a remote in common with this repo ($shared)"
-    elif [ -z "$relurls" ]; then
-        # No remote at all is not the same reassurance as "a different remote",
-        # and printing one `ok` for both is how a dry run against a throwaway
-        # `git init` came to look like a passing gate.
-        if [ "$mode" = check ]; then
-            note "the release clone has no remote at all — this gate proved only that it runs"
+    # What the remote serves right now, so the transcript says what this push
+    # would change rather than leaving the operator to infer it. A fetch
+    # failure is a note, not a gate: the push below reports the truth anyway,
+    # and an offline dry run is still worth running.
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    if [ "$branch" = HEAD ]; then
+        fail "HEAD is detached — publish from a branch that tracks $REMOTE"
+    elif ! git fetch --quiet "$REMOTE" 2>/dev/null; then
+        note "could not fetch $REMOTE — the ahead/behind reading below may be stale"
+    fi
+    upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"
+    if [ -z "$upstream" ]; then
+        # No backticks in a double-quoted note, ever: they are command
+        # substitution, and a message ABOUT a push would run one.
+        note "$branch tracks nothing — step 8 will push it with -u to set tracking"
+        publishable=yes
+    else
+        # `rev-list --left-right --count` in one call: two separate counts can
+        # disagree with each other if anything moves between them.
+        counts="$(git rev-list --left-right --count "$upstream...HEAD" 2>/dev/null)"
+        behind="$(printf '%s' "$counts" | cut -f1)"
+        ahead="$(printf '%s' "$counts" | cut -f2)"
+        if [ "${behind:-0}" -gt 0 ] 2>/dev/null; then
+            fail "$branch is $behind commit(s) BEHIND $upstream — integrate them first; a release does not force-push"
+        elif [ "${ahead:-0}" -gt 0 ] 2>/dev/null; then
+            ok "$ahead commit(s) to publish onto $upstream"
+            publishable=yes
         else
-            fail "the release clone has no remote — a real release has nowhere to push"
+            note "$branch is level with $upstream — the payload is already published; only the version bump delivers an update"
         fi
-    else
-        ok "no dev remote in the release clone"
-    fi
-
-    # A release repo only ever gains files. A deletion in its history means a
-    # tree was published and then taken back — which git does not do.
-    if [ -z "$(git -C "$REL" log --all --diff-filter=D --name-only --pretty=format: 2>/dev/null)" ]; then
-        ok "no deletions in the release history"
-    else
-        fail "the release history contains deletions — it is not a fresh-history repo"
-    fi
-
-    # The number to expect, stated once so there is no second reading: the
-    # release repo's initial commit (the one that made it non-empty) plus one
-    # commit per release already published — releases-so-far + 1, counted
-    # BEFORE this run's own commit in step 9. A repo with more commits than
-    # that has a history nobody planned.
-    count="$(git -C "$REL" rev-list --all --count 2>/dev/null || echo 0)"
-    if [ -n "${RELEASE_COMMITS_EXPECTED:-}" ]; then
-        # Numeric comparison, not `=`: an operator who exports " 3" or 03 means
-        # three, and a STRING compare would quietly report a mismatch and send
-        # them hunting through the other repo's history for a commit that is
-        # not there. Whitespace is stripped, the rest must be digits, and
-        # anything else fails loudly rather than dying inside `-eq`.
-        expected="$(printf '%s' "$RELEASE_COMMITS_EXPECTED" | tr -d '[:space:]')"
-        case "$expected" in
-            ''|*[!0-9]*)
-                fail "RELEASE_COMMITS_EXPECTED='$RELEASE_COMMITS_EXPECTED' is not a non-negative integer" ;;
-            *)
-                if [ "$count" -eq "$expected" ]; then
-                    ok "release history holds $count commit(s), as expected"
-                else
-                    fail "release history holds $count commit(s), expected $expected"
-                fi ;;
-        esac
-    else
-        # The number to hand the operator is the one that will be RIGHT NEXT
-        # TIME, not the one measured now: $count is taken before this run's own
-        # commit, so pinning it and then releasing makes the next run fail step
-        # 7 on a healthy repo. It is a monotonically increasing quantity — "from
-        # here on" is never true of it.
-        note "release history holds $count commit(s) — the initial commit plus one per release published so far; if this run publishes, set RELEASE_COMMITS_EXPECTED=$((count + 1)) before the NEXT one, and bump it by one after every release"
-    fi
-
-    # The release repo's commits carry a git identity that becomes public.
-    #
-    # `config --local`, and the flag is the whole gate. A bare `git config
-    # user.email` reads the ENTIRE cascade — local, then global, then system —
-    # so on any machine with a global identity (i.e. every machine where a
-    # release is actually cut) it answers "yes" about the operator's usual
-    # address and reports a per-repo identity that is not there. The advisory
-    # would then fire only in the environment that does not need it, and stay
-    # silent in the one that does, while step 9 commits the operator's personal
-    # address into a public repo. `--local` prints nothing and exits non-zero
-    # when the key is unset locally, whatever the global holds.
-    if [ -z "$(git -C "$REL" config --local user.email 2>/dev/null)" ]; then
-        note "no per-repo user.email in the release clone — set one BEFORE the first commit if your address should not be published"
-    else
-        ok "release clone has a per-repo user.email"
     fi
 fi
 
@@ -576,60 +505,36 @@ if [ "$mode" = check ]; then
     exit 0
 fi
 
-# --- 8. replace the release tree from the STAGE ----------------------------
-# THE ONE LEGITIMATE `cp` IN THIS FILE, and it copies out of $STAGE — the tree
-# step 5 built from git — never out of the working tree. `rm -rq .` first so a
-# file deleted from the payload actually leaves the release repo instead of
-# lingering there forever. Both manifests are already in the stage (the release
-# repo is flat: repo root == plugin root == marketplace root), so nothing is
-# hand-written into $REL here.
-step 8 "Replace the release tree from the stage"
-if [ -n "$(git -C "$REL" ls-files 2>/dev/null)" ]; then
-    git -C "$REL" rm -rq . || fail "could not clear the release clone"
-fi
-cp -a "$STAGE"/. "$REL"/ || fail "could not copy the stage into the release clone"
-ok "release clone now holds the staged payload"
-
-# --- 9. commit and push -----------------------------------------------------
-step 9 "Commit and push the release"
-git -C "$REL" add -A || fail "git add failed in the release clone"
-committed=no
-if git -C "$REL" diff --cached --quiet; then
-    note "nothing changed since the last release — no commit made"
+# --- 8. publish -------------------------------------------------------------
+# The point of no return, and it is one command. There is no staging, no copy
+# and no second repository: the marketplace IS this repo, so pushing it is the
+# release. Everything above ran so that this line is boring.
+step 8 "Push to $REMOTE"
+if [ "$publishable" != yes ]; then
+    note "nothing to push — $REMOTE already has this commit"
+elif [ -z "$upstream" ]; then
+    git push -u "$REMOTE" "$branch" && ok "pushed $branch to $REMOTE (tracking set)" \
+        || fail "push failed"
 else
-    git -C "$REL" commit -q -m "touch $version" || fail "commit failed in the release clone"
-    committed=yes
-    ok "committed 'touch $version'"
-    # Printed here rather than left to arithmetic in step 7's advisory: this is
-    # the count that exists now, so it is the one the next run must expect.
-    note "the release repo now holds $(git -C "$REL" rev-list --all --count 2>/dev/null) commit(s) — that is the RELEASE_COMMITS_EXPECTED for the next run"
-fi
-# Only push what this run committed. Pushing anyway and printing `ok: pushed`
-# after "no commit made" reads like a release went out when nothing did — and
-# that reading is what an operator carries away from the transcript.
-if [ "$committed" = yes ]; then
-    git -C "$REL" push || fail "push failed"
-    ok "pushed"
-else
-    note "nothing to push (if an earlier run left a commit unpushed, push the release clone by hand)"
+    git push "$REMOTE" "$branch" && ok "pushed $branch to $REMOTE" || fail "push failed"
 fi
 
-# --- 10. the tag gate -------------------------------------------------------
+# --- 9. the tag gate --------------------------------------------------------
 # Free, and it buys two checks: plugin.json/marketplace.json version agreement,
-# and a dirty-tree refusal in the release clone. `--push` is optional because
-# the `{name}--v{version}` tag only matters for plugin dependency constraints,
+# and a dirty-tree refusal. `--push` is optional because the
+# `{name}--v{version}` tag only matters for plugin dependency constraints,
 # which Touch has none of (DISTRIBUTION-5).
-step 10 "claude plugin tag --dry-run"
+step 9 "claude plugin tag --dry-run"
 if ! command -v claude >/dev/null 2>&1; then
     skip "\`claude\` CLI not on PATH"
-elif claude plugin tag "$REL" --dry-run; then
+elif claude plugin tag "$REPO" --dry-run; then
     ok "tag dry run agrees on $version"
     if [ "$tag_push" = yes ]; then
-        claude plugin tag "$REL" --push && ok "tag pushed" || fail "tag push failed"
+        claude plugin tag "$REPO" --push && ok "tag pushed" || fail "tag push failed"
     fi
 else
     fail "claude plugin tag --dry-run refused"
 fi
 
-printf '\nrelease.sh: touch %s released from the release clone at %s\n' "$version" "$REL"
+printf '\nrelease.sh: touch %s published — users get it with `/plugin marketplace update msdrx-tools` then `/plugin update touch@msdrx-tools`\n' "$version"
 exit 0

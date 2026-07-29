@@ -42,7 +42,16 @@ SETTINGS = REPO / ".claude" / "settings.json"
 MATCHER_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write", "Bash")
 #: The whole of `.claude/settings.json` after item 07 — a closed set, so a
 #: third top-level key has to be argued for rather than merely committed.
-SETTINGS_KEYS = {"statusLine", "enabledPlugins"}
+#: The closed set of top-level keys the committed session-wide settings file
+#: may carry. `extraKnownMarketplaces` joined it when the catalog moved to the
+#: repo root: it points `msdrx-tools` at `"path": "./"` — this checkout's own
+#: `.claude-plugin/marketplace.json` — so `touch@msdrx-tools` in
+#: `enabledPlugins` resolves in the dev loop. It registers a MARKETPLACE, which
+#: is the one thing this arm is not about: the failure it was written for is a
+#: second HOOK registration (two registrations of `orch_scope_guard.py` fired
+#: it twice per tool call, measured 2 vs 1 — GD-U5). Adding a key here is
+#: deliberate; the two assertions above still refuse `hooks` outright.
+SETTINGS_KEYS = {"statusLine", "enabledPlugins", "extraKnownMarketplaces"}
 
 failures = []
 
@@ -164,6 +173,18 @@ def test_settings_registration():
     check(isinstance(enabled, dict) and enabled.get("touch@inline") is True,
           'settings.json commits "enabledPlugins": {"touch@inline": true} so '
           "the plugin's registration is actually live in the dev loop")
+    # The marketplace entry, checked for the one thing that can be wrong about
+    # it: WHERE it points. The catalog is `<repo>/.claude-plugin/marketplace.json`,
+    # so the marketplace root is the repo root — `./`, never `./plugin/touch`,
+    # which is the plugin and holds no catalog. A stale path here registers a
+    # marketplace that resolves to nothing and `touch@msdrx-tools` never loads.
+    markets = settings.get("extraKnownMarketplaces")
+    entry = markets.get("msdrx-tools") if isinstance(markets, dict) else None
+    source = entry.get("source") if isinstance(entry, dict) else None
+    check(isinstance(source, dict) and source.get("source") == "directory"
+          and str(source.get("path", "")).rstrip("/") in ("", "."),
+          f"extraKnownMarketplaces points msdrx-tools at the repo root, where "
+          f"the catalog is (found: {source})")
     # The file's other resident is not collateral: the status line is the one
     # thing that was in here before the hooks block and must survive its removal.
     status_line = settings.get("statusLine")
