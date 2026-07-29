@@ -3,7 +3,16 @@
     "type": "command",
     "command": ".claude/statusline.sh"
   },
+  "extraKnownMarketplaces": {
+    "msdrx-tools": {
+      "source": {
+        "source": "directory",
+        "path": "./plugin/touch"
+      }
+    }
+  },
   "enabledPlugins": {
-    "touch@inline": true
+    "touch@inline": true,
+    "touch@msdrx-tools": true
   }
 }

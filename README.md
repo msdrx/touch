@@ -4,20 +4,51 @@
   <img src="https://github.com/msdrx/touch/blob/main/resources/touch_the_agent.png" alt="The Creation of Adam — touch the agent" width="820">
 </p>
 
-Touch shows you what the subagents in a Claude Code session are actually
-doing: a session sidebar, the live agent tree, per-loop cards and running
-token counters, served as a local web page over the transcripts the CLI
-already writes. It ships as a Claude Code plugin, together with ten skills:
-four orchestration skills whose research → plan → implementation loops report
-to the same dashboards that render them, and six engineering-practice skills
-the agents inside those loops can draw on.
+Touch is a Claude Code plugin for **watching your agents work**. A session
+that spawns subagents — a research pass, an implementation loop, a review
+fleet — shows you almost nothing about them in the terminal. Touch puts that
+activity on a local web page: which plans are running, what stage each loop
+is in, what the gates decided, and what everything costs in tokens.
 
-Touch never writes to `~/.claude`. It tails it, keeps its own history under
-`.touch/` in your project (the CLI's retention sweep deletes transcripts), and
-optionally mirrors that history into a local MongoDB.
+Touch never writes to `~/.claude` — it only reads what the CLI already
+writes — and it keeps its own history under `.touch/` in your project,
+optionally mirrored into a local MongoDB.
 
 Version 0.2.0 is **read-only**: it renders no button it cannot honestly
 honour, so nothing here starts, stops or restarts anything yet.
+
+## What the plugin gives you
+
+Six commands land on your `PATH` when the plugin is enabled:
+
+| command | what it does | why it exists | status |
+|---|---|---|---|
+| `touch-monitor` | serves the monitoring page (port 8931): live plan cards, stages, gate verdicts and token counters for an orchestration run | a multi-agent run is unreadable from a terminal | works |
+| `touch-watcher` | daemon that turns a Workflow run's journal into dashboard events | progress must not depend on agents remembering to report — the journal is deterministic | works |
+| `touch-status` | appends one progress event from a script or an agent | the human-readable colour on top of the journal's facts | works |
+| `touch-cycle-reporter` | writes one report per implement → test → critique cycle | so a finished run leaves a readable record, not just a log | works |
+| `touch-selfcheck` | eight PASS/FAIL checks of an installation | so "it doesn't work" turns into one failing line you can act on | works |
+| `touch-serve` | the Touch page (port 8932) | one page over everything the CLI writes, sessions included | **not implemented** |
+
+**About `touch-serve`: not implemented.** The backend behind it (transcript
+ingest, read API, the Mongo mirror) exists and is tested, but the page it
+serves today is a bare v0 placeholder, not a dashboard anyone would use. The
+plan is for `touch-serve` to serve **the same page as `touch-monitor`**,
+extended over everything the aggregator sees, so Touch ends up with one
+dashboard instead of two. Until then, `touch-monitor` is the page you
+actually use.
+
+The plugin also ships **ten skills** (invoked as `/touch:<name>`): four
+orchestration skills that drive research → plan → implement loops and report
+them to the dashboard, and six engineering-practice skills the agents inside
+those loops draw on. They are listed under [Use](#use) below, and cost
+~1,257 tokens of always-on context across all ten — a measured figure
+(`claude plugin details touch`); the plugin's own
+[README](plugin/touch/README.md) has the per-skill breakdown.
+
+And **one hook**: `orch_scope_guard.py`, a `PreToolUse` guard that keeps
+subagents inside their own run's folder while an orchestration run is active.
+It is inert when no run is active.
 
 ## Install
 
@@ -28,14 +59,13 @@ From any Claude Code session:
 /plugin install touch@msdrx-tools
 ```
 
-Then `/reload-plugins`. Touch installs **disabled** (`defaultEnabled: false`)
-because it carries a `PreToolUse` hook — enable it from `/plugin` after
-reading the plugin's own [README](plugin/touch/README.md), which discloses
-what it reads, what it writes, what it serves, and what the hook costs. The
-same file ships inside the plugin.
+Then `/reload-plugins`. Touch installs **disabled** because it carries a
+`PreToolUse` hook — enable it from `/plugin` after reading the plugin's own
+[README](plugin/touch/README.md), which discloses what it reads, what it
+writes, what it serves, and what the hook costs.
 
-Want to read the code before registering anything? Run it straight from a
-clone of this repository, for one session, with nothing installed:
+Want to try it without installing anything? Run it straight from a clone of
+this repository, for one session:
 
 ```
 claude --plugin-dir plugin/touch
@@ -49,30 +79,38 @@ From the project you want to use it in:
 touch-selfcheck
 ```
 
-Eight checks, one `PASS`/`FAIL` line each — the Python 3.11 floor, the right
-aggregator on the import path, the web assets, the project root, task state
-resolving into your project (never into the plugin's own directory), a
-bindable loopback port, intact exec bits, and one event surviving a real
-write-and-read round trip. It exits non-zero on any failure and ends with the
-command to run next.
+Eight checks, one `PASS`/`FAIL` line each. It exits non-zero on any failure
+and ends with the command to run next.
 
 ## Use
 
+The page you use today is the monitoring dashboard.
+
+**1. Run an orchestration loop.** Ask for a plan, then have it implemented:
+
 ```
-touch-serve
+/touch:execute-research  <what you want researched>
+/touch:implement-plan    <the plan it wrote>
 ```
 
-It prints a loopback URL carrying a per-boot token —
-`http://127.0.0.1:8932/?token=<per-boot token>` — and writes the same URL to
-`.touch/server.json`. Open it and you get the sessions of the project you
-started it in. Every route except `/health` requires the token; the server
-binds `127.0.0.1` only, and the wrappers refuse to open a public bind on your
-behalf. To reach the page from another machine, forward the port over SSH
-(`ssh -L 8932:127.0.0.1:8932 you@host`) instead of exposing it.
+**2. Watch it.** Runs driven by the skills start the dashboard daemons for
+you; to start them by hand for a task:
 
-The ten skills invoke under the plugin's namespace, in two groups.
+```bash
+TASK=$PWD/.claude/local-orchestrators/<task-name>
+ORCH_STATE_DIR="$TASK" touch-monitor &   # the dashboard: http://127.0.0.1:8931
+ORCH_STATE_DIR="$TASK" touch-watcher &   # feeds it from the run's journal
+```
 
-**Orchestration** — the loops the dashboards render:
+**Local only, by design.** Both servers bind `127.0.0.1` and print a URL
+carrying a per-boot token; every route except `/health` requires it, and the
+wrappers refuse to open a public bind on your behalf. To reach a page from
+another machine, forward the port over SSH
+(`ssh -L 8931:127.0.0.1:8931 you@host`) instead of exposing it.
+
+### The skills
+
+**Orchestration** — the loops the dashboard renders:
 
 | skill | what it does |
 |---|---|
@@ -94,14 +132,7 @@ well:
 | `/touch:testing-discipline` | write or restructure tests, and read testability pain as an architecture signal |
 
 The six are condensed guidance derived from the books named on each one's
-`Sources:` line — not the works themselves. They cost context on every
-session: `claude plugin details touch` reports ~1,257 tokens always-on across
-all ten, up from the ~459 measured at 0.1.0. The plugin's own
-[README](plugin/touch/README.md) has the per-skill breakdown.
-
-Orchestration runs get their own dashboard: `touch-monitor` (port 8931, same
-loopback-and-token posture), plus `touch-status`, `touch-watcher` and
-`touch-cycle-reporter`. The skills call these by name; you rarely need to.
+`Sources:` line — not the works themselves.
 
 ## Update / uninstall
 
@@ -122,26 +153,18 @@ gone too.
 
 ## Running from this repository
 
-The aggregator is plain Python 3 stdlib — nothing to install. It lives in the
-shipping subtree, which is the only copy of it, so run the wrapper that knows
-where that is:
+The code is plain Python 3 stdlib — nothing to install. It lives in
+`plugin/touch/`, the shipping subtree and the only copy, so run the wrappers
+that know where that is:
 
 ```bash
-plugin/touch/bin/touch-serve                 # binds 127.0.0.1:8932
-# prints:  open: http://127.0.0.1:8932/?token=<per-boot token>
-#          token written to .touch/server.json (0600)
+plugin/touch/bin/touch-serve                 # binds 127.0.0.1:8932, prints the tokened URL
 ```
 
-`touch-serve`, `touch-monitor` and `touch-watcher` are the three you invoke
-directly; `touch-status` and `touch-cycle-reporter` are the same kind of
-program, called by the skills rather than by you, and `touch-selfcheck`
-verifies an installation. All six are on `PATH` in any session that has the
-plugin enabled, and `plugin/touch/bin/` is where they are otherwise. The
-equivalent of the first, for hacking on the module itself, is
+All six commands are on `PATH` in any session that has the plugin enabled,
+and in `plugin/touch/bin/` otherwise. The one module-direct form, for hacking
+on the aggregator itself, is
 `PYTHONPATH=plugin/touch python3 -m aggregator.server`.
-
-Every route except `/health` requires that per-boot token, and the WebSocket
-upgrade enforces an Origin/Host allowlist.
 
 Tests — stdlib only, no pytest; every file is a standalone executable:
 
@@ -151,30 +174,14 @@ python3 tests/test_docs.py    # any single file runs alone
 ```
 
 Development details — repository layout, the shipping subtree, the release
-gate, how to add a test — live in [CONTRIBUTING.md](CONTRIBUTING.md).
+gate, how to upload a release to the marketplace — live in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-## What works today
+## Control verbs — planned, none shipped
 
-| area | state |
-|---|---|
-| session discovery, transcript/journal ingest, agent + run graph, token rollups | implemented (`plugin/touch/aggregator/`) |
-| read API + WebSocket with bounded replay and `(stream, seq)` resume | implemented (`plugin/touch/aggregator/server.py`) |
-| touch-visual v0 — sidebar, agent tree, loop cards, live token counters | implemented, **read-only** |
-| Mongo mirror (optional, write-behind, rebuildable) | implemented (`plugin/touch/aggregator/mirror.py`, see `plugin/touch/docs/mongo.md`) |
-| control plane — start / stop / restart / terminate | **not shipped.** No control affordance renders in v0 |
-| terminal-fidelity PTY view | not shipped (the transcript supports a semantic re-render, not a terminal) |
-
-"Implemented" here means the module and its tests exist in this tree — the
-suite is the authority, not this table: run `tests/run_all.sh` and believe it.
-
-Nothing in the UI shows a control it cannot honestly perform. A degraded or
-derived state is always labelled as one ("closed — no verdict", "archived —
-source transcripts unavailable", "unknown — idle 7 m").
-
-## Control verbs — the honest table
-
-This is the whole vocabulary. Every document, skill, and UI element uses these
-words with these meanings (GD-4); nothing here is shipped in v0.
+Touch's end goal is managing agents, not just watching them. This table is
+the whole planned vocabulary — every document, skill and UI element uses
+these words with these meanings — and **nothing in it is shipped in v0**:
 
 | verb | how it would work | determinism |
 |---|---|---|
@@ -184,37 +191,26 @@ words with these meanings (GD-4); nothing here is shipped in v0.
 | **restart** | re-invoke the workflow script with the stored partition (`subplans_file`) and `only:[ids]`: fresh agents, attempt numbering continues, the divide step skipped. `Workflow({resumeFromRunId})` is **not** restart — it replays agents without re-executing them | model-mediated |
 | **pause** | does not exist as a CLI channel. The only honest form is a hook gate (a `PreToolUse` hook that holds its response), which is per-agent and takes effect at the next tool boundary. Probed and working (2026-07-26) but **not shipped**, and not rendered until it is | deferred |
 
-Two stop granularities, never conflated (GD-8): a **run-level** stop exists for
-Workflow runs via the launch `toolUseResult.taskId` and stops the whole loop; a
-**per-agent** stop exists only for Agent-tool spawns, where the task id is the
-agent's own 17-hex id. A Workflow agent renders its per-agent stop disabled,
-with that reason. Full ladder and session classes:
-`plugin/touch/docs/control-semantics.md`.
+A run-level stop (a whole Workflow loop) and a per-agent stop are different
+things and are never conflated. The full ladder and the session classes live
+in `plugin/touch/docs/control-semantics.md`.
 
 ## Optional: the Mongo mirror
 
-Touch works with **no database at all**. Mongo is a write-behind projection of
-data that already lives in files, fully rebuildable from them; when it is
-absent, down, or `pymongo` is not installed, the live view is unaffected and
-`/health` says `mirror: absent | down | degraded`. Only history and backfill
-degrade.
-
-If you want it, `plugin/touch/docs/mongo.md` has the exact recipe. Two rules
-from it, here so nobody has to go looking: the database binds **loopback only**
-(`-p 127.0.0.1:27017:27017`, `--auth`, a named volume) — Touch refuses to
-mirror into a mongod with zero configured users — and the database port is
-**never** published (no `sbx ports … 27017`, not "just for a minute"); the
-mirror holds the same unredacted transcripts the token posture exists to
-protect, so use `docker exec touch-mongo mongosh …` instead.
+Touch works with **no database at all**. The mirror is a write-behind copy of
+history that already lives in files, fully rebuildable from them; when Mongo
+is absent, down, or `pymongo` is not installed, the live view is unaffected
+and `/health` says so. If you want it, `plugin/touch/docs/mongo.md` has the
+exact recipe: the database binds loopback only (`127.0.0.1:27017`), with
+auth, and its port is never exposed off the machine — the mirror holds the
+same unredacted transcripts the token posture exists to protect.
 
 **"Separate collections for separate session datas" — asked, and declined.**
-What you get instead is per-session *isolation*: one collection per entity type
-(sessions, records, agents, runs, usage, …), each document carrying an indexed
-`sessionId`/`sessionKey`, and per-session filtered queries. The reason is this
-machine's own numbers: 6 transcripts and 7 session ids in one project already
-means 7+ collections, the sidebar's "all sessions, newest first" becomes an
-N-collection scan, and every collection duplicates every index. Nothing is
-lost — the isolation you asked for is a filter, not a namespace.
+Instead each entity type has one collection (sessions, records, agents, runs,
+usage, …) and every document carries an indexed `sessionId`, so per-session
+isolation is a filter, not a namespace. Per-session collections would turn
+"all sessions, newest first" into an N-collection scan and duplicate every
+index.
 
 ## Where the design lives
 

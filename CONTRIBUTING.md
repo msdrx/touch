@@ -194,20 +194,41 @@ Every number in either README is a measured claim, not an estimate. Re-measure
 with `claude --plugin-dir plugin/touch plugin details touch` and paste what it
 actually printed.
 
-## Releasing
+## Releasing — uploading the plugin to the marketplace
+
+What users install is **not** this repository. `/plugin marketplace add`
+clones a repo's history, and this repo's history is permanently contaminated
+(a burned token blob, credentialed database URIs, deleted run transcripts),
+so releases are published to a separate repository created **empty** —
+`msdrx/touch-plugin` — and that repository *is* the marketplace.
+`plugin/touch/.claude-plugin/marketplace.json` is the marketplace manifest:
+it names the marketplace `msdrx-tools` and lists the plugin. The dev repo is
+never an install source, and no checkout trick (`--sparse`, a subdir) makes
+it one — those limit the checkout, not the objects.
 
 `scripts/release.sh` **is** the checklist — there is deliberately no
-RELEASE.md. What to know before touching it:
+RELEASE.md. To upload a new version:
 
-- The version lives in exactly one place:
-  `plugin/touch/.claude-plugin/plugin.json`. `CHANGELOG.md`'s top entry must
-  name that same version — a guard enforces it, because that bump is the only
-  thing that delivers an update to installed users.
-- The payload is built by `git archive` from a **committed** tree into a
-  separate, flat release repository. The working tree is never copied, and
-  the dev repo is never an install source.
-- `scripts/release.sh --check` runs every gate up to the point of no return
-  and changes nothing. Run it early and often.
+1. Bump the version in `plugin/touch/.claude-plugin/plugin.json` — the only
+   place a version is declared — and give `CHANGELOG.md` a top entry naming
+   the same version (a guard enforces the agreement). That bump is the only
+   thing that delivers an update to installed users.
+2. Commit. The payload is built by `git archive` from the **committed**
+   tree; the working tree is never copied.
+3. Dry-run every gate: `scripts/release.sh --check`. It stops before the
+   point of no return, touches no release repo, and reports every failure
+   rather than the first. Run it early and often.
+4. Clone the release repository somewhere local, then run
+   `scripts/release.sh --release-clone <path-to-that-clone>`. A green run
+   stages the payload with `git archive`, commits it in the release clone,
+   and pushes — that push is the upload.
+5. Users pick the release up with `/plugin marketplace update msdrx-tools`
+   followed by `/plugin update touch@msdrx-tools` — third-party marketplaces
+   do not auto-update.
+
+Never `cp -r` the payload into the release repo by hand: that shortcut is
+exactly what the gates exist to prevent (probe E6 shipped a tracked leak and
+a `__pycache__/` that way).
 
 ## If you run the orchestration skills here
 
