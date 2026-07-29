@@ -48,6 +48,12 @@ Rules this file keeps:
 * R-37's phase-4 control arm is excluded with the rest of phase 4, and the live
   smoke check against the real `~/.claude` is manual, never acceptance
   (sp-14's shared decisions).
+* Nothing here needs a *live Claude process*. R-46's `live:` arm is the one
+  claim a frozen corpus cannot make on its own — liveness is a `(pid,
+  procStart)` fact about the machine running the suite — so those arms SKIP
+  where no live session exists and the historical arm is asserted instead
+  (:data:`LIVE_REGISTRY`, GD-C7). That is what keeps this file green in a
+  clean checkout, which is `release.sh` step 2's gate.
 """
 
 import asyncio
@@ -113,6 +119,59 @@ FOREIGN_SLUGS = tuple(sorted(
     entry.name for entry in (DISCOVERY / "projects").iterdir()
     if entry.is_dir() and entry.name != LIVEIO_SLUG
 )) if (DISCOVERY / "projects").is_dir() else ()
+
+
+def _registry_entry_is_live():
+    """True when the frozen registry entry's pid is running with its recorded
+    start time.
+
+    Deliberately the `(pid, procStart)` half of `sessions.read_registry`'s
+    liveness rule and nothing else — not the cwd scoping, `_SESSION_ID_RE`,
+    `procStart.isdigit()` or the pid type/range gates it also applies
+    (`plugin/touch/aggregator/sessions.py:706-731`). The frozen corpus
+    satisfies every one of those, so on THIS input the two agree; the pid half
+    is the only one that varies by machine, which is the whole reason this
+    predicate exists. If the corpus's `cwd` ever diverges from `OWNED_CWD`,
+    do not widen the copy — derive liveness by calling `sess.read_registry`
+    over the corpus's `sessions/` dir instead.
+    """
+    try:
+        entry = json.loads(
+            (DISCOVERY / "sessions" / "15934.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):                               # pragma: no cover
+        return False
+    return (sess.read_proc_start(entry.get("pid")) == entry.get("procStart")
+            and entry.get("procStart") is not None)
+
+
+#: R-46's `live:` arm needs a **running process**, and no fixture can freeze
+#: one. `sessions.read_registry` calls the frozen `sessions/15934.json` entry
+#: live only when THIS machine's `/proc/<pid>/stat` field 22 equals the recorded
+#: `procStart` — the `(pid, procStart)` identity that pid reuse forces. On any
+#: machine where that pid is gone (every machine but the one the corpus was
+#: frozen on, and every clean checkout), the entry is `registry_stale_pid` and
+#: its session — `a8d43bb1…`, which the corpus deliberately gives NO top-level
+#: transcript — produces no row at all.
+#:
+#: So liveness is measured here, once, and the arms that depend on it skip
+#: rather than fail: `run_all.sh`'s header promises "files that read the absent
+#: things SKIP there; nothing crashes", and a live Claude process is an absent
+#: thing (GD-C7). Everything the corpus *can* attest to still runs.
+#:
+#: The `kind:"live"` mapping is NOT lost by skipping here, so do not "restore"
+#: the unconditional assertion: `test_api.py`'s
+#: `test_sessions_lists_both_classes` pins `live:<pid>-<procStart>` →
+#: `kind:"live"` on a synthetic registry, and
+#: `test_sessions.py`'s `test_a_reused_pid_is_not_a_live_session`
+#: / `test_the_project_dir_yields_six_documents_exactly_one_live` cover the
+#: registry identity and the `registry_stale_pid` path against a synthetic
+#: `proc_root`. What is unavailable off the freezing machine is only the
+#: *composition-level* claim, which is exactly the machine-dependent part.
+LIVE_REGISTRY = _registry_entry_is_live()
+
+#: The `/api/sessions` floor: the four `liveio` top-level transcripts, plus the
+#: `live:` row only while the frozen registry entry's process is running.
+SESSION_ROWS = 5 if LIVE_REGISTRY else 4
 
 #: MONGOSCHEMA-4's measurement: pymongo's default server selection stalls a
 #: poll loop for 30.1 s against a dead port. Nothing here may approach it.
@@ -199,7 +258,9 @@ def build_corpus(tmp):
       control: a `projects/*` enumerator ingests them, a scoped one must not.
     * `sessions/15934.json` — the live-session registry entry (R-46's `live:`
       arm; its filename is the raw pid, which is why identity is
-      `(pid, procStart)`).
+      `(pid, procStart)`). It only *reads* live where that pid is running with
+      the recorded start time; elsewhere the arms that need it skip — see
+      :data:`LIVE_REGISTRY`.
     """
     root = os.path.join(tmp, "claude")
     owned = os.path.join(root, "projects", OWNED_SLUG)
@@ -370,11 +431,17 @@ def test_no_mongod_the_whole_read_api_answers():
               "…and 'absent' is a state, not an error (GD-22)")
 
         status, sessions = get("/api/sessions")
-        check(status == 200 and sessions["count"] >= 5,
+        check(status == 200 and sessions["count"] >= SESSION_ROWS,
               f"the sidebar has rows: {sessions['count']} sessions")
         kinds = {row["kind"] for row in sessions["sessions"]}
-        check(kinds == {"live", "historical"},
-              f"…both arms of R-46's tagged union are listed, got {sorted(kinds)}")
+        if LIVE_REGISTRY:
+            check(kinds == {"live", "historical"},
+                  f"…both arms of R-46's tagged union are listed, got {sorted(kinds)}")
+        else:
+            check(kinds == {"historical"},
+                  f"…R-46's historical arm is listed, got {sorted(kinds)}")
+            skip("R-46's `live:` arm: the frozen registry entry's process is not "
+                 "running on this machine, so no live session exists to list")
 
         status, graph = get("/api/run/graph", run=RUN_829)
         check(status == 200 and len(graph["nodes"]) == 7,
@@ -530,7 +597,9 @@ def test_a_bare_checkout_reduces_to_the_same_state():
               "blocked — which is what 'green on a bare checkout' means (GD-21)")
         check(child["counts"] == counts,
               f"…with identical collection counts: {child['counts']} == {counts}")
-        check(child["sessions"] >= 5 and child["nodes_829"] == 7,
+        # The child reads the same corpus in the same process tree, so it sees
+        # the same registry liveness this parent measured (SESSION_ROWS).
+        check(child["sessions"] >= SESSION_ROWS and child["nodes_829"] == 7,
               f"…and the API still answers there: {child['sessions']} sessions, "
               f"{child['nodes_829']} nodes on {RUN_829}")
 
@@ -646,7 +715,7 @@ def test_a_dead_mongod_is_reported_down_and_changes_no_answer():
         check(status == 200 and health["mirror"]["state"] == "down",
               f"/health reports mirror:'down', got {health['mirror']['state']!r}")
         status, sessions = get("/api/sessions")
-        check(status == 200 and sessions["count"] >= 5,
+        check(status == 200 and sessions["count"] >= SESSION_ROWS,
               "…while the sidebar keeps answering (the database is never on the "
               "liveness path — GD-22)")
         status, graph = get("/api/run/graph", run=RUN_829)

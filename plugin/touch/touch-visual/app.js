@@ -121,7 +121,7 @@ const REFRESH_MS = 2000;
  * This constant is a client-side workaround for a server-side cost, and it is
  * recorded as such: the fix is for `server.h_tasks` to keep the reduction
  * behind the same `(st_mtime_ns, st_size)` key
- * `.claude/shared/monitoring/monitor_server.py` already uses for `/tasks`
+ * `shared/monitoring/monitor_server.py` already uses for `/tasks`
  * (63 ms cold, 1.3 ms warm there; ~250-400 ms per call here). Deliberately NOT
  * done in this pass — one caching story for the same files, decided once, is
  * the point (PRIOR-ART-TOUCH-5); a second improvised one is how the next

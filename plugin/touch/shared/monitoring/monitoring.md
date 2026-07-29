@@ -1,12 +1,14 @@
 # Orchestrator monitoring module
 
 Reusable, task-agnostic live monitoring for deterministic orchestrator runs
-(Workflow-tool scripts, or any driver that spawns agents). This module lives
-in `.claude/shared/monitoring/` and is stateless; each task keeps its
-orchestration scripts and monitoring state (events, config, checkpoints) in
-`.claude/local-orchestrators/<task-name>/`, selected via the
-`ORCH_STATE_DIR` env var. See the `m-orchestrator` skill for the
-integration checklist.
+(Workflow-tool scripts, or any driver that spawns agents). This module ships
+inside the Touch plugin at `${CLAUDE_PLUGIN_ROOT}/shared/monitoring/` and is
+stateless; nothing about it is per-task and nothing about it lives in your
+project. The only project-side path is
+`.claude/local-orchestrators/<task-name>/`, where each task keeps its
+orchestration scripts and monitoring state (events, config, checkpoints),
+selected via the `ORCH_STATE_DIR` env var. See the `m-orchestrator` skill for
+the integration checklist.
 
 Zero third-party dependencies: bash + Python 3 stdlib + a browser.
 
@@ -61,10 +63,13 @@ a byte on disk, and additive event keys remain legal.
 **Reserved control key `m`.** An object carrying a top-level `m` is a *control
 frame*, never an event. Events never carry `m` — corpus-verified twice over:
 against the 12,334-event `touch-mongo-live` stream measured while this protocol
-was designed, and against the frozen legacy corpora committed at the host
-repo's root (`tests/fixtures/legacy/*.jsonl`; this module's own
-`tests/fixtures/` holds fold gold files, not streams) — and no writer may ever
-add it. That is why the control envelope needed a reserved NAME rather than an
+was designed, and against the frozen legacy corpora held in the development
+repository — and no writer may ever add it. Neither corpus ships: the payload
+carries no tests and no fixtures, so those are maintainer evidence, not
+something to look for in an installed copy (in the development repository they
+are `tests/fixtures/legacy/*.jsonl` and, for this module's fold gold files,
+`tests/monitoring/fixtures/` — development-repository-only paths, both).
+That is why the control envelope needed a reserved NAME rather than an
 inference like "objects with a `type` field": additive event keys must stay
 legal, so exactly one name is spent instead.
 
@@ -464,8 +469,8 @@ path resolving outside the task folder (traversal/symlink safe).
 - **Do not `pkill -f` these scripts from a command line that also spells the
   script name** — bracket the first letter (`pkill -f "[m]onitor_server"`).
 - **State-dir authority — always set `ORCH_STATE_DIR`.** The shared module
-  directory (`.claude/shared/monitoring/`) is code-only and is NOT an
-  authoritative state dir — as of 2026-07-28 that is enforced, not merely
+  directory (`${CLAUDE_PLUGIN_ROOT}/shared/monitoring/`) is code-only and is NOT
+  an authoritative state dir — as of 2026-07-28 that is enforced, not merely
   documented. With `ORCH_STATE_DIR` unset, `status.sh` resolves the project's
   **tasks root** (`$ORCH_TASKS_ROOT` > `$CLAUDE_PROJECT_DIR/.claude/local-orchestrators`
   > cwd walk-up to a `.claude/` marker > the legacy module-relative path *only
@@ -480,17 +485,43 @@ path resolving outside the task folder (traversal/symlink safe).
   writes no token file and says so on startup, since serving read-only from a
   plugin cache is fine and it has no other state to write.
   The two `.gitignore` lines that used to sanction
-  module-dir droppings are gone, and `tests/test_bootstrap.py` asserts they stay
-  gone. Set `ORCH_STATE_DIR` on every call regardless: it is the only way to say
-  *which* task an event belongs to.
+  module-dir droppings are gone, and the development repository's
+  `tests/test_bootstrap.py` asserts they stay gone. Set `ORCH_STATE_DIR` on
+  every call regardless: it is the only way to say *which* task an event
+  belongs to.
 
 ## Layout convention
 
+Two trees, and the split between them is the whole convention: **code ships in
+the plugin, state stays in your project.** Nothing under the plugin root is
+ever written to — it is a version-stamped cache that an update replaces — and
+nothing under the project tree is copied per task from the module.
+
+The plugin root (`${CLAUDE_PLUGIN_ROOT}` inside a session; `claude plugin list`
+prints the install path; in the development checkout it is `plugin/touch`):
+
 ```
-.claude/
-├── shared/monitoring/                        # this module — stateless, same for every task
-├── skills/m-orchestrator/SKILL.md   # monitoring integration skill
-├── skills/execute-research/         # research -> feature-sub-plan plan (read-only)
-├── skills/implement-plan/             # plan -> implement->test->critique loops
-└── local-orchestrators/<task-name>/   # per task: workflow scripts + monitoring state
+${CLAUDE_PLUGIN_ROOT}/
+├── bin/                             # touch-status, touch-monitor, touch-watcher, …
+│                                    #   on PATH while the plugin is enabled
+├── shared/monitoring/               # this module — stateless, same for every task
+└── skills/
+    ├── m-orchestrator/SKILL.md      # monitoring integration skill
+    ├── execute-research/            # research -> ONE synthesized plan (read-only)
+    └── implement-plan/              # plan -> implement->test->critique loops
 ```
+
+Your project, the only place a run writes:
+
+```
+<your project>/
+└── .claude/
+    └── local-orchestrators/<task-name>/   # per task: workflow scripts + state
+        ├── events.jsonl                   # the append-only stream
+        ├── orch-config.json               # the run's config
+        ├── .watcher-state.json            # the watcher's checkpoint
+        └── orch-scripts/                  # the task's adapted workflow script
+```
+
+`ORCH_STATE_DIR` names one `<task-name>` folder in the second tree; it never
+points into the first.

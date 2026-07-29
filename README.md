@@ -1,7 +1,7 @@
 # Touch
 
 <p align="center">
-  <img src="https://github.com/msdrx/touch/blob/main/resources/touch_the_agent.png" alt="The Creation of Adam — touch the agent" width="820">
+  <img src="resources/touch_the_agent.png" alt="The Creation of Adam — touch the agent" width="820">
 </p>
 
 Touch is a Claude Code plugin for **watching your agents work**. When a session
@@ -46,15 +46,22 @@ folder while a run is active and is inert when none is.
 
 ## Install
 
+Read the plugin's own [README](plugin/touch/README.md) before you run these: it
+discloses what Touch reads, writes and serves, and what installing from this
+repository puts on your disk.
+
 ```
 /plugin marketplace add msdrx/touch
 /plugin install touch@msdrx-tools
 ```
 
-Then `/reload-plugins`, and `touch-selfcheck` to verify. Touch installs
-**disabled** because it carries a hook — enable it from `/plugin` after reading
-the plugin's own [README](plugin/touch/README.md), which discloses what it
-reads, writes and serves.
+The shorthand clones over SSH; without a key on the machine, use the HTTPS URL
+— `/plugin marketplace add https://github.com/msdrx/touch.git` — or set
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+
+Then `/reload-plugins`, and enable Touch from `/plugin` — it installs
+**disabled** because it carries a hook, and its `bin/` wrappers reach your
+`PATH` only while it is enabled. Then run `touch-selfcheck` to verify.
 
 To try it without installing anything, from a clone of this repository:
 `claude --plugin-dir plugin/touch`.

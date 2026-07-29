@@ -138,6 +138,20 @@ future release may add `claude plugin eval` as a published pre-release gate;
 today the gate is the source in front of you plus a release-time scan of this
 payload that refuses to publish one carrying secrets, caches or fixtures.
 
+One disclosure the source in front of you cannot make on its own: the
+marketplace Touch is served from is its own development repository, so
+installing it clones that repository's **whole history** — and that history
+carries a burned API token and credentialed `mongodb://` URIs from the days
+before the leak gates existed. Every credential this repository has ever seen
+has been rotated and should be treated as burned; nothing there opens anything
+today. Say so out loud anyway, because a clone puts those objects on your disk,
+and `--sparse` is no defence: it limits the checkout, not the objects, which
+arrive either way. (A plugin source form that fetches only the payload subtree
+does exist and would avoid the history transfer entirely — but there is no such
+form for a *marketplace* source, and adopting it would mean maintaining a second
+repository in sync with this one. That trade was weighed and declined; the
+contributor guide in the repository records why.)
+
 ## Install
 
 ```
@@ -145,24 +159,38 @@ payload that refuses to publish one carrying secrets, caches or fixtures.
 /plugin install touch@msdrx-tools
 ```
 
-Then `/reload-plugins`. Touch ships `defaultEnabled: false` because it carries
-a hook — installing it does not enable it, so enable it deliberately from
-`/plugin` after you have read the section above.
+The `owner/repo` shorthand clones over SSH, so it fails on a machine with no
+key loaded. Either escape works: give the HTTPS URL instead —
+`/plugin marketplace add https://github.com/msdrx/touch.git` — or set
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` and keep the shorthand.
 
-Two alternatives, for the record. Clone the repository and run against the
+Then `/reload-plugins`, and **enable Touch from `/plugin`**. It ships
+`defaultEnabled: false` because it carries a hook: installing it does not
+enable it, so enable it deliberately once you have read the section above —
+and note that the `bin/` wrappers are only on your `PATH` while the plugin is
+enabled, which is why the verification below comes after this step and not
+before it.
+
+If the clone times out — this is a whole development repository, ~15 MB —
+raise the budget with `CLAUDE_CODE_PLUGIN_GIT_TIMEOUT_MS` (the default every
+plugin git operation gets is `120000`, i.e. 120 s) and try again.
+
+If working-tree **disk** is the constraint, a sparse clone you then add as a
+local marketplace is smaller — `git clone --sparse <url>`, then
+`git sparse-checkout set .claude-plugin plugin`. It saves checked-out files and
+nothing else: the objects still transfer, so it shortens no download and, as
+above, is not a privacy boundary.
+
+One alternative, for the record: clone the repository and run against the
 working copy with `claude --plugin-dir <clone-path>/plugin/touch` — the plugin
-is that subdirectory, and the flag also takes a `.zip`: zero infrastructure,
-nothing registered, good for reading the code
-first. Or `claude --plugin-url https://…/touch.zip`, which fetches an
-archive for that session only, never installs and never updates — only
-worth it against a **published sha256**, since an unverified zip is exactly the
-unauditable blob the section above argues against. Submitting Touch to the
+is that subdirectory, and the flag also takes a `.zip`. Zero infrastructure,
+nothing registered, good for reading the code first. Submitting Touch to the
 community marketplace is deliberately deferred until after the first
 self-hosted release.
 
 ## Verify
 
-From the project you want to use it in:
+With the plugin enabled, from the project you want to use it in:
 
 ```
 touch-selfcheck
@@ -242,9 +270,12 @@ release reaches you only when you ask for it:
 ```
 
 To stop doing that by hand, turn on `/plugin` → Marketplaces → **Enable
-auto-update** for `msdrx-tools`. Either way, only a version bump in
-`plugin.json` delivers anything — pushing commits alone changes nothing for
-installed users, which is why `CHANGELOG.md` tracks the version you have.
+auto-update** for `msdrx-tools`. Know what you are turning on: the marketplace
+is the project repository itself, so auto-update re-syncs a ~15 MB development
+repo on every push to it — commits about tests, plans and run history included.
+Either way, only a version bump in `plugin.json` delivers anything — pushing
+commits alone changes nothing for installed users, which is why `CHANGELOG.md`
+tracks the version you have.
 
 To remove it, uninstall `touch` from `/plugin` → installed plugins, then
 `/reload-plugins`. Nothing of Touch's survives outside the plugin cache

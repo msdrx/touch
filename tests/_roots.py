@@ -25,6 +25,14 @@ move is a two-line edit HERE.
     MON       the canonical monitoring module directory (the five core files:
               `status.sh`, `monitor_server.py`, `decision_watcher.py`,
               `monitor.html`, `monitoring.md`). The second flip point.
+    CATALOG   the marketplace catalog, `.claude-plugin/marketplace.json` at the
+              REPO root — the one canonical path that is deliberately NOT under
+              PAYLOAD. It is not payload: it is a catalog *about* the payload,
+              and `/plugin marketplace add msdrx/touch` clones this repository
+              and reads `<clone>/.claude-plugin/marketplace.json` and nowhere
+              else. It gets an anchor for the same reason the trees do — it was
+              spelled out longhand in three places, which is how a move
+              half-lands (RELEASE-TESTS-15).
 
 Since GD-U1's move SRC == PAYLOAD and MON == PAYLOAD/"shared"/"monitoring".
 They stay separate names because they answer different questions — "where does
@@ -32,7 +40,7 @@ the source live" and "what does a consumer install" — and a reader of
 `SRC / "aggregator"` should not have to know that those happen to coincide
 today. The next layout change is a two-line edit here, again.
 
-The two asserts below are the loud half: a wrong flip fails at IMPORT, in every
+The asserts below are the loud half: a wrong flip fails at IMPORT, in every
 file at once, with the path it looked for — instead of ~200 individually
 confusing "file not found" checks.
 """
@@ -51,7 +59,14 @@ SRC = PAYLOAD
 #: Flip point 2: the canonical monitoring module.
 MON = PAYLOAD / "shared" / "monitoring"
 
+#: The marketplace catalog, at the REPO root and never inside PAYLOAD — a
+#: git-cloned catalog is only ever read from `<repo>/.claude-plugin/
+#: marketplace.json`, so this path IS the distribution model.
+CATALOG = REPO / ".claude-plugin" / "marketplace.json"
+
 assert (SRC / "aggregator").is_dir(), (
     f"_roots.SRC is wrong: no aggregator/ under {SRC}")
 assert (MON / "status.sh").is_file(), (
     f"_roots.MON is wrong: no status.sh under {MON}")
+assert CATALOG.is_file(), (
+    f"_roots.CATALOG is wrong: no marketplace.json at {CATALOG}")

@@ -10,8 +10,10 @@ not an either/or: the dogfood loop is `claude --plugin-dir plugin/touch` with
 `touch@inline` enabled, so both fired — measured 2 hook processes per tool call
 against 1 with the plugin unloaded (PLUGIN-RUNTIME-4). The settings block is
 gone; what lives there now is the `enabledPlugins` opt-in that makes the
-plugin's registration the one that runs. `test_settings_registration` pins BOTH
-halves, so the double registration cannot silently return.
+plugin's registration the one that runs — for exactly ONE id, `touch@inline`,
+and with no `extraKnownMarketplaces` block beside it (GD-C1).
+`test_settings_registration` pins every one of those halves, so neither the
+double registration nor a second Touch identity can silently return.
 
 The guard is exercised as it runs in production: a subprocess fed the
 PreToolUse JSON on stdin, against a throwaway task tree — never against the
@@ -40,18 +42,24 @@ GUARD = REPO / "plugin" / "touch" / "hooks" / "orch_scope_guard.py"
 HOOKS_JSON = REPO / "plugin" / "touch" / "hooks" / "hooks.json"
 SETTINGS = REPO / ".claude" / "settings.json"
 MATCHER_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write", "Bash")
-#: The whole of `.claude/settings.json` after item 07 — a closed set, so a
-#: third top-level key has to be argued for rather than merely committed.
-#: The closed set of top-level keys the committed session-wide settings file
-#: may carry. `extraKnownMarketplaces` joined it when the catalog moved to the
-#: repo root: it points `msdrx-tools` at `"path": "./"` — this checkout's own
-#: `.claude-plugin/marketplace.json` — so `touch@msdrx-tools` in
-#: `enabledPlugins` resolves in the dev loop. It registers a MARKETPLACE, which
-#: is the one thing this arm is not about: the failure it was written for is a
-#: second HOOK registration (two registrations of `orch_scope_guard.py` fired
-#: it twice per tool call, measured 2 vs 1 — GD-U5). Adding a key here is
-#: deliberate; the two assertions above still refuse `hooks` outright.
-SETTINGS_KEYS = {"statusLine", "enabledPlugins", "extraKnownMarketplaces"}
+#: The whole of `.claude/settings.json` — a closed set, so a third top-level
+#: key has to be argued for rather than merely committed.
+#: `extraKnownMarketplaces` was briefly a member and is now refused by name
+#: (GD-C1, `test_settings_registration`): marketplace registration is keyed by
+#: catalog `name` and stored per-user GLOBALLY, so a same-name add silently
+#: REPLACES an existing registration — trusting this folder would repoint a
+#: contributor's real `msdrx-tools` at a working tree, in every project on
+#: that machine. It also bought nothing: the `plugin install`/`marketplace`
+#: CLI subcommands never read it, and the dev loop is
+#: `claude --plugin-dir plugin/touch`, which `touch@inline` already serves.
+SETTINGS_KEYS = {"statusLine", "enabledPlugins"}
+
+#: The closed set of plugin ids the committed settings file may enable. One
+#: payload, one identity: two ids for one payload is two registrations by
+#: intent, and the inline-shadows-installed rule that made the pair benign
+#: (measured: 1 hook fire, the `--plugin-dir` copy shadows the same-named
+#: installed copy) is UNWRITTEN upstream, so nothing here may depend on it.
+ENABLED_PLUGINS = {"touch@inline"}
 
 failures = []
 
@@ -140,12 +148,15 @@ def settings_entries():
 
 
 def test_settings_registration():
-    """GD-U5: the plugin is the ONLY registration, and settings.json says so.
+    """GD-U5 + GD-C1: one registration, one identity, and settings.json says so.
 
-    Two halves, and both matter. NO `hooks` key — the second registration is
-    gone and cannot creep back. AND the `enabledPlugins` opt-in, committed:
-    without it the dev loop's plugin is loaded but disabled, which would leave
-    the repo with no guard at all rather than with one.
+    Four halves, and all of them matter. NO `hooks` key — the second
+    registration is gone and cannot creep back. The `enabledPlugins` opt-in,
+    committed: without it the dev loop's plugin is loaded but disabled, which
+    would leave the repo with no guard at all rather than with one. That
+    opt-in names exactly ONE id (`touch@inline`). And no
+    `extraKnownMarketplaces` block: a per-user, global, same-name replacement
+    is not something a project file may do to whoever trusts it.
 
     The accepted consequence, recorded where the arm lives: a session started
     WITHOUT the plugin now has no guard. That is deliberate, not an oversight —
@@ -173,18 +184,32 @@ def test_settings_registration():
     check(isinstance(enabled, dict) and enabled.get("touch@inline") is True,
           'settings.json commits "enabledPlugins": {"touch@inline": true} so '
           "the plugin's registration is actually live in the dev loop")
-    # The marketplace entry, checked for the one thing that can be wrong about
-    # it: WHERE it points. The catalog is `<repo>/.claude-plugin/marketplace.json`,
-    # so the marketplace root is the repo root — `./`, never `./plugin/touch`,
-    # which is the plugin and holds no catalog. A stale path here registers a
-    # marketplace that resolves to nothing and `touch@msdrx-tools` never loads.
-    markets = settings.get("extraKnownMarketplaces")
-    entry = markets.get("msdrx-tools") if isinstance(markets, dict) else None
-    source = entry.get("source") if isinstance(entry, dict) else None
-    check(isinstance(source, dict) and source.get("source") == "directory"
-          and str(source.get("path", "")).rstrip("/") in ("", "."),
-          f"extraKnownMarketplaces points msdrx-tools at the repo root, where "
-          f"the catalog is (found: {source})")
+    # ...and that id is the ONLY one. Two ids for one payload is two
+    # registrations by intent; the inline-shadows-installed rule that made the
+    # pair benign (measured: 1 hook fire, `--plugin-dir` shadows the same-named
+    # installed copy) is unwritten upstream, so this file must not rely on it.
+    # A second id also re-arms the opt-in problem below from the other side:
+    # `touch@msdrx-tools` needs a marketplace registration to resolve at all.
+    check(isinstance(enabled, dict) and set(enabled) == ENABLED_PLUGINS,
+          f"enabledPlugins enables exactly {sorted(ENABLED_PLUGINS)} — one "
+          f"payload, one identity (found: "
+          f"{sorted(enabled) if isinstance(enabled, dict) else enabled!r})")
+    # NEGATIVE arm (GD-C1): there is no `extraKnownMarketplaces` block, and
+    # committing one back is a defect, not a convenience. Marketplace
+    # registration is keyed by catalog `name` and stored per-user GLOBALLY: a
+    # same-name add silently REPLACES the previous registration, so a
+    # contributor who installed the published Touch has their real
+    # `msdrx-tools` repointed at this working tree the moment they trust this
+    # folder — in every project on that machine. It is also inert where it
+    # would matter: the `plugin install` / `plugin marketplace` CLI
+    # subcommands do not read it (reproduced twice), and the dev loop is
+    # `claude --plugin-dir plugin/touch`, which `touch@inline` already serves.
+    # Exercise the marketplace install path in a throwaway `CLAUDE_CONFIG_DIR`
+    # (`claude plugin marketplace add <checkout>`), never via committed
+    # settings.
+    check("extraKnownMarketplaces" not in settings,
+          "settings.json registers NO marketplace — a same-name add replaces a "
+          "contributor's real msdrx-tools registration, per-user and globally")
     # The file's other resident is not collateral: the status line is the one
     # thing that was in here before the hooks block and must survive its removal.
     status_line = settings.get("statusLine")

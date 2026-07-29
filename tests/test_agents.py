@@ -242,11 +242,31 @@ def test_the_grammar_matches_decision_watchers_on_a_real_prompt():
         return
     spec = importlib.util.spec_from_file_location("dw_under_test", module)
     watcher = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(watcher)
-    except Exception as exc:                                    # noqa: BLE001
-        skip(f"decision_watcher.py did not import ({type(exc).__name__}: {exc})")
-        return
+    # `decision_watcher.py` resolves a task state dir AT IMPORT and exits (rc 2)
+    # when it finds none — exactly the clean-checkout case (`git archive HEAD |
+    # tar -x` carries no `.claude/local-orchestrators/`). Handing it a scratch
+    # dir keeps this arm RUNNING there instead of skipping, which matters: it is
+    # the only place the payload's marker grammar is compared against the prior
+    # art's, so a skip here would leave the parity claim unchecked at the
+    # release gate (GD-C7's clean-checkout run). The import writes nothing into
+    # the scratch dir, and everything used below is a pure function.
+    prior_state_dir = os.environ.get("ORCH_STATE_DIR")
+    with tempfile.TemporaryDirectory() as scratch:
+        os.environ["ORCH_STATE_DIR"] = scratch
+        try:
+            spec.loader.exec_module(watcher)
+        # `SystemExit` is a BaseException, so a bare `except Exception` does NOT
+        # catch it — and a genuinely broken module still exits. Catching both is
+        # the backstop that makes this file keep `run_all.sh`'s promise — "files
+        # that read the absent things SKIP there; nothing crashes" (GD-C7).
+        except (Exception, SystemExit) as exc:                  # noqa: BLE001
+            skip(f"decision_watcher.py did not import ({type(exc).__name__}: {exc})")
+            return
+        finally:
+            if prior_state_dir is None:
+                os.environ.pop("ORCH_STATE_DIR", None)
+            else:
+                os.environ["ORCH_STATE_DIR"] = prior_state_dir
 
     # Real prompt text from the frozen corpus, plus the adversarial fixture.
     scan_ = ingest.read_transcript(str(BIG), root=str(CORPUS))

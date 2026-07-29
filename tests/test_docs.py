@@ -43,8 +43,9 @@ plugin-pack plan) rather than this repo's own:
   changelog for a release nobody can install;
 * `scripts/release.sh` IS the release checklist (there is deliberately no
   RELEASE.md), so the guards here are that it exists, is executable, uses no
-  `jq`, and never `cp -r`s the working tree into a release — the three ways
-  that file stops being the thing it claims to be.
+  `jq`, and hand-assembles nothing — it never `cp`s a tree anywhere, because
+  publishing is a `git push` of THIS repository and the stage exists only to be
+  scanned. Those are the ways that file stops being the thing it claims to be.
 
 The packaging guards use `have_plugin()`, which — unlike `have()` — never
 skips: a payload document that is missing FAILS, whatever else is on disk.
@@ -63,14 +64,19 @@ with them: the file names both in prose precisely to say it uses neither, and a
 guard that failed on that prose would be a guard against writing the reason
 down.
 
-Item 12's last guard is the only one in this file that RUNS anything:
-`release.sh --check` against a throwaway fixture repo, asserting what step 7
-printed. Source-text guards cannot see a gate that is spelled plausibly and
-still answers wrongly — `git config user.email` (which reads the global
-cascade, not the release clone) is exactly that, and it survived three review
-rounds behind a substring check. The fixture exists because the script's step 2
-runs `tests/run_all.sh`, which runs this file: pointing it at this repository
-would recurse forever.
+Item 12's last three guards are the only ones in this file that RUN anything:
+`release.sh` against a throwaway fixture repo — under `--check`, with a
+token-named blob planted in the fixture's history, and once for real against an
+on-disk bare `origin` — asserting what each step printed and, for the real run,
+that the branch actually landed on the remote. Source-text guards cannot see a
+gate that is spelled plausibly and still answers wrongly: a bare `git config
+user.email` reads the whole global cascade while reporting a per-repo answer,
+and it survived three review rounds behind a substring check. Nor can they see
+WHICH path an invocation expanded to, which is why the fixture's `claude` stub
+logs its argv instead of only exiting 0 (the repo-root form of `claude plugin
+tag` fails in reality and passes against a silent stub). The fixture exists
+because the script's step 2 runs `tests/run_all.sh`, which runs this file:
+pointing it at this repository would recurse forever.
 """
 import json
 import os
@@ -90,8 +96,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True   # no .pyc droppings next to the tests (house
                                  # pattern, item 06; this file imports only
                                  # `tests/_roots.py`, nothing under the payload)
-from _roots import SRC   # noqa: E402  (the bytecode flag must precede the
-                         # first import, so this one cannot sit with the rest)
+from _roots import CATALOG, PAYLOAD, SRC   # noqa: E402  (the bytecode flag
+                         # must precede the first import, so these cannot sit
+                         # with the rest)
 
 README = REPO / "README.md"
 CLAUDE = REPO / "CLAUDE.md"
@@ -117,7 +124,16 @@ REGISTER = RECON / "plan/findings-register.md"
 # repo-only file that is simply expected to be there. `have_plugin()` below
 # therefore reports a missing payload document as a FAILURE — that, and not a
 # second skip rule, is the whole difference from `have()`.
-PLUGIN = REPO / "plugin/touch"
+#: Named through `_roots`, never spelled here (C-03): `tests/_roots.py` is the
+#: ONE anchor for the canonical trees, and a second literal is a second thing
+#: to forget the next time the layout moves.
+PLUGIN = PAYLOAD
+#: REPO-relative spellings of the two publication-critical paths, for the
+#: release fixture below: it builds a throwaway repo with the same shape, and
+#: the shape has to come from the same anchor as the real one or the fixture
+#: silently stops testing this layout.
+PLUGIN_REL = PAYLOAD.relative_to(REPO)
+CATALOG_REL = CATALOG.relative_to(REPO)
 PLUGIN_README = PLUGIN / "README.md"
 PLUGIN_CHANGELOG = PLUGIN / "CHANGELOG.md"
 PLUGIN_MANIFEST = PLUGIN / ".claude-plugin/plugin.json"
@@ -449,26 +465,20 @@ def test_register_is_reachable():
 #: 2026-07-26") of what was verified about the substrate, and its `.claude/`
 #: paths are the record of a tree that existed then. A guard that forced it
 #: current would destroy the one thing it is for.
-#: Two PAYLOAD files are absent for a different and much less comfortable
-#: reason: NO sub-plan of this migration owns their prose. Both live inside the
-#: tree item 05 moved, and item 05 is a pure rename — editing them from here
-#: would be the scope violation the migration's whole safety argument rests on
-#: — while item 12 owns the documents listed below and not those. Three lines,
-#: exhaustively, so the next reader does not stop at the first file:
-#:   * `plugin/touch/shared/monitoring/monitoring.md:5` — "This module lives in
-#:     `.claude/shared/monitoring/`", the module's own self-location;
-#:   * `plugin/touch/shared/monitoring/monitoring.md:467` — the same path named
-#:     as the non-authoritative state dir;
-#:   * `plugin/touch/touch-visual/app.js:124` — a code comment pointing at
-#:     `.claude/shared/monitoring/monitor_server.py` for the caching precedent.
-#: All three ship to consumers. That is an OPEN, escalated gap, recorded here
-#: and in this sub-plan's returned findings, not a guarded file and not a closed
-#: one. Do NOT read the absence as coverage from somewhere else:
-#: `tests/monitoring/test_shell.py` asserts the module's event schema and
-#: lifecycle, and its only `.claude/shared/monitoring` mentions are `.gitignore`
-#: arms — nothing there checks where the module lives. Whoever is handed those
-#: files: fix the three lines, add `monitoring.md` to DIRECTION_DOCS, delete
-#: this paragraph.
+#: The PAYLOAD documents are absent from this tuple, and that is no longer an
+#: escalated gap: C-11 fixed the three lines that pointed a consumer at
+#: `.claude/shared/monitoring/` (monitoring.md's self-location and its
+#: state-dir mention, plus `touch-visual/app.js`'s caching-precedent comment),
+#: and `test_payload_docs_run_from_an_installed_copy()` below guards the whole
+#: payload for the literal instead of guarding three lines by name — a closed
+#: SET beats a list of files someone has to remember to extend.
+#:
+#: They are deliberately NOT folded into DIRECTION_DOCS, because the arms this
+#: tuple feeds are repo-development claims: `test_entry_points_are_the_wrappers`
+#: requires `PYTHONPATH=plugin/touch`, which is the DEV checkout's plugin root
+#: and exactly the wrong instruction to ship — a payload doc speaks in
+#: `${CLAUDE_PLUGIN_ROOT}` terms (GD-C11), so it gets its own PYTHONPATH arm
+#: with the payload's vocabulary rather than this one's.
 DIRECTION_DOCS = (README, CLAUDE, CONTRIBUTING)
 
 #: Paths that stopped existing when the plugin became the canonical home. Each
@@ -727,6 +737,123 @@ def test_manifest_declares_both_skill_families():
         check(kw in keywords, f"keywords carry `{kw}`")
 
 
+def fenced_lines(text):
+    """Every line inside a ``` fence, paired with its block's whole text.
+
+    A command in prose is a citation; a command in a fence is something a
+    reader copies. The block travels with the line because the exemption below
+    is block-scoped: a fence that starts with `cd "$PLUGIN_ROOT"` has said
+    where the import path comes from for every line after it.
+    """
+    out = []
+    block, fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if fence:
+                for ln in block:
+                    out.append((ln, "\n".join(block)))
+                block = []
+            fence = not fence
+            continue
+        if fence:
+            block.append(line)
+    for ln in block:                      # an unterminated fence still counts
+        out.append((ln, "\n".join(block)))
+    return out
+
+
+def test_payload_docs_run_from_an_installed_copy():
+    """C-11 / GD-C11: the payload is a COPY, and its docs must work from there.
+
+    An installed Touch lives at `~/.claude/plugins/cache/<marketplace>/touch/
+    <version>/`, so a payload document that names a path in this checkout — or
+    a command that only resolves with this checkout as the cwd — is wrong in
+    the only place it will ever be read.
+
+    Both arms are negative, which is the load-bearing kind here: the fixed
+    prose is `plugin/touch/`'s problem (C-11), while "no NEW file reintroduces
+    it" is a property of the whole subtree and can only be checked as a set.
+    """
+    print("test_payload_docs_run_from_an_installed_copy")
+    # PAYLOAD-8: `.claude/shared/monitoring` was the module's home until GD-U1
+    # moved it into the plugin. It is now wrong ANYWHERE in the payload — there
+    # is no project-side copy for it to mean, and a consumer following it lands
+    # in their own `.claude/`, which Touch may not even write to.
+    dead = []
+    for path in sorted(PLUGIN.rglob("*")):
+        if not path.is_file():
+            continue
+        if ".claude/shared/monitoring" in read(path):
+            dead.append(str(path.relative_to(REPO)))
+    check(not dead,
+          f"no file under {PLUGIN_REL}/ names `.claude/shared/monitoring` — the "
+          f"module ships at ${{CLAUDE_PLUGIN_ROOT}}/shared/monitoring/ (bad: {dead})")
+    # PAYLOAD-2: `python3 -m aggregator.mirror` resolves only when the plugin
+    # root is on `sys.path`, and in an installed copy that root is a
+    # version-stamped cache directory nobody can guess. The invocation
+    # therefore has to carry the path — `PYTHONPATH=` — or the block has to
+    # `cd` there first. The dev checkout's own spelling (`plugin/touch`) is NOT
+    # accepted as a substitute: it does not exist on a consumer's machine.
+    bare = []
+    for doc in sorted(PLUGIN.rglob("*.md")):
+        for line, block in fenced_lines(read(doc)):
+            flat = re.sub(r"\s+", " ", line)
+            m = re.search(r"python3 (?:-\w+ )*(?:-m aggregator|-c [\"']import aggregator)",
+                          flat)
+            if m is None:
+                continue
+            if "PYTHONPATH=" in flat[:m.start()] or re.search(r"(?m)^\s*cd\s", block):
+                continue
+            bare.append(f"{doc.relative_to(REPO)}: {line.strip()[:70]}")
+    check(not bare,
+          f"every fenced `aggregator.` invocation in a payload doc carries "
+          f"`PYTHONPATH=<plugin root>` or a `cd` (bad: {bare})")
+
+
+def test_contributing_releasing_section_describes_this_model():
+    """C-15: the Releasing section is the only prose account of how Touch ships.
+
+    Read as a SECTION, not as a file: every one of these tokens appears
+    somewhere else in CONTRIBUTING (the layout table names the catalog, the
+    clone recipe names the repo), so a file-wide `in text` would pass while the
+    section that tells a maintainer what to run said something else entirely.
+
+    The dead half is the load-bearing one. `--release-clone`, a separate
+    payload-only `msdrx/touch-plugin` install source and `sync_plugin.sh` are
+    all instructions for a distribution model this repo no longer has — a
+    maintainer who follows one publishes nothing, or publishes it twice.
+    """
+    print("test_contributing_releasing_section_describes_this_model")
+    m = re.search(r"^##\s+Releasing\s*$", read(CONTRIBUTING), re.M)
+    check(m is not None, "CONTRIBUTING.md has a `## Releasing` section")
+    if m is None:
+        return
+    rest = read(CONTRIBUTING)[m.end():]
+    nxt = re.search(r"^##\s+\S", rest, re.M)
+    section = rest[:nxt.start()] if nxt else rest
+    for token in (".claude-plugin/marketplace.json", "./plugin/touch",
+                  "msdrx/touch", "release.sh --check"):
+        check(token in section,
+              f"CONTRIBUTING's Releasing section names `{token}`")
+    for token in ("--release-clone", "msdrx/touch-plugin", "sync_plugin.sh"):
+        check(token not in section,
+              f"CONTRIBUTING's Releasing section does not name the retired "
+              f"`{token}`")
+    # The two decisions the section is the record of: the gate that stands
+    # between a burned credential and a public marketplace (GD-C4 — naming the
+    # knob, because "the preflight makes you confirm this" stopped being true
+    # when the confirmation became a gate), and the source form that was
+    # weighed and declined (GD-C8 — a record with no name in it is not a
+    # record, and the next reader re-litigates it).
+    check("RELEASE_HISTORY_ACCEPTED" in section,
+          "CONTRIBUTING's Releasing section names the history gate's knob "
+          "(`RELEASE_HISTORY_ACCEPTED`), not a confirmation that no longer "
+          "exists (GD-C4)")
+    check("git-subdir" in read(CONTRIBUTING),
+          "CONTRIBUTING records that a `git-subdir` plugin source was weighed "
+          "and declined (GD-C8)")
+
+
 # ============================================================================
 # Item 11 — the shipped README and CHANGELOG (the plugin's trust surface)
 # ============================================================================
@@ -751,13 +878,55 @@ def test_plugin_readme_install_and_update_commands():
     print("test_plugin_readme_install_and_update_commands")
     if not have_plugin(PLUGIN_README):
         return
+    # BOTH READMEs, and verbatim, because the `/plugin` UI never shows either
+    # one: whatever a user types comes from a README, and a paraphrase does not
+    # run (DISTRIBUTION-7). The ROOT README is included as of C-13 — its
+    # install block is the most-copied text in the repository and was the one
+    # copy guarded nowhere, which is how it kept an ordering that cannot work.
+    for path in (PLUGIN_README, README):
+        # Both files are called `README.md`, so the message names the PATH: two
+        # identical FAIL lines are a report nobody can act on.
+        who = path.relative_to(REPO)
+        text = read(path)
+        for line in ("/plugin marketplace add msdrx/touch",
+                     "/plugin install touch@msdrx-tools",
+                     "/reload-plugins"):
+            check(line in text,
+                  f"{who} carries the install line `{line}`")
+        # E3 / GD-C12: the `owner/repo` shorthand clones over SSH by default,
+        # which fails for anyone without a key on the machine. Either
+        # documented escape counts — the explicit HTTPS URL, or the env knob.
+        fallback = ("/plugin marketplace add https://github.com/msdrx/touch.git",
+                    "CLAUDE_CODE_PLUGIN_PREFER_HTTPS")
+        check(any(f in text for f in fallback),
+              f"{who} carries the HTTPS fallback for the shorthand clone "
+              f"(one of {fallback})")
+        # GD-C12's sequence, asserted as ORDER rather than presence: the `bin/`
+        # wrappers are on `PATH` only while the plugin is ENABLED, so a
+        # `touch-selfcheck` offered before the enable step is an instruction
+        # that cannot succeed — the reader's first experience of Touch is
+        # `command not found`. Measured forward from the install command,
+        # because the root README also names `touch-selfcheck` in its wrapper
+        # table long before the install section.
+        i_install = text.find("/plugin install touch@msdrx-tools")
+        if i_install < 0:
+            continue                      # already FAILed above; do not also
+                                          # report a nonsense ordering
+        tail = text[i_install:]
+        i_self = tail.find("touch-selfcheck")
+        i_reload = tail.find("/reload-plugins")
+        # `\benabl` and not `enable`: `defaultEnabled` has no word boundary in
+        # front of its `E`, so the sentence that discloses the opt-in posture
+        # cannot be mistaken for the instruction to act on it.
+        m_enable = re.search(r"\benabl", tail)
+        check(i_self > 0 and 0 < i_reload < i_self,
+              f"{who}: `/reload-plugins` comes before the "
+              f"`touch-selfcheck` verification")
+        check(i_self > 0 and m_enable is not None and m_enable.start() < i_self,
+              f"{who}: the reader is told to ENABLE Touch from `/plugin` "
+              f"BEFORE verifying with `touch-selfcheck` — `bin/` is on PATH "
+              f"only while the plugin is enabled (GD-C12)")
     text = read(PLUGIN_README)
-    # Verbatim, because the `/plugin` UI never shows a README: whatever a user
-    # types comes from this file, and a paraphrase does not run (DISTRIBUTION-7).
-    for line in ("/plugin marketplace add msdrx/touch",
-                 "/plugin install touch@msdrx-tools",
-                 "/reload-plugins"):
-        check(line in text, f"the shipped README carries the install line `{line}`")
     # Third-party marketplaces do NOT auto-update, so these two are the entire
     # upgrade path for a user who installed once (DISTRIBUTION-5, GD-T9).
     for line in ("/plugin marketplace update msdrx-tools",
@@ -903,7 +1072,8 @@ def blank_heredoc_bodies(text):
 
     A heredoc body is data, not code. `scripts/release.sh` prints its manual
     checklist out of a `<<'CHECKLIST'` block, and that checklist is the natural
-    place to write "never `cp -r` the working tree into the release repo" or
+    place to write "nothing is ever `cp -r`d: the stage is scanned, not
+    assembled" or
     "this depends on no `jq`" — sentences the guards below would then read as
     commands. That is the same trap `strip_comment()` exists to avoid, one
     layer down: a guard that cannot tell prose from a command forbids writing
@@ -1102,6 +1272,173 @@ def test_release_script_avoids_the_shapes_that_reported_wrong_answers():
           f"command substitution, not formatting (bad: {quoted_backticks})")
 
 
+def script_step(code, number):
+    """The script's own text under its `step <n> "…"` banner, up to the next.
+
+    Step 4 prints one of two banners depending on whether step 3 could read a
+    version, so a section runs to the first banner with a HIGHER number rather
+    than to the next banner of any number — otherwise step 4's section would
+    end at step 4.
+    """
+    banners = [(int(m.group(1)), m.start())
+               for m in re.finditer(r'^\s*step (\d+) "', code, re.M)]
+    here = [pos for n, pos in banners if n == number]
+    if not here:
+        return ""
+    later = [pos for n, pos in banners if n > number and pos > here[0]]
+    return code[here[0]:later[0]] if later else code[here[0]:]
+
+
+def usage_block(text):
+    """The `# usage:` … `# exit status:` header, the operator's contract."""
+    start = re.search(r"^# usage:", text, re.M)
+    end = re.search(r"^# exit status", text, re.M)
+    return text[start.start():end.start()] if start and end else ""
+
+
+def test_release_script_gates_the_publish_half_before_the_point_of_no_return():
+    """The gates C-04…C-07 added, read on the script's own text.
+
+    Each arm is here because the gate it pins was once spelled in a way that
+    could not fire, or fired only after the push had already happened — the one
+    place a release gate is worth nothing. The behavioural arms below run the
+    script; these say WHERE the gates are, which no transcript can show.
+    """
+    print("test_release_script_gates_the_publish_half_before_the_point_of_no_return")
+    if not RELEASE_SH.is_file():
+        check(False, "scripts/release.sh exists")
+        return
+    text = read(RELEASE_SH)
+    code = script_code(text)
+
+    # C-04 / GD-C3: `claude plugin tag` needs `<path>/.claude-plugin/plugin.json`
+    # and the repo root holds only the CATALOG, so the repo-root form is rc=1 —
+    # a gate that always failed for a reason that had nothing to do with the
+    # release. Every invocation names the payload. The quote count skips the
+    # banner strings (`step 8 "claude plugin tag $PLUGIN --dry-run"`), which
+    # print a path and run nothing.
+    tag_calls = []
+    for ln in code.splitlines():
+        for m in re.finditer(r"claude\s+plugin\s+tag\s+(\S+)", ln):
+            if ln[:m.start()].count('"') % 2 == 1:
+                continue
+            tag_calls.append((ln.strip()[:60], m.group(1)))
+    check(len(tag_calls) >= 2,
+          f"the script invokes `claude plugin tag` for the dry run AND the "
+          f"optional push (found {len(tag_calls)})")
+    check(tag_calls and all(arg == '"$REPO/$PLUGIN"' for _, arg in tag_calls),
+          f"every `claude plugin tag` names the PAYLOAD directory "
+          f"(`\"$REPO/$PLUGIN\"`), never the repo root (found: {tag_calls})")
+    # …and the dry run is a PRE-publish gate: before the push, and before the
+    # `--check` early exit, so a dry run exercises it. Positions, because that
+    # is the entire property — the command was already correct as text when it
+    # sat after `git push`.
+    dry = code.find("--dry-run")
+    push = re.search(r"^\s*git\s+push", code, re.M)
+    check(dry > 0 and push is not None and dry < push.start(),
+          "the tag dry run runs BEFORE the push — a gate on the far side of "
+          "the point of no return is a report, not a gate")
+    # Reachable under `--check` too, which is the other half of GD-C3: the gate
+    # is worth having only where it can still change the outcome, and a dry run
+    # that stops short of it would report green on a release the real run
+    # refuses. Measured against the early exit that ENDS a `--check` run — the
+    # last `$mode = check` test with an `exit 0` under it.
+    early = [m.start() for m in re.finditer(r'"\$mode"\s*=\s*check', code)
+             if re.search(r"^\s*exit 0", code[m.start():m.start() + 500], re.M)]
+    check(dry > 0 and early and dry < max(early),
+          "the tag dry run sits before `--check`'s early exit, so a dry run "
+          "actually exercises it (GD-C3)")
+
+    # C-05 / GD-C4: the history scan is a GATE, and only its own knob clears it.
+    # It was a `note` — a line the operator reads after publishing.
+    step0 = script_step(code, 0)
+    # The VERDICT branch only: from the last mention of the scan's variable to
+    # the confirmation block that closes step 0. Scoped, because step 0 ends
+    # with the interactive `RELEASE_CONFIRM` prompt for the checklist's other
+    # bullets — a region that ran to the end of the step would read that as the
+    # history gate's bypass and report the opposite of the truth.
+    verdict = ""
+    if "tokenblobs" in step0:
+        verdict = step0[step0.rfind("tokenblobs"):]
+        mode = verdict.find('"$mode"')
+        verdict = verdict[:mode] if mode > 0 else verdict
+    check("tokenblobs" in step0 and "mongouris" in step0,
+          "step 0 scans for both a token-named blob and a credentialed "
+          "`mongodb://` URI")
+    check(re.search(r"^\s*fail ", verdict, re.M) is not None,
+          "the contamination verdict reaches a `fail` — not a `note` the "
+          "operator reads after the push (GD-C4)")
+    # Which knob the verdict BRANCHES on, not which knob it mentions: the fail
+    # message says "RELEASE_CONFIRM does NOT imply it" out loud, and a guard
+    # that read that as a bypass would forbid writing the reason down — the
+    # same bargain `strip_comment()` makes for comments.
+    bypasses = [ln.strip() for ln in verdict.splitlines()
+                if re.match(r"\s*(if|elif)\b", ln) and "RELEASE_" in ln]
+    check(bypasses and all("RELEASE_HISTORY_ACCEPTED" in b for b in bypasses),
+          f"the contamination verdict is cleared by `RELEASE_HISTORY_ACCEPTED` "
+          f"(conditions found: {bypasses})")
+    check(all("RELEASE_CONFIRM" not in b for b in bypasses),
+          f"no condition in the verdict tests `RELEASE_CONFIRM` — one knob that "
+          f"answers everything answers nothing (bad: {bypasses})")
+    check(usage_block(text).count("RELEASE_HISTORY_ACCEPTED") >= 1
+          and "RELEASE_CONFIRM" in usage_block(text),
+          "the usage header documents both knobs")
+
+    # C-06: provenance before validation. `claude plugin validate` reads the
+    # file on disk and passes on a catalog whose source directory does not even
+    # exist, so the step proves the bytes are HEAD's and resolves the entry
+    # itself.
+    step6 = script_step(code, 6)
+    check("ls-files --error-unmatch" in step6,
+          "step 6 proves the catalog is TRACKED (an untracked one is absent "
+          "from every clone)")
+    check("diff HEAD --quiet" in step6,
+          "step 6 proves the catalog on disk is HEAD's bytes (it validates the "
+          "file in place)")
+    check(re.search(r"\[\s*-f\s+\"[^\"]*\$MANIFEST\"", step6) is not None,
+          "step 6 resolves the entry's `source` and requires a $MANIFEST "
+          "behind it — `--strict` alone passes a source that resolves to "
+          "nothing")
+
+    # C-07 / GD-C7: the suite runs against the tree that SHIPS, not the tree
+    # you happen to be sitting in — the script's own headline.
+    step2 = script_step(code, 2)
+    tmp = re.search(r"(\w+)=\"?\$\(mktemp -d\)", step2)
+    check(tmp is not None, "step 2 builds a throwaway directory (`mktemp -d`)")
+    check(re.search(r"git archive[^\n|]*\bHEAD\b", step2) is not None
+          and "tar -x" in step2,
+          "step 2 extracts a clean checkout of HEAD (`git archive HEAD | tar -x`)")
+    if tmp:
+        var = tmp.group(1)
+        ran = [ln.strip() for ln in step2.splitlines()
+               if "run_all.sh" in ln and "cd" in ln and var in ln]
+        check(ran,
+              f"step 2 runs `run_all.sh` from the extracted tree, not from "
+              f"$REPO (no `cd ${var}` on the line that runs it)")
+    # …and the already-published guard (GD-C5): the tag `claude plugin tag`
+    # would cut is asked about BEFORE anything is pushed.
+    step3 = script_step(code, 3)
+    check("--v" in step3 and ("ls-remote --tags" in step3 or "git tag -l" in step3),
+          "step 3 refuses a version whose `{name}--v{version}` tag already "
+          "exists (GD-C5)")
+    check(re.search(r"^\s*fail .*already exists", step3, re.M) is not None,
+          "the already-published guard is a `fail`, not a note")
+
+    # The usage header is the only account of the run an operator reads before
+    # starting it, and it renumbered twice in this plan. Every `step N` it
+    # mentions must be a banner that exists — a header pointing at a step
+    # number nobody prints is how "the dry run is step 10" survived the move.
+    banners = {int(m.group(1)) for m in re.finditer(r'^\s*step (\d+) "', code, re.M)}
+    header = {int(n) for n in re.findall(r"\bstep (\d+)\b", usage_block(text))}
+    check(header and header <= banners,
+          f"every `step N` in the usage header has a banner "
+          f"(header {sorted(header)}, banners {sorted(banners)})")
+    everywhere = {int(n) for n in re.findall(r"\bstep (\d+)\b", text)}
+    check(everywhere <= banners,
+          f"no comment anywhere names a step the script does not print "
+          f"(orphans: {sorted(everywhere - banners)})")
+
+
 # ---------------------------------------------------------------------------
 # The behavioural arm: run `release.sh --check` and read what it printed.
 # ---------------------------------------------------------------------------
@@ -1144,40 +1481,59 @@ def _release_fixture(tmp):
     carrying a stub runner, a minimal shipping subtree and one commit; every
     gate through step 7 then runs for real against data this test owns.
 
-    Two deliberate stubs. `claude` is a shell script that exits 0, which keeps
-    step 6 hermetic and instant (`--check` never reaches step 10, and the
-    manifests are validated for real by the payload gate, not here). The git
-    GLOBAL config carries an identity that no local config repeats — that is
-    the environment in which a bare `git config user.email` reports a per-repo
-    identity that does not exist, and the only environment in which the
-    `--local` fix is observable.
+    Two deliberate stubs. `claude` is a shell script that APPENDS ITS ARGV to a
+    log and exits 0 — hermetic and instant, and discriminating: a stub that
+    only exits 0 makes `claude plugin tag .` and `claude plugin tag
+    plugin/touch` indistinguishable, and the repo-root form is exactly the bug
+    C-04 fixed (rc=1 in reality, "No plugin manifest found"). The log is how a
+    test can tell which one the script ran.
+
+    The git GLOBAL config carries an identity that no local config repeats.
+    That scaffolding is now load-bearing for a different reason than the one it
+    was written for: the REAL-mode arm below performs an actual `git push` into
+    the fixture's bare `origin`, and a commit without a committer identity
+    fails — `GIT_CONFIG_NOSYSTEM` plus a throwaway `GIT_CONFIG_GLOBAL` gives
+    the fixture one without reading (or writing) the author's own git config.
     """
     dev = tmp / "devrepo"
     (dev / "scripts").mkdir(parents=True)
     (dev / "tests").mkdir()
-    (dev / "plugin/touch/.claude-plugin").mkdir(parents=True)
-    (dev / ".claude-plugin").mkdir()
+    (dev / PLUGIN_REL / ".claude-plugin").mkdir(parents=True)
+    (dev / CATALOG_REL).parent.mkdir(exist_ok=True)
     shutil.copy2(RELEASE_SH, dev / "scripts/release.sh")
     runner = dev / "tests/run_all.sh"
     runner.write_text("#!/bin/sh\necho 'stub suite (fixture)'\nexit 0\n", encoding="utf-8")
     runner.chmod(0o755)
-    (dev / "plugin/touch/.claude-plugin/plugin.json").write_text(
+    (dev / PLUGIN_REL / ".claude-plugin/plugin.json").write_text(
         json.dumps({"name": "touch", "version": "0.1.0"}) + "\n", encoding="utf-8")
     # The catalog at the REPO root, where a cloned marketplace is read from,
     # naming the payload subtree — the layout the script now gates on. A copy
-    # of it inside `plugin/touch/` is what step 6 refuses.
-    (dev / ".claude-plugin/marketplace.json").write_text(
+    # of it inside the payload is what step 6 refuses. Both paths come from
+    # `_roots` (C-03), so the fixture cannot keep testing a layout the repo has
+    # moved on from.
+    (dev / CATALOG_REL).write_text(
         json.dumps({"name": "msdrx-tools",
-                    "plugins": [{"name": "touch", "source": "./plugin/touch"}]}) + "\n",
+                    "plugins": [{"name": "touch",
+                                 "source": f"./{PLUGIN_REL.as_posix()}"}]}) + "\n",
         encoding="utf-8")
-    (dev / "plugin/touch/CHANGELOG.md").write_text(
+    (dev / PLUGIN_REL / "CHANGELOG.md").write_text(
         "# Changelog\n\n## 0.1.0\n", encoding="utf-8")
 
     stub_bin = tmp / "bin"
     stub_bin.mkdir()
     stub_claude = stub_bin / "claude"
-    stub_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    # One line per invocation, argv joined — enough to answer "which path did
+    # the tag gate name". `${CLAUDE_STUB_LOG:-}` guarded so the stub still
+    # exits 0 if a caller forgets the variable: a stub that fails on its own
+    # bookkeeping would report the SCRIPT as broken.
+    stub_claude.write_text(
+        '#!/bin/sh\n'
+        'if [ -n "${CLAUDE_STUB_LOG:-}" ]; then\n'
+        '    printf \'%s\\n\' "$*" >> "$CLAUDE_STUB_LOG"\n'
+        'fi\n'
+        'exit 0\n', encoding="utf-8")
     stub_claude.chmod(0o755)
+    stub_log = tmp / "claude-argv.log"
 
     global_cfg = tmp / "gitconfig-global"
     global_cfg.write_text(
@@ -1190,7 +1546,9 @@ def _release_fixture(tmp):
     env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "Fixture"
     env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "fixture@example.invalid"
     env["PATH"] = str(stub_bin) + os.pathsep + env.get("PATH", "")
-    for var in ("RELEASE_CONFIRM", "RELEASE_REMOTE", "GIT_DIR", "GIT_WORK_TREE"):
+    env["CLAUDE_STUB_LOG"] = str(stub_log)
+    for var in ("RELEASE_CONFIRM", "RELEASE_HISTORY_ACCEPTED", "RELEASE_REMOTE",
+                "GIT_DIR", "GIT_WORK_TREE"):
         env.pop(var, None)
 
     _git(["init", "-q", "-b", "main", "."], dev, env)
@@ -1205,7 +1563,15 @@ def _release_fixture(tmp):
     _git(["init", "-q", "--bare", "-b", "main", str(origin)], tmp, env)
     _git(["remote", "add", "origin", str(origin)], dev, env)
     _git(["push", "-q", "-u", "origin", "main"], dev, env)
-    return dev, env
+    return dev, env, origin, stub_log
+
+
+def _tag_invocations(stub_log):
+    """Every `claude plugin tag …` the stub recorded, argv-joined, one per line."""
+    if not stub_log.is_file():
+        return []
+    return [ln for ln in read(stub_log).splitlines()
+            if ln.startswith("plugin tag")]
 
 
 def _step_section(transcript, number):
@@ -1234,16 +1600,16 @@ def test_release_script_check_mode_runs_its_gates_for_real():
 
     Every other guard in this section is source text — the SHAPES that once
     lied. None of them can see a gate that is spelled plausibly and still
-    answers wrongly, which is what `git config user.email` (the whole cascade,
-    not the release clone) did: it survived three review rounds behind a
-    `"user.email" in code` substring, reporting "release clone has a per-repo
-    user.email" about a clone that had none. So this arm runs the thing and
-    reads what it printed.
+    answers wrongly, which is what a bare `git config user.email` did: it
+    survived three review rounds behind a `"user.email" in code` substring,
+    reading the whole global cascade while reporting a per-repo answer. So this
+    arm runs the thing and reads what it printed.
 
-    `--check` is side-effect-free by construction — it stops after step 7,
-    commits nothing, pushes nothing — and the fixture is a temp repo, so the
-    cost is a few seconds. Skips with a printed reason when git or a POSIX
-    shell is unavailable, the same bargain the rest of the suite makes.
+    `--check` is side-effect-free by construction — it runs every gate through
+    step 8 and then exits, committing nothing and pushing nothing — and the
+    fixture is a temp repo, so the cost is a few seconds. Skips with a printed
+    reason when git or a POSIX shell is unavailable, the same bargain the rest
+    of the suite makes.
     """
     print("test_release_script_check_mode_runs_its_gates_for_real")
     if not RELEASE_SH.is_file():
@@ -1257,7 +1623,7 @@ def test_release_script_check_mode_runs_its_gates_for_real():
         # One try for the whole body: every git call here builds or points at a
         # fixture, so a git that cannot run means the prerequisite is absent —
         # a skip — never a verdict about the script.
-        dev, env = _release_fixture(tmp)
+        dev, env, _origin, stub_log = _release_fixture(tmp)
         script = dev / "scripts/release.sh"
 
         clean = _run([script, "--check"], dev, env)
@@ -1280,11 +1646,25 @@ def test_release_script_check_mode_runs_its_gates_for_real():
         check("level with" in section,
               "step 7 says the branch is already published rather than implying "
               "a push happened")
-        # Step 6's new arm: the catalog is not payload. Put a copy back inside
+        # C-04, measured rather than read: the tag gate must have named the
+        # PAYLOAD. The source-text arm above proves the script SPELLS
+        # `"$REPO/$PLUGIN"`; only the stub's log proves what that expanded to,
+        # and the repo-root expansion is the one that fails in reality ("No
+        # plugin manifest found") while a `exit 0` stub reports green.
+        tags = _tag_invocations(stub_log)
+        payload_arg = str(dev / PLUGIN_REL)
+        check(tags, f"the `--check` run reached the tag dry run "
+                    f"(stub log: {tags})")
+        check(tags and all(t.split()[2:3] == [payload_arg] for t in tags),
+              f"every `plugin tag` invocation named {payload_arg}, never the "
+              f"repo root {dev} (found: {tags})")
+        check(all("--dry-run" in t for t in tags),
+              f"a `--check` run only ever DRY-RUNS the tag (found: {tags})")
+        # Step 6's arm: the catalog is not payload. Put a copy back inside
         # the shipping subtree and the run must refuse it — this is the exact
         # regression the root-catalog layout replaced, and nothing else in the
         # script would notice a second file declaring the same marketplace.
-        stow = dev / "plugin/touch/.claude-plugin/marketplace.json"
+        stow = dev / PLUGIN_REL / CATALOG_REL
         stow.write_text('{"name": "msdrx-tools", "plugins": []}\n', encoding="utf-8")
         _git(["add", "-A"], dev, env)
         _git(["commit", "-q", "-m", "stowaway"], dev, env)
@@ -1325,6 +1705,148 @@ def test_release_script_check_mode_runs_its_gates_for_real():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_release_script_history_gate_blocks_and_takes_only_its_own_knob():
+    """C-05 / GD-C4: the one property of this model that cannot be undone.
+
+    Publishing from this repository hands every installer the whole history, so
+    a burned credential reachable in it is not a housekeeping item — it is the
+    release. The scan was a `note`: a line the operator reads AFTER publishing.
+    This arm plants a token-named blob in a fixture's history and asserts the
+    three things the gate promises — red by default, red still when the
+    checklist is confirmed, green only when its own knob says so out loud.
+
+    A token-NAMED file is enough because that is what the first `(b)` command
+    looks for: `git rev-list --all --objects` prints object PATHS. Nothing that
+    resembles a credential is written anywhere by this test.
+    """
+    print("test_release_script_history_gate_blocks_and_takes_only_its_own_knob")
+    if not RELEASE_SH.is_file():
+        check(False, "scripts/release.sh exists")
+        return
+    if shutil.which("git") is None:
+        skip("git is not on PATH — the release script's gates cannot be exercised")
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="release-history-"))
+    try:
+        dev, env, _origin, _log = _release_fixture(tmp)
+        script = dev / "scripts/release.sh"
+        (dev / "mytok2").write_text(
+            "not a credential: this file is here for its NAME, which is what "
+            "`git rev-list --all --objects` prints\n", encoding="utf-8")
+        _git(["add", "-A"], dev, env)
+        _git(["commit", "-q", "-m", "planted a token-named blob"], dev, env)
+
+        red = _run([script, "--check"], dev, env)
+        check(red.returncode != 0,
+              f"a reachable token-named blob fails `--check` (rc={red.returncode})")
+        check("still carries a burned credential" in red.stdout,
+              "the failure names what it found and what to do about it")
+        check("RELEASE_HISTORY_ACCEPTED=yes" in red.stdout,
+              "the failure names the knob that would accept it")
+        # The whole reason it is a second knob: `RELEASE_CONFIRM` answers the
+        # four checklist bullets, and one knob that answers everything answers
+        # nothing.
+        confirmed = dict(env)
+        confirmed["RELEASE_CONFIRM"] = "yes"
+        rc_confirm = _run([script, "--check"], dev, confirmed)
+        check(rc_confirm.returncode != 0,
+              f"`RELEASE_CONFIRM=yes` does NOT clear the history gate "
+              f"(rc={rc_confirm.returncode})")
+
+        accepted = dict(env)
+        accepted["RELEASE_HISTORY_ACCEPTED"] = "yes"
+        green = _run([script, "--check"], dev, accepted)
+        if green.returncode != 0:
+            print(green.stdout)
+        check(green.returncode == 0,
+              f"`RELEASE_HISTORY_ACCEPTED=yes` is the way past it "
+              f"(rc={green.returncode})")
+        check("ACCEPTED by RELEASE_HISTORY_ACCEPTED=yes" in green.stdout,
+              "the transcript records the acceptance rather than going quiet")
+    except (OSError, subprocess.SubprocessError) as exc:
+        skip(f"could not exercise scripts/release.sh here "
+             f"({exc.__class__.__name__}: {exc})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_release_script_real_mode_publishes_by_pushing_this_repo():
+    """The publish half, for real: the push IS the release (C-09, RELEASE-TESTS-2).
+
+    Everything above stops at step 8. Steps 9 and 10 — the point of no return
+    and the tag — were covered by nothing at all, which is how the tag gate sat
+    on the far side of the push for as long as it did. So this arm runs the
+    script in REAL mode against the fixture's on-disk bare `origin`: no
+    network, a real `git push`, and afterwards the remote either has the commit
+    or the test is red.
+
+    `RELEASE_HISTORY_ACCEPTED=yes` is passed because the fixture's history is
+    clean and the knob is therefore a no-op here — set deliberately so this arm
+    tests the PUBLISH path and not the history gate, which
+    `test_release_script_history_gate_blocks_and_takes_only_its_own_knob()`
+    owns. Nothing in this repository is pushed anywhere: `dev` and `origin.git`
+    are both inside a `mkdtemp` that the `finally` removes.
+    """
+    print("test_release_script_real_mode_publishes_by_pushing_this_repo")
+    if not RELEASE_SH.is_file():
+        check(False, "scripts/release.sh exists")
+        return
+    if shutil.which("git") is None:
+        skip("git is not on PATH — the release script's gates cannot be exercised")
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="release-real-"))
+    try:
+        dev, env, origin, stub_log = _release_fixture(tmp)
+        script = dev / "scripts/release.sh"
+        # Something to publish. The fixture's first commit is already on the
+        # remote, and "nothing to push" is the OTHER arm below — a release with
+        # a commit to publish has to be arranged, not assumed.
+        (dev / PLUGIN_REL / "NOTICE.md").write_text(
+            "a payload change to publish\n", encoding="utf-8")
+        _git(["add", "-A"], dev, env)
+        _git(["commit", "-q", "-m", "a payload change"], dev, env)
+        head = _git(["rev-parse", "HEAD"], dev, env).stdout.strip()
+
+        real = dict(env)
+        real["RELEASE_CONFIRM"] = "yes"
+        real["RELEASE_HISTORY_ACCEPTED"] = "yes"
+        run = _run([script], dev, real)
+        if run.returncode != 0:
+            print(run.stdout)
+        check(run.returncode == 0,
+              f"a green fixture publishes end to end (rc={run.returncode})")
+        check("tag dry run is clean" in _step_section(run.stdout, 8),
+              "the tag gate is green BEFORE the push, where it can still stop it")
+        check("pushed" in _step_section(run.stdout, 9),
+              "step 9 says it pushed")
+        remote_head = _git(["rev-parse", "refs/heads/main"], origin, env).stdout.strip()
+        check(remote_head == head,
+              f"the branch landed on the remote — the push IS the release "
+              f"(remote {remote_head[:8]} vs HEAD {head[:8]})")
+        # The tag is opt-in: `--tag-push` was not passed, so the only tag
+        # invocation in the whole run must still be the dry run. A release that
+        # tags without being asked cannot be repeated after a fix.
+        tags = _tag_invocations(stub_log)
+        check(tags and all("--dry-run" in t for t in tags),
+              f"no tag was pushed without `--tag-push` (found: {tags})")
+
+        # And running it again is not a second release: `git push` with nothing
+        # to push must read as "already published", not as success or failure.
+        again = _run([script], dev, real)
+        if again.returncode != 0:
+            print(again.stdout)
+        check(again.returncode == 0,
+              f"a second run is green (rc={again.returncode})")
+        check("nothing to push" in _step_section(again.stdout, 9),
+              "the second run reports nothing to push — the remote already has "
+              "this commit, and only a version bump delivers an update")
+    except (OSError, subprocess.SubprocessError) as exc:
+        skip(f"could not exercise scripts/release.sh here "
+             f"({exc.__class__.__name__}: {exc})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     for t in (test_claude_md_pointers_and_no_omnigent,
               test_claude_md_true_inventory,
@@ -1351,6 +1873,10 @@ def main():
               test_entry_points_are_the_wrappers,
               test_shipped_docs_quote_measured_skill_costs,
               test_manifest_declares_both_skill_families,
+              # C-11 / C-15 — the payload runs from a cache copy, and the
+              # Releasing section is the only prose account of how it ships
+              test_payload_docs_run_from_an_installed_copy,
+              test_contributing_releasing_section_describes_this_model,
               # item 11 — the shipped README / CHANGELOG
               test_plugin_readme_install_and_update_commands,
               test_plugin_readme_trust_section,
@@ -1362,7 +1888,10 @@ def main():
               test_release_script_uses_no_jq_and_never_copies_the_working_tree,
               test_release_script_is_the_checklist,
               test_release_script_avoids_the_shapes_that_reported_wrong_answers,
-              test_release_script_check_mode_runs_its_gates_for_real):
+              test_release_script_gates_the_publish_half_before_the_point_of_no_return,
+              test_release_script_check_mode_runs_its_gates_for_real,
+              test_release_script_history_gate_blocks_and_takes_only_its_own_knob,
+              test_release_script_real_mode_publishes_by_pushing_this_repo):
         t()
     print()
     for message in skips:

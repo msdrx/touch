@@ -28,14 +28,14 @@ catalog *about* the payload, and the substrate reads it only from there.
 | `plugin/touch/bin/` | the six wrappers Touch puts on `PATH`: `touch-serve`, `touch-monitor`, `touch-watcher`, `touch-status`, `touch-cycle-reporter` — the five programs a session runs (GD-U4) — plus `touch-selfcheck`, which verifies an installation and is run by hand |
 | `plugin/touch/hooks/` | `orch_scope_guard.py`, the run-scope `PreToolUse` hook, plus the `hooks/hooks.json` that registers it — the one and only registration (GD-U5) |
 | `plugin/touch/.claude-plugin/` | `plugin.json` (the ONE place a version is declared) — exactly one file; neither the hook manifest nor the marketplace catalog is here |
-| `.claude-plugin/` (repo root) | `marketplace.json`, the catalog: marketplace `msdrx-tools`, one entry, `"source": "./plugin/touch"`. It is at the ROOT because `/plugin marketplace add msdrx/touch` clones the repo and reads `<clone>/.claude-plugin/marketplace.json` and nothing else — there is no subdirectory form of a remote marketplace source (verified, CLI 2.1.220). This repo therefore IS the marketplace |
+| `.claude-plugin/` (repo root) | `marketplace.json`, the catalog: marketplace `msdrx-tools`, one entry, `"source": "./plugin/touch"`. It is at the ROOT because `/plugin marketplace add msdrx/touch` clones the repo and reads `<clone>/.claude-plugin/marketplace.json` and nothing else — a remote **marketplace** source has no subdirectory form (verified, CLI 2.1.220; a *plugin* source may be a `git-subdir`, a form weighed and declined under GD-C8 because it re-creates the two-repos-to-sync model GD-U1 abolished). This repo therefore IS the marketplace. The entry carries `displayName`/`category`/`tags` but no `version` and no `description` — those two are declared once, in `plugin.json` |
 | `tests/` | one standalone executable per module + `run_all.sh` + `fixtures/` (frozen corpora with a sha256 manifest) + `_roots.py`, the one anchor every test names the canonical trees through |
 | `tests/monitoring/` | the monitoring module's own dev-only suite and fixtures, moved out of the module so the payload boundary stays the directory boundary (GD-U6) |
 | `scripts/` | `release.sh` — the release checklist, executable, and there is deliberately no RELEASE.md |
 | `README.md` | intent, the honest verb table, how to run it |
 | `CONTRIBUTING.md` | layout, ground rules, the test law, the release gate |
 | `inception.md` | everything verified about the substrate (CLI 2.1.220), summarized — a dated snapshot, so its pre-plugin paths are history, not directions |
-| `.claude/` | `settings.json` (status line + `enabledPlugins` + the local `extraKnownMarketplaces` entry), `statusline.sh`, two unrelated `shared/scripts/*-sox-installation.sh` helpers — those four files are all `git ls-files .claude` returns — and this repo's untracked run history under `local-orchestrators/` |
+| `.claude/` | `settings.json` (exactly two keys: status line + `enabledPlugins: {"touch@inline": true}` — no `extraKnownMarketplaces`, no second enabled id, GD-C1), `statusline.sh`, two unrelated `shared/scripts/*-sox-installation.sh` helpers — those four files are all `git ls-files .claude` returns — and this repo's untracked run history under `local-orchestrators/` |
 
 `LICENSE` is the one deliberate duplicate — repo root and plugin root, required
 by the plugin spec, machine-checked byte-for-byte by `tests/test_plugin_tree.py`
@@ -43,16 +43,20 @@ by the plugin spec, machine-checked byte-for-byte by `tests/test_plugin_tree.py`
 
 **Authority ladder (GD-3)** — highest first:
 
-1. `.claude/local-orchestrators/touch-plugin-unify/plan/touch-plugin-unify-plan.md`
+1. `.claude/local-orchestrators/touch-plugin-compliance/plan/touch-plugin-compliance-plan.md`
+   — the packaging amendment: one dev-loop identity, the catalog entry's card
+   fields, the release gates, honest install docs (GD-C1…GD-C12, C-01…C-18).
+   It outranks everything below on how Touch is packaged and published.
+2. `.claude/local-orchestrators/touch-plugin-unify/plan/touch-plugin-unify-plan.md`
    — the layout amendment: `plugin/touch/` canonical, the six adopted skills
    (GD-U1…GD-U9). It outranks everything below on where a file lives.
-2. `.claude/local-orchestrators/touch-mongo-live/plan/touch-mongo-live-plan.md`
+3. `.claude/local-orchestrators/touch-mongo-live/plan/touch-mongo-live-plan.md`
    — the amendment: Mongo + live flow (GD-21…GD-30, R-38…R-58).
-3. `.claude/local-orchestrators/touch-full-recon/plan/touch-full-recon-plan.md`
+4. `.claude/local-orchestrators/touch-full-recon/plan/touch-full-recon-plan.md`
    — the normative plan (GD-1…GD-20, R-01…R-37).
-4. `.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md`
+5. `.claude/local-orchestrators/touch-aggregator/plan/touch-aggregator-plan.md`
    — design law D1–D14, as amended. **Not** an implementable plan any more.
-5. `inception.md` → `README.md` → this file.
+6. `inception.md` → `README.md` → this file.
 
 Cite **D8.1** (stack / stdlib-only, amended by GD-21) or **D8.2** (journal
 `result` opaque, superseded) — a bare "D8" is ambiguous and means neither.
@@ -111,14 +115,38 @@ Workflow journal ───┘        (append-only,          (HTTP + WebSocket)
   known; readers ignore unknown keys.
 
 Other `.claude/` files worth knowing: `.claude/settings.json` (committed,
-session-wide — the status line, `"enabledPlugins": {"touch@inline": true}` so
-every `--plugin-dir plugin/touch` session auto-enables Touch, plus an
-`extraKnownMarketplaces` entry pointing `msdrx-tools` at `"path": "./"` — the
-repo root, i.e. this checkout's own catalog, which is why the path is NOT
-`./plugin/touch`; it registers NO hooks, GD-U5) and `.claude/statusline.sh`
-(which shells out to `jq`; that is
-a **status-line-only** exception and is not a licence for `jq` anywhere in
-Touch's own code or tests).
+session-wide — exactly two keys, the status line and
+`"enabledPlugins": {"touch@inline": true}` so every
+`--plugin-dir plugin/touch` session auto-enables Touch, and **nothing else**;
+it registers NO hooks, GD-U5) and `.claude/statusline.sh` (which shells out to
+`jq`; that is a **status-line-only** exception and is not a licence for `jq`
+anywhere in Touch's own code or tests).
+
+**Why settings.json is that short, and must stay that way (GD-C1).** It once
+also carried an `extraKnownMarketplaces` entry pointing `msdrx-tools` at this
+checkout, plus `"touch@msdrx-tools": true`. Both are gone:
+
+- Marketplace registration is keyed by catalog **name** and stored **per user,
+  globally**, so a same-name add silently REPLACES the previous registration.
+  Anyone who had installed the published Touch would have their real
+  `msdrx-tools` repointed at a working tree the moment they trusted this
+  folder — in every project on that machine. That hijack is the whole reason.
+- An `enabledPlugins` entry at any scope overrides `defaultEnabled: false`,
+  which is the manifest's entire consent posture for a hook-carrying plugin.
+  One id is one deliberate opt-in for the dev loop; two ids is two.
+- The key bought nothing anyway: the `claude plugin install`/`marketplace`
+  subcommands do not read `extraKnownMarketplaces` (reproduced twice), and the
+  dev loop is `claude --plugin-dir plugin/touch`, which `touch@inline` already
+  serves. To exercise the marketplace install path, `claude plugin marketplace
+  add <checkout>` in a throwaway `CLAUDE_CONFIG_DIR` — never via committed
+  settings.
+
+Measured, so the GD-U5 double-fire fear is not re-litigated: with the same
+plugin present both as `--plugin-dir` and as an installed copy, a hook fires
+**once** — the `--plugin-dir` copy shadows the installed one (probe plugins,
+one appended line per invocation, 1 fire not 2). That shadowing rule is
+unwritten upstream, so nothing may depend on it; the fix above removes the
+dependency instead of documenting a reliance on it.
 
 The module is **stateless and task-agnostic** — never copy or modify it per
 task. Per-run state lives in `.claude/local-orchestrators/<task-name>/`
@@ -127,7 +155,8 @@ task. Per-run state lives in `.claude/local-orchestrators/<task-name>/`
 
 ## The run folders — what each one actually is
 
-Nine folders, **all produced by this repo's own runs**. Every
+One folder per run, **all produced by this repo's own runs** — the table below
+is the index, so no count here can fall behind it. Every
 `orch-config.json` on disk names a `wf_dir` under
 `~/.claude/projects/-home-laniakea-Projects-touch/…/subagents/workflows/`, so
 `wf_dir` is the join key from a task folder to its harness journal. (An earlier
@@ -145,7 +174,8 @@ exists means "archived — source transcripts unavailable", never "wrong repo".
 | `touch-monitor-perf` | monitoring-module performance/robustness pass | complete, with follow-up work recorded | `plan/touch-monitor-perf-plan.md` + `plan/POST-RUN.md` |
 | `touch-plugin-pack` | packaging Touch as a Claude Code plugin | packaging items complete; items 01/06/13 still open | `plan/touch-plugin-pack-plan.md` + `plan/RESUME.md` |
 | `reflection-plugin` | a superseded 33-item plan; its implementation landed 3 items and was halted | **halted** | `plan/reflection-plugin-plan.md` (historical) |
-| `touch-plugin-unify` | `plugin/touch/` made canonical + the six skills adopted | research complete, this implementation pass | `plan/touch-plugin-unify-plan.md` (**amendment**, GD-U1…GD-U9) + `plan/touch-plugin-unify-subplans.md` |
+| `touch-plugin-unify` | `plugin/touch/` made canonical + the six skills adopted | complete | `plan/touch-plugin-unify-plan.md` (**amendment**, GD-U1…GD-U9) + `plan/touch-plugin-unify-subplans.md` |
+| `touch-plugin-compliance` | alignment with the official plugin/marketplace standard: one dev identity, catalog entry card fields, release gates, honest install docs | plan complete, this implementation pass | `plan/touch-plugin-compliance-plan.md` (**amendment**, GD-C1…GD-C12, C-01…C-18) + `plan/touch-plugin-compliance-subplans.md` + `report/endgame-acceptance.md` |
 
 A `plan/` or `report/` directory may legitimately be empty — that is a
 recognized kind ("plan only / never run"), not a broken folder, and it is why

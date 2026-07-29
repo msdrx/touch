@@ -16,11 +16,42 @@ this index:
       password (item 02 / SECURITY-PUBLISHING-5: 17 such URIs live in this
       repo's history).
 
-Scope, deliberately: the INDEX and the HEAD tree, i.e. what a future clone or
-`git archive` would carry. Older commits are out of reach of a test — history
-is purged manually (see
-`.claude/local-orchestrators/reflection-plugin/findings/sp-secrets-hygiene-manual-steps.md`)
-and neutralized structurally by the fresh-history release repo (GD-P1(4)/GD-P6).
+Scope, deliberately: the INDEX and the HEAD tree, i.e. what a `git archive`
+carries. That is no longer the whole of what a user receives. A marketplace
+install clones THIS repository, history included — the fresh-history release
+repo that once neutralized older commits structurally does not exist (GD-P1(4)
+/GD-P6 are superseded on that point), so the blind spot is real and is covered
+elsewhere, not here:
+
+  `scripts/release.sh`'s step-0 history-contamination gate scans this
+  repository's whole history in two shapes — `git rev-list --all --objects`
+  for a token-NAMED blob, and `git grep` over `git rev-list --all` for a
+  credentialed `mongodb://` URI in file CONTENTS — and FAILS the release,
+  under `--check` too, unless the operator sets
+  `RELEASE_HISTORY_ACCEPTED=yes`. `RELEASE_CONFIRM` does not imply it.
+
+That gate and this file are halves of one guard: this file names the gate by
+its knob, and `release.sh` names and RUNS this file by path in its test step
+(step 2), in the real repo precisely because this file skips itself in the
+clean checkout that step otherwise tests. Delete either and the other's stated
+scope is visibly wrong. This file is the cheap
+always-on half (every commit); the gate is the publish-time half (all
+history, once). The manual purge notes stay at
+`.claude/local-orchestrators/reflection-plugin/findings/sp-secrets-hygiene-manual-steps.md`.
+
+`ROOT_ALLOWLIST` (guard (a)) inspects only tracked paths with NO `/` in them —
+files sitting directly at the repo root. Root *directories* are outside its
+remit by construction, and that includes `.claude-plugin/`, the one root
+directory publication depends on (a cloned marketplace is read from
+`<repo>/.claude-plugin/marketplace.json` and nowhere else). What guards it is
+`tests/test_plugin_tree.py`, which pins the catalog's presence, shape and
+contents, and pins the PAYLOAD's `.claude-plugin/` to exactly `plugin.json`;
+the ROOT `.claude-plugin/` is checked for the catalog, not for an exact file
+set — an innocuous stowaway beside it is caught by nothing structural, while a
+*secret* there is still caught by guards (b) and (c), which scan every tracked
+file. Do not widen the allowlist to cover it: an allowlist of root *files*
+fails on addition, which is the property that catches a stray `mytok2`, and
+mixing directory rules into it would blunt exactly that.
 
 `tests/fixtures/**` is excluded from the content scans: it is frozen verbatim
 corpora (GD-P4) that this suite may never edit, and it never ships (GD-P1(3)).
@@ -42,6 +73,10 @@ REPO = Path(__file__).resolve().parents[1]
 # An allowlist fails on ADDITION: a new root file must be added here on purpose,
 # by someone who looked at it. `LICENSE` is pre-authorized by GD-P6 (MIT, repo
 # root + plugin root); nothing else is.
+# FILES ONLY — `test_root_allowlist` selects tracked paths with no `/`, so root
+# directories (`.claude-plugin/`, `plugin/`, `scripts/`, `tests/`, `resources/`)
+# never appear here and must not be added. `.claude-plugin/` is guarded by
+# `tests/test_plugin_tree.py`; see this module's docstring for why.
 ROOT_ALLOWLIST = frozenset({
     ".gitignore",
     "CLAUDE.md",

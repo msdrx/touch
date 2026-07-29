@@ -17,6 +17,7 @@ failure here means Touch is off-spec, not that a test needs updating.
 import ast
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -369,16 +370,40 @@ def test_drain_frames_parity_with_monitor_server():
 
     entry = str(MON)
     sys.path.insert(0, entry)
+    # `monitor_server.py` resolves a task state dir AT IMPORT and exits (rc 2)
+    # when it finds none — the clean-checkout case (`git archive HEAD | tar -x`
+    # carries no `.claude/local-orchestrators/`). Handing it a scratch dir keeps
+    # this arm RUNNING there instead of skipping: it is the only place
+    # `drain_frames` is checked against the prior art's `parse_client_frames`,
+    # so a skip would leave the parity claim unchecked at the release gate
+    # (GD-C7's clean-checkout run). The import writes nothing into the scratch
+    # dir, and `parse_client_frames` is pure.
+    prior_state_dir = os.environ.get("ORCH_STATE_DIR")
+    scratch_state_dir = tempfile.TemporaryDirectory(prefix="touch-ws-parity-")
+    os.environ["ORCH_STATE_DIR"] = scratch_state_dir.name
     try:
         import monitor_server                                    # noqa: E402
-    except Exception as exc:                                     # pragma: no cover
-        print(f"    prior-art parity SKIPPED: monitor_server not importable ({exc})")
+    # `SystemExit` is a BaseException and sails past `except Exception`, and a
+    # genuinely broken module still exits. Catching both is the backstop that
+    # keeps `run_all.sh`'s promise — "files that read the absent things SKIP
+    # there; nothing crashes" (GD-C7) — instead of exiting this file rc=1. The
+    # line starts with SKIP so the runner COUNTS it (`run_all.sh`: skip/SKIP
+    # first on the line); a silently-not-run arm is the failure mode that
+    # promise exists to prevent.
+    except (Exception, SystemExit) as exc:                       # pragma: no cover
+        print(f"    SKIP: prior-art parity — monitor_server not importable "
+              f"({type(exc).__name__}: {exc})")
         return
     finally:
         # Do not leave the monitoring dir on sys.path for the rest of the
         # process: it would shadow any future Touch module sharing a name there.
         if entry in sys.path:
             sys.path.remove(entry)
+        if prior_state_dir is None:
+            os.environ.pop("ORCH_STATE_DIR", None)
+        else:
+            os.environ["ORCH_STATE_DIR"] = prior_state_dir
+        scratch_state_dir.cleanup()
     for sample in (wire, wire[:-2], b"", encode_ping(b"hi", mask=key)):
         mine, theirs = bytearray(sample), bytearray(sample)
         check(drain_frames(mine) == monitor_server.parse_client_frames(theirs)

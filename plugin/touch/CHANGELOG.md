@@ -2,9 +2,14 @@
 
 Versions here are the `version` field of `.claude-plugin/plugin.json`, which is
 the only place Touch declares one. Third-party marketplaces do not auto-update,
-and a release without a version bump delivers nothing — so every entry below
-is a version users had to ask for. See the README's *Update / uninstall*
-section for the two commands.
+and a release without a version bump delivers nothing — so an entry below is a
+version users have to ask for. See the README's *Update / uninstall* section
+for the two commands.
+
+**0.2.0 is the first version a marketplace serves.** 0.1.0 is kept below as the
+development record of what existed before it; no marketplace ever served it and
+no one could install it, so there is no upgrade path from it to document and
+nothing to migrate. If you installed Touch at all, you installed 0.2.0 or later.
 
 ## 0.2.0
 
@@ -39,15 +44,25 @@ more skills than 0.1.0 did.
   presents changes — the directories a consumer receives are the same ones this
   release ships from (the six new skills above are the release's only addition
   to what lands on disk).
-- **A different install command.** The marketplace `msdrx-tools` is now served
-  from the project repository itself, so the first line is
-  `/plugin marketplace add msdrx/touch` (it was `msdrx/touch-plugin`, a
-  separate payload-only repo). Everything after it is unchanged —
-  `/plugin install touch@msdrx-tools`, then `/reload-plugins` — and so is the
-  update path. The catalog has to sit at that repository's root because a
-  cloned marketplace is read from `<repo>/.claude-plugin/marketplace.json` and
-  nowhere else; it names this payload with `"source": "./plugin/touch"`, and
-  what lands in your plugin cache is still exactly this directory.
+- **The install command, stated once.** The marketplace `msdrx-tools` is served
+  from the project repository itself: `/plugin marketplace add msdrx/touch`,
+  then `/plugin install touch@msdrx-tools`, then `/reload-plugins`, then enable
+  Touch from `/plugin`. The catalog has to sit at that repository's root
+  because a cloned marketplace is read from
+  `<repo>/.claude-plugin/marketplace.json` and nowhere else; it names this
+  payload with `"source": "./plugin/touch"`, and what lands in your plugin
+  cache is exactly this directory. Earlier development notes named a separate
+  payload-only repository as the source — that repository never published a
+  version, so nothing was ever installed from it and no migration exists.
+- **Compliance pass over the packaging.** The catalog lives only at the
+  repository root — the payload no longer carries a second
+  `.claude-plugin/marketplace.json` of its own, which would have been a second
+  catalog under the same marketplace name — and the catalog entry gained the
+  card fields the listing UI shows (`displayName`, a category, tags) while the
+  description and the version stay declared once, in `plugin.json`. The release
+  gates now refuse to publish a version whose tag already exists, prove the
+  catalog entry's `source` actually resolves to this payload, and run the test
+  suite over a clean checkout rather than the author's working tree.
 - The pre-install description and keywords now name the second skill family,
   so nothing in the skill list is a surprise after enabling.
 

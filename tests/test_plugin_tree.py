@@ -39,7 +39,12 @@ Two properties survive the move, and one is new:
                           `owner/repo/sub/dir` outright and looks nowhere else
                           after cloning). So it sits at the repo root, naming
                           the payload with `"source": "./plugin/touch"`, and
-                          the payload must NOT carry a second copy of it.
+                          the payload must NOT carry a second copy of it —
+                          which is also why the payload's `.claude-plugin/` is
+                          held to an EXACT set (`plugin.json`, nothing else)
+                          and why the root catalog must be TRACKED, not merely
+                          on disk: an untracked catalog publishes a repository
+                          with no marketplace at all.
   LICENSE (new, GD-U7)    PLUGIN-SPEC-17 wants a LICENSE at the repo root AND
                           at the plugin root, so it is the ONE deliberate
                           duplicate in the tree. The byte-equality check the
@@ -57,18 +62,38 @@ import subprocess
 import sys
 
 sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
-from _roots import PAYLOAD, REPO                        # noqa: E402
+from _roots import CATALOG, PAYLOAD, REPO               # noqa: E402
 
 PLUGIN = PAYLOAD
 MANIFEST = PLUGIN / ".claude-plugin" / "plugin.json"
 #: The catalog, at the REPO root — not beside `plugin.json`. `/plugin
 #: marketplace add msdrx/touch` clones this repository and reads exactly
 #: `<clone>/.claude-plugin/marketplace.json`; a manifest anywhere else is
-#: invisible to it.
-MARKETPLACE = REPO / ".claude-plugin" / "marketplace.json"
+#: invisible to it. Named through `_roots.CATALOG` rather than spelled out
+#: again here: the longhand literal in three files is how the last move
+#: half-landed (RELEASE-TESTS-15).
+MARKETPLACE = CATALOG
 
 #: What that entry's `source` must say, and the tree it must resolve to.
 MARKETPLACE_SOURCE = "./plugin/touch"
+
+#: The payload's `.claude-plugin/` holds exactly this, and CLAUDE.md and
+#: CONTRIBUTING both say so in prose. GD-U5 is the reason: the hook manifest
+#: lives at `hooks/hooks.json`, beside the script it registers, and a
+#: `.claude-plugin/hooks.json` added "helpfully" tomorrow is read by nobody —
+#: `claude plugin validate` does not look there either, so a denylist of one
+#: name (`marketplace.json`) leaves the whole rest of the directory silent.
+PLUGIN_MANIFEST_DIR_CONTENTS = {"plugin.json"}
+
+#: `category` is a free-form string in the entry schema — the CLI's own
+#: declaration (2.1.220) describes it as *"Category for organizing plugins
+#: (e.g. \"productivity\", \"development\")"* and enumerates nothing. Those two
+#: examples are therefore the entire documented vocabulary, so the choice is
+#: pinned to them: Touch is developer tooling (a dashboard over a coding
+#: session's agent tree, plus engineering-practice skills), which makes
+#: `development` the closer of the two. Widen this set only against a
+#: documented value, never to legitimise a coinage.
+DOCUMENTED_CATEGORIES = {"productivity", "development"}
 
 #: The payload's monitoring tree holds exactly these five files and nothing
 #: else. Stated positively (an exact set, not a denylist) because that is the
@@ -139,6 +164,16 @@ def have_cli():
     return shutil.which("claude") is not None
 
 
+def have_git():
+    """True when REPO is a git checkout (an unpacked `git archive` is not)."""
+    try:
+        res = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=str(REPO),
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
 def run_cli(args, timeout=180):
     """CompletedProcess, or None when the CLI is missing/hangs/errors out."""
     try:
@@ -176,6 +211,19 @@ def test_monitoring_subset_ships_nothing_extra():
 def test_plugin_manifest():
     print("test_plugin_manifest")
     check(MANIFEST.is_file(), "plugin/touch/.claude-plugin/plugin.json exists")
+    # EXACT equality, the same idiom (and the same reason) as the monitoring
+    # subset above: `.claude-plugin/` is "exactly one file" in the prose, so it
+    # is exactly one file here. A stowaway `hooks.json` or a second catalog now
+    # FAILS instead of being silently ignored by every reader in the stack
+    # (PAYLOAD-5, GD-U5). Runs before the early return: an empty directory has
+    # to fail loudly too.
+    mdir = MANIFEST.parent
+    present = {p.name for p in mdir.iterdir()} if mdir.is_dir() else set()
+    check(present == PLUGIN_MANIFEST_DIR_CONTENTS,
+          f"the payload's .claude-plugin/ holds exactly "
+          f"{sorted(PLUGIN_MANIFEST_DIR_CONTENTS)} (missing: "
+          f"{sorted(PLUGIN_MANIFEST_DIR_CONTENTS - present)}, extra: "
+          f"{sorted(present - PLUGIN_MANIFEST_DIR_CONTENTS)})")
     if not MANIFEST.is_file():
         return
     m = load_json(MANIFEST)
@@ -258,12 +306,37 @@ def test_marketplace_manifest():
     m = load_json(MARKETPLACE)
     if m is None:
         return
+    #: `plugin.json` is the other half of every cross-manifest arm below. It is
+    #: loaded here rather than passed in so this function stays runnable on its
+    #: own; `test_plugin_manifest` owns the arms about its CONTENTS.
+    pm = load_json(MANIFEST) if MANIFEST.is_file() else None
+    if not isinstance(pm, dict):
+        pm = {}
     check(m.get("name") == "msdrx-tools", "marketplace name is 'msdrx-tools' (GD-T3)")
+    # MANIFESTS-10: the plugin manifest's `$schema` is pinned twenty lines up
+    # and this one was not, so a typo here was silent — the field is ignored at
+    # load time by design and `claude plugin validate` passes regardless. Pinned
+    # symmetrically. (That the URL SERVES a schema is an operator check from an
+    # unblocked host, GD-C10; schemastore is network-blocked from this sandbox,
+    # so the test pins the string the official catalog declares, not a 200.)
+    check(m.get("$schema") ==
+          "https://json.schemastore.org/claude-code-marketplace.json",
+          "$schema points at the marketplace schema (editor validation)")
     # --strict turns a missing marketplace description into an error (E2).
     check(bool(m.get("description")), "marketplace carries a description")
     owner = m.get("owner") or {}
     check(bool(owner.get("name")), "owner carries a name")
     check("email" not in owner, "owner carries no email")
+    # MANIFESTS-8 / PAYLOAD-10 / DOCS-12 / RELEASE-TESTS-12: `owner.url` is
+    # "Website, GitHub profile, or organization URL" — the MAINTAINER, not the
+    # catalog's repository, which `plugin.json` already states twice
+    # (`homepage`, `repository`). It was quietly repointed at the repo during
+    # the move, leaving two adjacent manifests disagreeing about one person's
+    # URL. Pinned to agreement rather than to a literal: whichever profile the
+    # maintainer moves to, the two files move together or this fails.
+    check(owner.get("url") and owner.get("url") == (pm.get("author") or {}).get("url"),
+          f"owner.url equals plugin.json's author.url "
+          f"({owner.get('url')!r} vs {(pm.get('author') or {}).get('url')!r})")
 
     plugins = m.get("plugins") or []
     check(len(plugins) == 1, f"exactly one plugin entry ({len(plugins)})")
@@ -286,6 +359,32 @@ def test_marketplace_manifest():
           f"the source resolves to the payload tree ({resolved})")
     check((resolved / ".claude-plugin" / "plugin.json").is_file(),
           "the resolved source carries .claude-plugin/plugin.json")
+    # --- the card fields (SPEC-5, MANIFESTS-11; GD-C9)
+    # The entry IS the pre-install card in `/plugin`'s Discover tab, and for a
+    # local/custom marketplace that card is thin by design (no context cost, no
+    # last-updated). It is also where a user decides whether to install a
+    # plugin that ships a PreToolUse hook, so the fields that carry no trust
+    # claim are worth filling in. `displayName` is the one that must not drift:
+    # a surface reading the catalog WITHOUT the payload would otherwise show
+    # `touch` where the plugin calls itself `Touch`.
+    check(e.get("displayName") and e.get("displayName") == pm.get("displayName"),
+          f"entry displayName equals plugin.json's "
+          f"({e.get('displayName')!r} vs {pm.get('displayName')!r})")
+    check(e.get("category") in DOCUMENTED_CATEGORIES,
+          f"entry declares a documented category "
+          f"(got {e.get('category')!r}, documented: "
+          f"{sorted(DOCUMENTED_CATEGORIES)})")
+    tags = e.get("tags")
+    keywords = set(pm.get("keywords") or [])
+    check(isinstance(tags, list) and tags, f"entry carries tags ({tags!r})")
+    # Tags are marketplace-only (nothing in `plugin.json` shadows them), so
+    # GD-T9 does not forbid them — but they are the same vocabulary as
+    # `keywords`, and a tag that is not a keyword is a second description of
+    # what Touch is, drifting on its own. Subset, not equality: the card may
+    # carry fewer terms than the manifest's search keywords.
+    check(isinstance(tags, list) and set(tags) <= keywords,
+          f"entry tags are drawn from plugin.json's keywords "
+          f"(stray: {sorted(set(tags or []) - keywords)})")
     # DISTRIBUTION-5: version resolution is plugin.json > entry > commit SHA,
     # first set wins. Two versions is a way to ship a stale one forever.
     check("version" not in e,
@@ -295,6 +394,14 @@ def test_marketplace_manifest():
     # a second copy of a trust-bearing string with nothing keeping the two
     # equal, and the precedence between them is not established by any finding
     # in this run's research. One owner, as with `version`.
+    #
+    # Where the line falls, since the entry now DOES carry card fields
+    # (GD-C9): `displayName` is duplicated but pinned equal above and carries
+    # no claim about behaviour; `category` and `tags` have no `plugin.json`
+    # counterpart to contradict. `version` and `description` are the two the
+    # entry stays out of — a stale version ships forever, and a short entry
+    # description would be a trust-bearing string competing with the one that
+    # carries GD-T8's disclosures.
     check("description" not in e,
           "entry carries no description — plugin.json owns it (GD-T9 pattern)")
     declared = [k for k in COMPONENT_KEYS if k in e]
@@ -302,6 +409,34 @@ def test_marketplace_manifest():
     # plugin.json; declaring components in both is a hard conflict error.
     check(not declared,
           f"entry declares no components (strict-mode conflict; found: {declared})")
+
+
+def test_catalog_is_tracked():
+    """The catalog must be in the INDEX, not merely on disk (RELEASE-TESTS-7).
+
+    The whole distribution model is "the pushed tree carries
+    `.claude-plugin/marketplace.json`". `MARKETPLACE.is_file()` above is
+    satisfied by an untracked file, so a catalog that was never `git add`ed
+    passes every other arm in this file while the published repository has no
+    marketplace at all — and `release.sh` step 6 gates on the same fact from
+    its side.
+    """
+    print("test_catalog_is_tracked")
+    if not have_git():
+        skip("not a git checkout (no `git rev-parse --git-dir`) — nothing can "
+             "be tracked here; an unpacked archive only carries what was")
+        return
+    rel = MARKETPLACE.relative_to(REPO).as_posix()
+    try:
+        res = subprocess.run(["git", "ls-files", "--error-unmatch", "--", rel],
+                             cwd=str(REPO), capture_output=True, text=True,
+                             timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        check(False, f"git ls-files runs ({exc})")
+        return
+    check(res.returncode == 0,
+          f"{rel} is tracked by git (rc={res.returncode}; an untracked catalog "
+          f"publishes a repository with no marketplace)")
 
 
 def test_license():
@@ -383,6 +518,7 @@ def main():
     for t in (test_monitoring_subset_ships_nothing_extra,
               test_plugin_manifest,
               test_marketplace_manifest,
+              test_catalog_is_tracked,
               test_license,
               test_manifests_validate,
               test_plugin_details):

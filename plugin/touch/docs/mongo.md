@@ -184,8 +184,28 @@ checkable, and a bare `touch` prefix would admit names nobody here built.
 Print the one this checkout uses:
 
 ```bash
-python3 -m aggregator.mirror --check      # config + derived db name; never the URI
+PLUGIN_ROOT="<plugin root>"                                          # see below; §5 reuses it
+PYTHONPATH="$PLUGIN_ROOT" python3 -P -m aggregator.mirror --check    # config + derived db name; never the URI
 ```
+
+**`<plugin root>` is the directory this file ships in** — the mirror is an
+operator tool with no `bin/` wrapper (GD-U4), so the module form is its only
+entry point, and an installed payload is never on `sys.path` by itself. Find
+the root once and reuse it for every command below: `claude plugin list --json`
+reports it as `installPath` (shape:
+`~/.claude/plugins/cache/<marketplace>/touch/<version>`) — the plain
+`claude plugin list` prints only version, scope and status, no path. In the
+development checkout it is `plugin/touch`. `${CLAUDE_PLUGIN_ROOT}` names the
+same directory inside a hook, MCP or LSP process the plugin starts, but it is
+**not** exported into your session shell or into `bin/` wrappers (GD-T4,
+measured empty), so do not paste it into a terminal — read the path off
+`--json` instead. `PYTHONPATH` is where the *code* is read from; the *checkout*
+being mirrored is resolved separately (`$CLAUDE_PROJECT_DIR` >
+`$TOUCH_PROJECT_CWD` > a cwd walk-up to a `.claude/` marker > the cwd itself),
+and `.touch/` plus the derived database name hang off that — so `cd` into the
+checkout you mean to inspect before running any of these, or export one of
+those two variables. (`-P` keeps an unrelated `aggregator/` in that cwd from
+shadowing the payload's.)
 
 **Credentials live in `.touch/mongo.json`, mode 0600** — the same handling as
 `server.json`'s per-boot token (GD-13):
@@ -269,17 +289,21 @@ default in the UI, visible on demand, and never shown as current.
 ## 5. Rebuild and backfill
 
 ```bash
+# `<plugin root>` is where this file ships — see §3 for how to find it
+PLUGIN_ROOT="<plugin root>"
+
 # health of the mirror as /health reports it (redacted)
-python3 -m aggregator.mirror --health
+PYTHONPATH="$PLUGIN_ROOT" python3 -P -m aggregator.mirror --health
 
 # drop the reducer-owned `derived` collection and replay everything from files
-python3 -m aggregator.mirror --rebuild
+PYTHONPATH="$PLUGIN_ROOT" python3 -P -m aggregator.mirror --rebuild
 
 # one-shot historical walk of ~/.claude/projects/** (live=False, always)
-python3 -m aggregator.mirror --backfill
+PYTHONPATH="$PLUGIN_ROOT" python3 -P -m aggregator.mirror --backfill
 
 # …of a different tree (a second checkout's history, a restored backup)
-TOUCH_CLAUDE_ROOT=/some/other/.claude python3 -m aggregator.mirror --backfill
+TOUCH_CLAUDE_ROOT=/some/other/.claude \
+  PYTHONPATH="$PLUGIN_ROOT" python3 -P -m aggregator.mirror --backfill
 ```
 
 * `--rebuild` is the operation that proves GD-22: Mongo is a projection, so a

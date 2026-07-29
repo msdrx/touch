@@ -321,8 +321,19 @@ per session.
 everything Touch ships. Everything outside it is development-only material that
 deliberately never ships — which is the whole reason the payload is a
 subdirectory: the plugin manifest schema has no `files`/`exclude` field, so the
-directory boundary is the only way to keep `tests/` out of what a consumer
-downloads (~10 MB, of which ~8 MB is `tests/fixtures/` alone).
+directory boundary is the only way to keep `tests/` out of the payload.
+
+Be precise about what that boundary buys, because it is easy to over-claim.
+It controls **what lands in a user's plugin cache** (the install copies
+`./plugin/touch` and nothing else) and **what the release gates scan** (step 5
+builds the stage with `git archive HEAD:plugin/touch`, so `tests/fixtures/` —
+~8 MB on its own — is not in the scanned bytes). It does **not** control what
+is transferred: this repository *is* the marketplace, so
+`/plugin marketplace add msdrx/touch` clones the whole repo, roughly 15 MB of
+it (re-measure with `gh api repos/msdrx/touch --jq .size`, which reports KB),
+history included. That is the same decision the Releasing section below
+records, seen from the layout side — the two paragraphs are one decision, and
+neither may be edited to disagree with the other.
 
 | path | what it is |
 |---|---|
@@ -372,7 +383,22 @@ settles *done*, never *failed* — the fabricated FAILED badge was a real defect
 - **Skips are reported, not swallowed.** Suites legitimately skip when
   something they read is absent (no mongod, no node, the gitignored run
   history). The runner prints skip counts, so green never quietly means "the
-  files vanished".
+  files vanished". A suite that needs an absent thing must SKIP, never crash —
+  a `SystemExit` out of an imported module is a red file, not a skip line, and
+  that distinction is what keeps a clean checkout green.
+- **`test_package.py` gates on what git has, not on your disk.** It never reads
+  `plugin/touch/` directly: it builds the release stage with `git archive`, on
+  `HEAD:plugin/touch` *and* on a throwaway-index preview of the next commit
+  (`git add -A -- plugin/touch` written to a scratch index, so your own index is
+  untouched). The preview is why most payload edits are checked *before* you
+  commit them; an arm asserting a file is **absent** from the payload still
+  reads the `HEAD` side, so a deletion (a stowaway `marketplace.json`, say) stays
+  red until the deletion is committed. `test_plugin_tree.py` reads the working
+  tree, with one exception: it asserts the root catalog is **tracked**
+  (`git ls-files --error-unmatch`), so a catalog nobody ever `git add`ed is red
+  however good it looks on disk. That is the intended shape, not a bug to route
+  around — those two suites answer "what would ship", and what ships is what git
+  has. Do not weaken an arm to make an uncommitted tree green.
 - **The clean-checkout gate.** Before any wide change and before a release, run
   the suite over tracked bytes only — what a fresh clone actually looks like:
 
@@ -452,10 +478,25 @@ and publishing from here accepts them deliberately:
 - **An install clones this repo's whole history**, which carries a burned token
   blob and credentialed `mongodb://` URIs. Purging it (`git filter-repo`) is
   the fix; every credential this repo has ever seen should be treated as
-  burned either way. `release.sh`'s preflight makes you confirm this.
+  burned either way. `release.sh` step 0 **gates** on it: a reachable token
+  blob or a credentialed URI is a red gate — under `--check` too — and the only
+  way past it is `RELEASE_HISTORY_ACCEPTED=yes`, said out loud, per run.
+  `RELEASE_CONFIRM` does not imply it and never will: confirming a checklist
+  and accepting a leaked-credential publish are different decisions.
 - **Every commit is a marketplace update.** Users who have auto-update on
-  re-clone this repo, dev noise included. Only a `version` bump in
+  re-clone this repo — roughly 15 MB, dev noise included (the same number the
+  layout section above states, for the same reason). Only a `version` bump in
   `plugin.json` actually delivers a new payload to them.
+
+**The source form that was declined.** A `git-subdir` plugin source, pointed at
+a small clean marketplace repository, would avoid both consequences above: no
+history transfer and a tiny clone. It was weighed and declined, because it
+re-creates the two-repositories-to-keep-in-sync model this project abolished
+when `plugin/touch/` became the single canonical home — a second repo to sync
+is exactly the cost this model refused to keep paying, and a payload that is
+canonical in one place is worth more than a smaller clone. Recorded here so the
+next reader does not re-litigate it from scratch; if the trade ever flips, it
+flips on that cost, not on the clone size.
 
 `scripts/release.sh` **is** the checklist; there is deliberately no RELEASE.md.
 
@@ -463,8 +504,9 @@ and publishing from here accepts them deliberately:
    place a version is declared — and give `CHANGELOG.md` a top entry naming the
    same version (a guard enforces the agreement). That bump is the only thing
    that delivers an update to installed users.
-2. Commit. The gates read the **committed** tree (`git archive HEAD:plugin/touch`
-   builds the payload they scan); the working tree is never what ships.
+2. Commit. `release.sh`'s gates read the **committed** tree
+   (`git archive HEAD:plugin/touch` builds the payload they scan); the working
+   tree is never what ships.
 3. Dry-run every gate: `scripts/release.sh --check`. It stops before the point
    of no return, pushes nothing, and reports every failure rather than the
    first. Run it early and often.
