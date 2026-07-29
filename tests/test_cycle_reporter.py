@@ -37,6 +37,7 @@ import contextlib
 import importlib.util
 import inspect
 import io
+import json
 import os
 import shutil
 import sys
@@ -262,13 +263,154 @@ def test_real_payload_resolves_to_its_own_copy():
         check(err == "", "the real payload is complete: nothing on stderr")
 
 
+# -- the protocol-close pass ------------------------------------------------
+# The template closes `divide` and `finalgate` itself via runStatus (R-09), but
+# the workflow runtime has no Node API, so those calls no-op; the reporter's
+# evaluate_protocol_closes() is who actually emits them. These arms drive a
+# fixture run through pass_once() with a RECORDING status.sh and assert the
+# exact events the template would have emitted — including the exactly-once
+# guarantee across a daemon restart.
+
+RECORDING_STATUS_SH = (
+    '#!/usr/bin/env bash\n'
+    '# recording stub: plan|stage|state|msg|ORCH_PLANS_TOTAL\n'
+    'printf \'%s|%s|%s|%s|%s\\n\' "$1" "$2" "$3" "$4" "${ORCH_PLANS_TOTAL:-}" '
+    '>> "$(dirname "$0")/calls.log"\n')
+
+
+def make_run(tmp):
+    """make_tree + a recording status.sh, a wf dir, and pinned caps."""
+    mod, task, plugin_status, _ = make_tree(tmp)
+    plugin_status.write_text(RECORDING_STATUS_SH, encoding="utf-8")
+    os.chmod(plugin_status, 0o755)
+    wf = Path(tmp) / "wf_fixture"
+    wf.mkdir()
+    (task / "orch-config.json").write_text(
+        json.dumps({"max_plan_attempts": 4, "max_finalgate_attempts": 2}),
+        encoding="utf-8")
+    return mod, task, wf, plugin_status.parent / "calls.log"
+
+
+def plant(wf, aid, marker, result):
+    """One agent transcript carrying `marker` + its journal result record."""
+    (wf / f"agent-{aid}.jsonl").write_text(
+        json.dumps({"type": "user", "text": marker}) + "\n", encoding="utf-8")
+    with open(wf / "journal.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "result", "agentId": aid,
+                            "result": result}) + "\n")
+
+
+def calls(log):
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def test_divide_closes_done_with_plans_total():
+    print("test_divide_closes_done_with_plans_total")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "files": ["a.py"]},
+                            {"id": "sp-b", "files": ["b.py", "b2.py"]},
+                            {"id": "sp-c", "files": ["c.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        rep = mod.Reporter(str(task), [str(wf)])
+        rep.pass_once()
+        got = calls(log)
+        check(got == ["divide|plan|done|3 sub-plans|5"],
+              f"divide close emitted once, template message + N+2 total (got {got})")
+        rep.pass_once()
+        check(calls(log) == got, "a second pass emits nothing new")
+        rep2 = mod.Reporter(str(task), [str(wf)])   # daemon restart
+        rep2.pass_once()
+        check(calls(log) == got,
+              "a restarted reporter re-ingests but never re-emits (emitted persists)")
+        pages = os.listdir(task / "report" / "cycles")
+        check(not any(p.startswith("divide") for p in pages),
+              "protocol plans render no cycle pages")
+
+
+def test_divide_closes_failed_like_the_template():
+    print("test_divide_closes_failed_like_the_template")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [], "subplans_file": "x", "summary": "s"})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["divide|plan|failed|divider produced no sub-plans|"],
+              "an empty partition closes failed with the template's message")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "files": ["a.py"]},
+                            {"id": "sp-b", "files": ["a.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["divide|plan|failed|partition not isolated: a.py has two owners|"],
+              "a duplicate owner closes failed exactly like the isolation guard")
+
+
+def test_finalgate_closes():
+    print("test_finalgate_closes")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=finalgate stage=sweep role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["finalgate|plan|done|aggregate sweep green|"],
+              "a green sweep closes finalgate done")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=finalgate stage=sweep role=test attempt=1",
+              {"passed": False, "summary": "red", "findings_file": "f"})
+        rep = mod.Reporter(str(task), [str(wf)])
+        rep.pass_once()
+        check(calls(log) == [],
+              "a red sweep below the cap with no fixer verdict stays open")
+        plant(wf, "a2", "[monitor] plan=finalgate stage=sweep role=test attempt=2",
+              {"passed": False, "summary": "red", "findings_file": "f"})
+        rep.pass_once()
+        check(calls(log) == ["finalgate|plan|failed|sweep not green after 2 attempts|"],
+              "a red sweep at the cap closes failed with the template's message")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=finalgate stage=sweep role=test attempt=1",
+              {"passed": False, "summary": "red", "findings_file": "f"})
+        plant(wf, "a2", "[monitor] plan=finalgate stage=implement role=impl attempt=1",
+              {"done": False, "files_changed": [], "summary": "gave up"})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["finalgate|plan|failed|sweep not green after 2 attempts|"],
+              "a fixer that returned done=false ends the retry loop early, as the template does")
+
+
+def test_sp_loop_close_still_works():
+    print("test_sp_loop_close_still_works")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=sp-x stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        plant(wf, "a2", "[monitor] plan=sp-x stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "a3", "[monitor] plan=sp-x stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["sp-x|plan|done|green on attempt 1/4|"],
+              "the loop-close pass is untouched: a green loop still emits its close")
+        check((task / "report" / "cycles" / "sp-x-cycle-1.html").is_file(),
+              "the loop still renders its cycle page")
+
+
 def main():
     try:
         for t in (test_plugin_copy_wins, test_project_copy_is_never_a_fallback,
                   test_render_only_is_quiet,
                   test_shipped_source_has_no_project_candidate,
                   test_shipped_source_has_no_banned_payload_text,
-                  test_real_payload_resolves_to_its_own_copy):
+                  test_real_payload_resolves_to_its_own_copy,
+                  test_divide_closes_done_with_plans_total,
+                  test_divide_closes_failed_like_the_template,
+                  test_finalgate_closes,
+                  test_sp_loop_close_still_works):
             t()
     finally:
         # Most fixture modules were loaded out of a TemporaryDirectory that no

@@ -105,7 +105,11 @@ via the `[monitor]` markers in the agent transcripts (zero LLM cooperation,
 same technique as the decision watcher), reads the caps and `extra_attempts`
 from `orch-config.json`, renders the pages, and emits the loop-terminal
 `plan done|failed` status event when a loop closes on a REAL verdict at the
-published cap. The workflow script cannot do any of this itself: the runtime
+published cap — plus the terminal closes of the protocol's two single-agent
+plans, `divide` (with the template's ORCH_PLANS_TOTAL declaration) and
+`finalgate`, whose script-side closes no-op with the runtime (without this
+pass those cards sat on "running" until the watcher's run-end settle).
+The workflow script cannot do any of this itself: the runtime
 has no filesystem or Node API (`import()` throws; the template's try/catch'd
 `runStatus`/`closeRun` helpers silently no-op — they document the contract the
 daemon fulfills).

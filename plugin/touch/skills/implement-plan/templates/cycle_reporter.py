@@ -17,11 +17,21 @@ Outputs, all under $ORCH_STATE_DIR (the task folder):
   report/cycles/index.html              run overview, execution order.
   events.jsonl (via status.sh)          the loop-terminal `plan done|failed`
       event when a loop closes — a REAL verdict at the published cap (never the
-      retired phase-advance inference). Suppress with --no-status.
+      retired phase-advance inference) — PLUS the terminal closes of the
+      implement protocol's two single-agent plans: `divide` when the partition
+      result lands (with the template's ORCH_PLANS_TOTAL declaration) and
+      `finalgate` when the sweep verdict settles. The template emits those two
+      via runStatus at fixed control-flow points (R-09), but the current
+      workflow runtime has no Node API, so the calls silently no-op and the
+      cards sat on "running" until the watcher's run-end settle pass; this
+      daemon substitutes for the script there exactly as it does for loop
+      closes — same events, same messages, derived from the same journal
+      results. Suppress with --no-status.
 
 Attempt caps come from orch-config.json: max_plan_attempts (default 4) plus the
-per-plan extra_attempts map ({"sp-x": N} raises only that loop's cap) — re-read
-every poll, like decision_watcher re-reads its caps.
+per-plan extra_attempts map ({"sp-x": N} raises only that loop's cap), and
+max_finalgate_attempts (default 2) for the sweep close — re-read every poll,
+like decision_watcher re-reads its caps.
 
 Usage:
   ORCH_STATE_DIR=<task-dir> python3 cycle_reporter.py <wf_dir> [<wf_dir>...]
@@ -47,6 +57,11 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"\[monitor\] plan=([\w.-]+) stage=([\w-]+) role=([\w:-]+) attempt=(\d+)")
 STAGE_SLOT = {"implement": "impl", "test": "gate", "critique": "crit"}
+#: The implement protocol's two single-agent plans (never `sp-*` loops). Their
+#: markers are fixed by the template's dividePrompt/finalGatePrompt/finalFixPrompt;
+#: `plan -> {stage -> slot}` mirrors STAGE_SLOT for the loops pass.
+PROTOCOL_SLOT = {"divide": {"partition": "partition"},
+                 "finalgate": {"sweep": "sweep", "implement": "fix"}}
 FINDINGS_EMBED_CAP = 60_000
 
 CYCLE_CSS = """
@@ -100,6 +115,10 @@ class Reporter:
         self.status_sh = self._find_status_sh()
         # cycles[plan][attempt] = {"impl": r, "gate": r, "crit": r}
         self.cycles = {}
+        # protocol[plan][attempt] = {"partition"|"sweep"|"fix": r} — the two
+        # single-agent plans of PROTOCOL_SLOT; closed by their own pass, never
+        # rendered as cycle pages (they have no impl->test->critique flow).
+        self.protocol = {}
         self.plan_order = []          # first-seen order == execution order (serial)
         self.closed = {}              # plan -> {"state": .., "cls": .., "attempt": n}
         self.marker_cache = {}        # agentId -> marker tuple or None
@@ -230,10 +249,17 @@ class Reporter:
                 if not mark:
                     continue
                 plan, stage, _role, attempt = mark
+                res = rec.get("result")
+                if plan in PROTOCOL_SLOT:
+                    pslot = PROTOCOL_SLOT[plan].get(stage)
+                    if pslot is not None and isinstance(res, dict):
+                        self.protocol.setdefault(plan, {}) \
+                            .setdefault(attempt, {})[pslot] = res
+                        changed = True
+                    continue
                 slot = STAGE_SLOT.get(stage)
                 if slot is None or not plan.startswith("sp-"):
                     continue
-                res = rec.get("result")
                 if not isinstance(res, dict):
                     continue
                 per = self.cycles.setdefault(plan, {})
@@ -272,12 +298,84 @@ class Reporter:
                     self.closed[plan] = {"state": "failed", "cls": cls, "attempt": attempt, "cap": cap}
                     break
 
+    def evaluate_protocol_closes(self):
+        """Close the two single-agent protocol plans the loops pass cannot see.
+
+        The template closes `divide` and `finalgate` itself via runStatus at
+        fixed control-flow points (R-09), but the current workflow runtime has
+        no Node API, so those calls no-op and the cards sat on "running" until
+        the watcher's run-end settle pass. This pass substitutes for the
+        script: same states, same messages, same ORCH_PLANS_TOTAL declaration,
+        derived from the same structured results the script branched on.
+        """
+        if "divide" not in self.closed:
+            for attempt in sorted(self.protocol.get("divide", {})):
+                res = self.protocol["divide"][attempt].get("partition")
+                if res is None:
+                    continue
+                subs = res.get("subplans")
+                if not isinstance(subs, list) or not subs:
+                    self.closed["divide"] = {
+                        "state": "failed", "msg": "divider produced no sub-plans"}
+                    break
+                # the template's deterministic isolation guard, mirrored
+                owner, dup = {}, None
+                for sp in subs:
+                    for f in (sp.get("files") or []):
+                        if f in owner:
+                            dup = f
+                            break
+                        owner[f] = sp.get("id")
+                    if dup:
+                        break
+                if dup:
+                    self.closed["divide"] = {
+                        "state": "failed",
+                        "msg": f"partition not isolated: {dup} has two owners"}
+                else:
+                    # divide + N sub-plans + finalgate: the template's own
+                    # plans_total declaration, folded monotonically by readers
+                    self.closed["divide"] = {
+                        "state": "done", "msg": f"{len(subs)} sub-plans",
+                        "env": {"ORCH_PLANS_TOTAL": str(len(subs) + 2)}}
+                break
+        if "finalgate" not in self.closed:
+            cap = self._finalgate_cap()
+            for attempt in sorted(self.protocol.get("finalgate", {})):
+                cy = self.protocol["finalgate"][attempt]
+                sweep = cy.get("sweep")
+                if sweep is None:
+                    continue
+                if sweep.get("passed"):
+                    self.closed["finalgate"] = {
+                        "state": "done", "msg": "aggregate sweep green"}
+                    break
+                fix = cy.get("fix")
+                # past the cap the template stops unconditionally; below it,
+                # only a fixer that returned done=false ends the retry loop (a
+                # dead fixer is indistinguishable from a running one here, and
+                # that rare close is the driver's run-end backstop anyway)
+                if attempt >= cap or (fix is not None and fix.get("done") is False):
+                    self.closed["finalgate"] = {
+                        "state": "failed",
+                        "msg": f"sweep not green after {cap} attempts"}
+                    break
+
+    def _finalgate_cap(self):
+        try:
+            with open(os.path.join(self.task, "orch-config.json"), encoding="utf-8") as f:
+                return int(json.load(f).get("max_finalgate_attempts", 2))
+        except (OSError, ValueError):
+            return 2
+
     def emit_close(self, plan):
         info = self.closed[plan]
         if not self.emit_status or plan in self.emitted or not self.status_sh:
             self.emitted.add(plan)
             return
-        if info["state"] == "done":
+        if "msg" in info:
+            msg = info["msg"]
+        elif info["state"] == "done":
             msg = f"green on attempt {info['attempt']}/{info['cap']}"
         else:
             msg = f"attempts exhausted {info['attempt']}/{info['cap']} ({info['cls']})"
@@ -286,7 +384,8 @@ class Reporter:
             # _find_status_sh) — never a path the reported-on project supplies.
             r = subprocess.run(
                 ["bash", self.status_sh, plan, "plan", info["state"], msg],
-                env={**os.environ, "ORCH_STATE_DIR": self.task},
+                env={**os.environ, "ORCH_STATE_DIR": self.task,
+                     **(info.get("env") or {})},
                 capture_output=True, text=True, timeout=30)
             warn = (r.stderr or "").strip()
             if warn:
@@ -432,6 +531,7 @@ class Reporter:
             return False
         cap_of = self.caps()
         self.evaluate_closes(cap_of)
+        self.evaluate_protocol_closes()
         os.makedirs(self.report_dir, exist_ok=True)
         for plan in self.plan_order:
             cap = cap_of(plan)
