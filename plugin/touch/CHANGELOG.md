@@ -6,6 +6,42 @@ and a release without a version bump delivers nothing — so every entry below
 is a version users had to ask for. See the README's *Update / uninstall*
 section for the two commands.
 
+## 0.2.0
+
+Still read-only — no start / stop / restart / terminate verb ships — but the
+payload is now the *only* copy of everything it carries, and it carries six
+more skills than 0.1.0 did.
+
+**Added**
+
+- **Six engineering-practice skills**, invoked under the same namespace as the
+  orchestration four: `/touch:architecture-boundaries`,
+  `/touch:architecture-tradeoffs`, `/touch:code-quality-review`,
+  `/touch:pattern-selection`, `/touch:refactoring-pass` and
+  `/touch:testing-discipline`. They are condensed guidance derived from the
+  named books, not the works themselves, and each carries a path-free
+  `Sources:` line naming them.
+- **A measured context bill for that choice.** `claude plugin details touch`
+  now reports **~1,257 tokens always-on** across ten skills, up from the ~459
+  measured at 0.1.0 — the six add ~120–170 tokens each to every session,
+  whether or not you use them. On invocation they cost ~1.6k–2.8k, paid only
+  when one fires. If you want the dashboard without that bill, keep the plugin
+  installed and disabled except in the projects where you orchestrate.
+
+**Changed**
+
+- **One canonical copy of every shipped file.** Through 0.1.0 the development
+  repository kept `aggregator/`, `touch-visual/`, `docs/` and the monitoring
+  module at its root and pinned byte-equal copies into the payload, kept in
+  step by a sync script. The payload is now the canonical home and the sync
+  script is gone: the code that is tested is the code that ships, and there is
+  no second copy to go stale. Nothing about the *layout* an installed plugin
+  presents changes — the directories a consumer receives are the same ones this
+  release ships from (the six new skills above are the release's only addition
+  to what lands on disk).
+- The pre-install description and keywords now name the second skill family,
+  so nothing in the skill list is a surprise after enabling.
+
 ## 0.1.0
 
 First release. Read-only by design: Touch renders no control it cannot

@@ -56,7 +56,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import MON, SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import agents                                   # noqa: E402
@@ -232,7 +236,7 @@ def test_two_markers_on_one_line_both_parse():
 
 def test_the_grammar_matches_decision_watchers_on_a_real_prompt():
     print("test_the_grammar_matches_decision_watchers_on_a_real_prompt")
-    module = REPO / ".claude" / "shared" / "monitoring" / "decision_watcher.py"
+    module = MON / "decision_watcher.py"
     if not module.exists():                                     # pragma: no cover
         skip("decision_watcher.py is not in this checkout")
         return
@@ -293,7 +297,7 @@ def test_labels_are_a_layer_never_an_identity():
     # `refs.agent_key` — an identity function nothing on the write path called,
     # so no test of it proved anything about a stored document. Both mappers
     # now key through it, asserted as source AND as behaviour.
-    tree = ast.parse((REPO / "aggregator" / "agents.py").read_text(encoding="utf-8"))
+    tree = ast.parse((SRC / "aggregator" / "agents.py").read_text(encoding="utf-8"))
     for name in ("map_agent", "map_agent_spawn"):
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -723,7 +727,7 @@ def test_sessionid_is_never_a_grouping_key():
     pair = next(obs for obs in result.agents if obs.agent_id == AGENT)
     check(len(pair.sessions) == 2, "…and the split one carries both sessionIds")
 
-    source = (REPO / "aggregator" / "agents.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "agents.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     for name in ("map_agent", "map_agent_spawn"):
         fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -1244,7 +1248,7 @@ def test_the_mapper_refuses_what_it_cannot_key():
 
 def test_sd1_the_mappers_are_pure_and_write_only_agents():
     print("test_sd1_the_mappers_are_pure_and_write_only_agents")
-    source = (REPO / "aggregator" / "agents.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "agents.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     banned_calls = {"open", "print", "input"}
     banned_attrs = ("os.", "time.", "random.", "subprocess.", "socket.")

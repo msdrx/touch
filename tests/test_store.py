@@ -28,7 +28,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 #: SD-2's guard owns the "what does this file import" question; re-deriving it
@@ -638,8 +642,14 @@ def test_concurrent_appends_stay_whole():
             "s = Store(root=%r)\n"
             "for i in range(100):\n"
             "    s.append('run:wf_race', kind='log', provenance='touch', data={'w': sys.argv[1]})\n"
-        ) % (str(REPO), root)
-        procs = [subprocess.Popen([sys.executable, "-c", code, str(w)]) for w in range(4)]
+        ) % (str(SRC), root)
+        # `sys.dont_write_bytecode` (:33) does NOT survive fork/exec, so the
+        # children would import from the payload tree and drop `__pycache__/`
+        # into it — which `tests/test_package.py`'s working-tree stray arm
+        # (item 06) then reports on the NEXT run. Pass the env form explicitly.
+        child_env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(w)], env=child_env)
+                 for w in range(4)]
         rcs = [p.wait() for p in procs]
         check(all(rc == 0 for rc in rcs), f"all 4 writers exited cleanly: {rcs}")
         path = os.path.join(root, "runs", "wf_race", "events.jsonl")
@@ -685,7 +695,7 @@ def test_no_reducer_lives_here():
                  if any(w in n.lower() for w in ("reduce", "reducer", "current_state",
                                                  "liveness", "derive"))]
     check(not offenders, f"store.py exports no reduction/liveness surface: {offenders}")
-    top, lazy = imports_of(ast.parse((REPO / "aggregator" / "store.py").read_text()))
+    top, lazy = imports_of(ast.parse((SRC / "aggregator" / "store.py").read_text()))
     check("pymongo" not in (top | lazy) and "bson" not in (top | lazy),
           "store.py imports no pymongo, eagerly or lazily "
           "(GD-21: only mongo_store.py and mirror.py may)")

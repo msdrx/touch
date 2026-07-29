@@ -39,7 +39,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import PAYLOAD, SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import custom_state as cs                       # noqa: E402
@@ -67,14 +71,14 @@ from aggregator.custom_state import (                           # noqa: E402
 failures = []
 skipped = []
 
-MODULE = REPO / "aggregator" / "custom_state.py"
+MODULE = SRC / "aggregator" / "custom_state.py"
 SOURCE = MODULE.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 # The skill MOVED into the shipping subtree and lost its `touch-` prefix (item
 # 09: a plugin skill invokes as `/<plugin>:<skill>`, so `touch-orchestrate`
 # inside a plugin named `touch` read `/touch:touch-orchestrate`). One canonical
 # copy, in the payload — this constant follows it.
-SKILL = REPO / "plugin" / "touch" / "skills" / "orchestrate" / "SKILL.md"
+SKILL = PAYLOAD / "skills" / "orchestrate" / "SKILL.md"
 FINDINGS = REPO / ".claude" / "local-orchestrators" / "touch-mongo-live" / "findings"
 DEVIATION = FINDINGS / "sp-custom-state-head-driver-deviation.md"
 SET_FIELDS_DEVIATION = FINDINGS / "sp-custom-state-slots-set-fields-deviation.md"
@@ -1118,7 +1122,7 @@ def test_the_head_and_the_bind_have_a_named_driver_handoff():
               f"{DEVIATION.name}")
     drivers = {"head_write", "bind_slot", "rebuild_heads", "apply_guarded"}
     callers = []
-    for module in sorted((REPO / "aggregator").glob("*.py")):
+    for module in sorted((SRC / "aggregator").glob("*.py")):
         if module.name == "custom_state.py":
             continue
         text = module.read_text(encoding="utf-8")
@@ -1239,7 +1243,7 @@ def test_the_wal_stream_is_the_durable_one_store_already_names():
 
 def test_store_py_was_not_edited_by_this_sub_plan():
     print("test_store_py_was_not_edited_by_this_sub_plan")
-    text = (REPO / "aggregator" / "store.py").read_text(encoding="utf-8")
+    text = (SRC / "aggregator" / "store.py").read_text(encoding="utf-8")
     check("custom-state" in text and "R-52" in text,
           "store.py already anticipated this WAL — R-52 rides its existing machinery")
     imports = [node for node in ast.walk(ast.parse(text))

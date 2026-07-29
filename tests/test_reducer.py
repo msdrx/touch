@@ -37,7 +37,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import agents                                   # noqa: E402
@@ -707,7 +711,7 @@ def test_the_verdict_vocabulary_is_exported():
 
 def test_the_reducer_is_pure_over_state_and_now():
     print("test_the_reducer_is_pure_over_state_and_now")
-    source = (REPO / "aggregator" / "agents.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "agents.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     reducer = next(n for n in ast.walk(tree)
                    if isinstance(n, ast.FunctionDef) and n.name == "reduce")

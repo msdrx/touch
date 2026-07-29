@@ -31,7 +31,11 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import mongo_store as ms                # noqa: E402
 from aggregator import refs                             # noqa: E402
@@ -810,7 +814,7 @@ def test_mappers_are_registered_pure_and_write_only_sessions():
           f"mirror.discover_mappers finds this module's kinds: {sorted(MIRROR_MAPPERS)}")
     check(registry["session"].module == "sessions", "…attributed to `sessions`")
 
-    source = (REPO / "aggregator" / "sessions.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "sessions.py").read_text(encoding="utf-8")
     check("pymongo" not in source,
           "no pymongo here (GD-21: only mongo_store and mirror may import it)")
 
@@ -1218,7 +1222,7 @@ def test_claude_root_agrees_with_mirrors():
     # module-scope `from .mirror import claude_root` here would close a cycle.
     # (Grepping mirror.py for the string "sessions" reddens on any future
     # comment that mentions the word.)
-    tree = ast.parse((REPO / "aggregator" / "mirror.py").read_text(encoding="utf-8"))
+    tree = ast.parse((SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""The four shipped skills: moved, renamed, and self-contained.
+"""The shipped skills: moved, renamed, self-contained, and capability-typed.
 
-Item 09 (PLUGIN-SPEC-7/8/16, CM-11, DISTRIBUTION-9). Run as
+Items 09 and 10 (PLUGIN-SPEC-7/8/16, CM-11, DISTRIBUTION-9, GD-U3). Run as
 `python3 test_skills_payload.py`; exits non-zero on failure. No pytest, no
 runner — `run_all.sh` picks it up by its `test_*.py` glob.
 
@@ -13,7 +13,28 @@ text has to differ from the repo-shaped text it grew out of. A second copy would
 be a permanent drift trap, and while both existed the CLI offered `/execute-research`
 and `/touch:execute-research` side by side with no override between them
 (PLUGIN-SPEC-16). So the first thing asserted here is that the old location is
-gone.
+gone. The six engineering-practice skills adopted in GD-U3 arrived the same
+way — copied in from `.temp-develop/`, which was then deleted, for the same
+reason.
+
+TWO KINDS OF SKILL, ONE TABLE
+-----------------------------
+`SKILLS` below is the single declaration this file derives everything from: the
+directory set, the expected frontmatter names, the per-skill command
+requirements and the count the CLI must report. Each entry declares a `kind`.
+
+  orchestration   drives the monitoring stack: it MUST name the `touch-*`
+                  commands it calls, because a driver that spells a payload
+                  path instead breaks the moment the plugin cache is
+                  re-stamped.
+  content         pure prose guidance (GD-U3's six): it drives nothing, so it
+                  must name NO `touch-*` command at all. Asserting the absence
+                  is the point — a `content` skill that grows a daemon call has
+                  silently become a driver, and adding the six to a universal
+                  `REQUIRED_COMMANDS` with empty tuples would have quietly
+                  weakened the rule for the four that do need it.
+
+`BANNED` and `DAEMON_FILES` stay universal: they are hygiene, not role.
 
 The rest is the self-containment gate. A skill body is prose an agent obeys, and
 every path in it that will not exist on an installer's machine is an instruction
@@ -64,20 +85,45 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugin" / "touch"
-SKILLS = PLUGIN / "skills"
+SKILLS_DIR = PLUGIN / "skills"
 OLD_SKILLS = REPO / ".claude" / "skills"
 
-#: Directory name -> the frontmatter `name:` it must declare. The names ARE the
-#: invocation surface: a plugin skill invokes as `/<plugin>:<skill>`, so the
-#: directory `touch-orchestrate` inside a plugin named `touch` would have read
-#: `/touch:touch-orchestrate` (CM-11, DISTRIBUTION-9). That rename is the one
-#: rename packaging required, and it is pinned here.
-EXPECTED = {
-    "execute-research": "execute-research",
-    "implement-plan": "implement-plan",
-    "m-orchestrator": "m-orchestrator",
-    "orchestrate": "orchestrate",
+#: The payload's declared skill inventory: directory name -> capability record.
+#: `kind` is "orchestration" (drives the monitoring stack) or "content" (prose
+#: guidance that drives nothing); `commands` are the `touch-*` wrappers the
+#: SKILL.md must call by name, and it is empty for every `content` skill —
+#: enforced in both directions, see the module docstring.
+#:
+#: The DIRECTORY name is the invocation surface: a plugin skill invokes as
+#: `/<plugin>:<skill>`, so the directory `touch-orchestrate` inside a plugin
+#: named `touch` would have read `/touch:touch-orchestrate` (CM-11,
+#: DISTRIBUTION-9). That rename is the one rename packaging required. The
+#: frontmatter `name:` follows the directory and is documentation only — the
+#: CLI ignores a mismatch silently (measured on 2.1.220), so
+#: `test_frontmatter_names_match_directories` is the only thing keeping it true.
+SKILLS = {
+    # Orchestration — the deterministic run drivers.
+    "execute-research": {"kind": "orchestration", "commands": ("touch-status",)},
+    "implement-plan": {"kind": "orchestration",
+                       "commands": ("touch-status", "touch-cycle-reporter")},
+    "m-orchestrator": {"kind": "orchestration",
+                       "commands": ("touch-status", "touch-monitor", "touch-watcher")},
+    "orchestrate": {"kind": "orchestration", "commands": ("touch-status",)},
+    # Engineering practice — GD-U3's six, adopted and adapted. No commands.
+    "architecture-boundaries": {"kind": "content", "commands": ()},
+    "architecture-tradeoffs": {"kind": "content", "commands": ()},
+    "code-quality-review": {"kind": "content", "commands": ()},
+    "pattern-selection": {"kind": "content", "commands": ()},
+    "refactoring-pass": {"kind": "content", "commands": ()},
+    "testing-discipline": {"kind": "content", "commands": ()},
 }
+
+#: Directory name -> the frontmatter `name:` it must declare. Derived, because
+#: the law is that they are equal.
+EXPECTED = {name: name for name in SKILLS}
+
+ORCHESTRATION = tuple(n for n, s in SKILLS.items() if s["kind"] == "orchestration")
+CONTENT = tuple(n for n, s in SKILLS.items() if s["kind"] == "content")
 
 TEMPLATES = (
     "execute-research/templates/research.workflow.js",
@@ -112,13 +158,27 @@ BANNED = (
 DAEMON_FILES = ("status.sh", "monitor_server.py", "decision_watcher.py",
                 "cycle_reporter.py", "monitor.html")
 
-#: The commands each SKILL.md must reach the monitoring stack by.
-REQUIRED_COMMANDS = {
-    "execute-research": ("touch-status",),
-    "implement-plan": ("touch-status", "touch-cycle-reporter"),
-    "m-orchestrator": ("touch-status", "touch-monitor", "touch-watcher"),
-    "orchestrate": ("touch-status",),
-}
+#: The commands each ORCHESTRATION SKILL.md must reach the monitoring stack by.
+#: Derived from the table so the two can never disagree; `content` skills are
+#: absent by construction and are checked by the inverse arm instead.
+REQUIRED_COMMANDS = {n: SKILLS[n]["commands"] for n in ORCHESTRATION}
+
+#: Any `touch-*` wrapper name. A `content` skill matching this has grown a
+#: dependency on the monitoring stack and is no longer content.
+TOUCH_COMMAND = re.compile(r"\btouch-[a-z][a-z-]*")
+
+#: Guidance tokens item 11 removed from the adopted six, kept out by name.
+#: `should-fix` is the severity word that maps to nothing in the critique
+#: schema (which gates on blocker/major/minor/nit), and the three architecture
+#: -testing products are JVM/.NET tooling prescribed to a repo whose payload is
+#: Python and bash and whose dependency policy (GD-21) forbids adding either.
+RETIRED_TOKENS = (
+    ("code-quality-review", "should-fix",
+     "a severity the critique schema cannot consume"),
+    (None, "ArchUnit", "a JVM tool prescribed to a stdlib-only Python repo"),
+    (None, "NetArchTest", "a .NET tool prescribed to a stdlib-only Python repo"),
+    (None, "JDepend", "a JVM tool prescribed to a stdlib-only Python repo"),
+)
 
 failures = []
 skips = []
@@ -139,9 +199,9 @@ def skip(msg):
 
 def payload_files():
     """Every file under `plugin/touch/skills/`, sorted, repo-relative-able."""
-    if not SKILLS.is_dir():
+    if not SKILLS_DIR.is_dir():
         return []
-    return sorted(p for p in SKILLS.rglob("*") if p.is_file())
+    return sorted(p for p in SKILLS_DIR.rglob("*") if p.is_file())
 
 
 def frontmatter_name(text):
@@ -179,25 +239,27 @@ def run_cli(args, timeout=240):
 # --- the move itself: one copy, in the payload
 def test_moved_not_copied():
     print("test_moved_not_copied")
-    check(SKILLS.is_dir(), "plugin/touch/skills/ exists")
+    check(SKILLS_DIR.is_dir(), "plugin/touch/skills/ exists")
     # The old tree is GONE, not shadowed. While both existed the CLI offered
     # `/x` and `/touch:x` with no override between them, and they diverge the
     # moment the payload copy is rewritten for self-containment.
     check(not OLD_SKILLS.exists(),
           ".claude/skills/ no longer exists (single canonical copy, GD-T2)")
     for name in EXPECTED:
-        check((SKILLS / name / "SKILL.md").is_file(),
+        check((SKILLS_DIR / name / "SKILL.md").is_file(),
               f"plugin/touch/skills/{name}/SKILL.md is in the payload")
-    # Nothing extra: four skills, and a fifth would be an undeclared component.
-    dirs = sorted(p.name for p in SKILLS.iterdir() if p.is_dir()) if SKILLS.is_dir() else []
+    # Nothing extra: EXACT equality, not a subset. An undeclared directory is
+    # an undeclared component — it ships, it loads, it costs always-on context,
+    # and nothing else in the repo would notice it.
+    dirs = sorted(p.name for p in SKILLS_DIR.iterdir() if p.is_dir()) if SKILLS_DIR.is_dir() else []
     check(dirs == sorted(EXPECTED),
-          f"exactly the four expected skill directories ({dirs})")
+          f"exactly the {len(EXPECTED)} declared skill directories ({dirs})")
 
 
 def test_frontmatter_names_match_directories():
     print("test_frontmatter_names_match_directories")
     for directory, expected in EXPECTED.items():
-        path = SKILLS / directory / "SKILL.md"
+        path = SKILLS_DIR / directory / "SKILL.md"
         if not path.is_file():
             check(False, f"{directory}/SKILL.md exists to carry a name")
             continue
@@ -229,7 +291,7 @@ def test_no_banned_text_in_payload():
 def test_no_daemon_paths_in_skill_bodies():
     print("test_no_daemon_paths_in_skill_bodies")
     for directory in EXPECTED:
-        path = SKILLS / directory / "SKILL.md"
+        path = SKILLS_DIR / directory / "SKILL.md"
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8")
@@ -241,7 +303,7 @@ def test_no_daemon_paths_in_skill_bodies():
 def test_skill_bodies_use_bare_commands():
     print("test_skill_bodies_use_bare_commands")
     for directory, commands in REQUIRED_COMMANDS.items():
-        path = SKILLS / directory / "SKILL.md"
+        path = SKILLS_DIR / directory / "SKILL.md"
         if not path.is_file():
             check(False, f"{directory}/SKILL.md exists to be checked")
             continue
@@ -250,12 +312,33 @@ def test_skill_bodies_use_bare_commands():
             check(command in text, f"{directory}/SKILL.md calls {command} by name")
 
 
+def test_content_skills_drive_nothing():
+    """The inverse of the arm above, and the reason `kind` exists.
+
+    A `content` skill is prose an agent reads while working on someone else's
+    codebase; it has no run, no task folder and no daemons. The moment one
+    names a `touch-*` wrapper it has become a driver that the orchestration
+    rules (tasks root, sentinels, findings handoff) apply to — and none of
+    those rules would have been applied to it.
+    """
+    print("test_content_skills_drive_nothing")
+    for directory in CONTENT:
+        path = SKILLS_DIR / directory / "SKILL.md"
+        if not path.is_file():
+            check(False, f"{directory}/SKILL.md exists to be checked")
+            continue
+        text = path.read_text(encoding="utf-8")
+        hits = sorted({m.group(0) for m in TOUCH_COMMAND.finditer(text)})
+        check(not hits,
+              f"{directory}/SKILL.md names no touch-* command ({hits[:5]})")
+
+
 def test_cycle_reporter_is_where_its_wrapper_looks():
     print("test_cycle_reporter_is_where_its_wrapper_looks")
     # `bin/touch-cycle-reporter` resolves this exact payload-relative path from
     # its own $0. The wrapper and the skill tree ship together, so the two can
     # only disagree here.
-    target = SKILLS / "implement-plan" / "templates" / "cycle_reporter.py"
+    target = SKILLS_DIR / "implement-plan" / "templates" / "cycle_reporter.py"
     check(target.is_file(),
           "skills/implement-plan/templates/cycle_reporter.py ships with the skill")
     wrapper = PLUGIN / "bin" / "touch-cycle-reporter"
@@ -280,7 +363,7 @@ BARE_PWD_ANCHOR = re.compile(r'(?<!:-)\$(?:PWD\b|\{PWD\})[^\n]{0,4}?/\.claude/lo
 
 def test_tasks_root_is_resolved_not_assumed():
     print("test_tasks_root_is_resolved_not_assumed")
-    manual = SKILLS / "m-orchestrator" / "SKILL.md"
+    manual = SKILLS_DIR / "m-orchestrator" / "SKILL.md"
     if manual.is_file():
         text = manual.read_text(encoding="utf-8")
         # The operator manual for run scope has to name the override that
@@ -304,14 +387,14 @@ def test_tasks_root_is_resolved_not_assumed():
         hits = [n for n, line in enumerate(text.splitlines(), 1)
                 if BARE_PWD_ANCHOR.search(line)]
         check(not hits,
-              f"{path.relative_to(SKILLS)}: no bare-$PWD tasks root ({hits[:5]})")
+              f"{path.relative_to(SKILLS_DIR)}: no bare-$PWD tasks root ({hits[:5]})")
 
 
 # --- the two-root split in the templates (PLUGIN-SPEC-8)
 def test_templates_split_the_two_roots():
     print("test_templates_split_the_two_roots")
     for rel in TEMPLATES:
-        path = SKILLS / rel
+        path = SKILLS_DIR / rel
         if not path.is_file():
             check(False, f"{rel} is in the payload")
             continue
@@ -340,7 +423,7 @@ def test_substitution_law_is_respected_in_both_directions():
     # A SKILL.md body IS substituted, so the literal there is how the agent
     # learns the real plugin path...
     for directory in ("execute-research", "implement-plan"):
-        path = SKILLS / directory / "SKILL.md"
+        path = SKILLS_DIR / directory / "SKILL.md"
         if not path.is_file():
             continue
         check("${CLAUDE_PLUGIN_ROOT}" in path.read_text(encoding="utf-8"),
@@ -348,16 +431,96 @@ def test_substitution_law_is_respected_in_both_directions():
     # ...and a supporting file is NOT substituted, so the same literal there
     # would ship as a path that resolves to nothing.
     for rel in TEMPLATES:
-        path = SKILLS / rel
+        path = SKILLS_DIR / rel
         if not path.is_file():
             continue
         check("${CLAUDE_PLUGIN_ROOT}" not in path.read_text(encoding="utf-8"),
               f"{path.name}: no unsubstitutable ${{CLAUDE_PLUGIN_ROOT}} literal")
+    # A content skill has no payload file to point at, so it has no business
+    # carrying the substitution literal either — it would read as an
+    # instruction to go find something inside the plugin cache.
+    for directory in CONTENT:
+        path = SKILLS_DIR / directory / "SKILL.md"
+        if not path.is_file():
+            continue
+        check("${CLAUDE_PLUGIN_ROOT}" not in path.read_text(encoding="utf-8"),
+              f"{directory}/SKILL.md needs no ${{CLAUDE_PLUGIN_ROOT}} (it reads no payload file)")
+
+
+# --- item 11: the adopted six say what this repo decided they say
+def test_adopted_skills_dropped_the_retired_tokens():
+    """Guidance that collides with settled law, kept out by name.
+
+    Both classes here were live defects in the text as supplied, not
+    hypotheticals: `should-fix` is a severity the shipped critique schema
+    cannot consume (it gates approval on zero blocker/major, so a `should-fix`
+    finding approves), and the three architecture-testing products are JVM/.NET
+    tooling recommended to a repo that permits exactly one third-party runtime
+    dependency (GD-21) and has no CI to run them in.
+    """
+    print("test_adopted_skills_dropped_the_retired_tokens")
+    for scope, token, why in RETIRED_TOKENS:
+        directories = (scope,) if scope else tuple(SKILLS)
+        for directory in directories:
+            path = SKILLS_DIR / directory / "SKILL.md"
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            check(token not in text,
+                  f"{directory}/SKILL.md drops {token!r} — {why}")
+
+
+def test_content_skills_cross_reference_by_invocation():
+    """A cross-reference an agent can act on, not a directory listing.
+
+    Inside the plugin a skill invokes as `/touch:<skill>`; a bare backticked
+    name reads as a file path and gives the agent nothing to call. Scoped to
+    the `content` skills deliberately: the orchestration four name each other
+    as stages of one workflow ("the plan `execute-research` produced"), which
+    is prose about a hand-off, not an instruction to invoke.
+    """
+    print("test_content_skills_cross_reference_by_invocation")
+    for directory in CONTENT:
+        path = SKILLS_DIR / directory / "SKILL.md"
+        if not path.is_file():
+            check(False, f"{directory}/SKILL.md exists to be checked")
+            continue
+        text = path.read_text(encoding="utf-8")
+        for other in SKILLS:
+            if other == directory:
+                continue
+            bare = [n for n, line in enumerate(text.splitlines(), 1)
+                    if re.search(rf"(?<!/touch:){re.escape(other)}", line)]
+            check(not bare,
+                  f"{directory}/SKILL.md names {other} only as /touch:{other} ({bare[:3]})")
+
+
+def test_content_skills_defer_to_the_project():
+    """The two-line preamble (GD-U3 universal edit).
+
+    These skills auto-load by description, including inside an implementer
+    agent that owns three files. Without the preamble the model has a
+    first-class instruction to restructure whatever it reads, and the critique
+    gate then rejects the whole attempt for out-of-scope edits.
+    """
+    print("test_content_skills_defer_to_the_project")
+    for directory in CONTENT:
+        path = SKILLS_DIR / directory / "SKILL.md"
+        if not path.is_file():
+            check(False, f"{directory}/SKILL.md exists to be checked")
+            continue
+        text = path.read_text(encoding="utf-8")
+        check("a finding, not an edit" in text,
+              f"{directory}/SKILL.md keeps owned files in scope")
+        check("the project wins" in text,
+              f"{directory}/SKILL.md defers to the project's convention")
+        check(re.search(r"^Sources: ", text, re.M),
+              f"{directory}/SKILL.md keeps a path-free Sources: attribution")
 
 
 # --- what the CLI actually loads
-def test_plugin_details_lists_four_skills():
-    print("test_plugin_details_lists_four_skills")
+def test_plugin_details_lists_every_skill():
+    print("test_plugin_details_lists_every_skill")
     if not have_cli():
         skip("`claude` CLI not on PATH — plugin details not run")
         return
@@ -372,8 +535,8 @@ def test_plugin_details_lists_four_skills():
           f"claude --plugin-dir ... plugin details touch loads the payload "
           f"(rc={res.returncode}, {(res.stdout + res.stderr).strip()[-300:]})")
     out = res.stdout
-    check("Skills (4)" in out,
-          f"the payload registers exactly four skills (inventory: "
+    check(f"Skills ({len(SKILLS)})" in out,
+          f"the payload registers exactly {len(SKILLS)} skills (inventory: "
           f"{[l.strip() for l in out.splitlines() if 'Skills (' in l]})")
     for name in EXPECTED.values():
         check(re.search(rf"\b{re.escape(name)}\b", out),
@@ -386,11 +549,15 @@ def main():
               test_no_banned_text_in_payload,
               test_no_daemon_paths_in_skill_bodies,
               test_skill_bodies_use_bare_commands,
+              test_content_skills_drive_nothing,
               test_cycle_reporter_is_where_its_wrapper_looks,
               test_tasks_root_is_resolved_not_assumed,
               test_templates_split_the_two_roots,
               test_substitution_law_is_respected_in_both_directions,
-              test_plugin_details_lists_four_skills):
+              test_adopted_skills_dropped_the_retired_tokens,
+              test_content_skills_cross_reference_by_invocation,
+              test_content_skills_defer_to_the_project,
+              test_plugin_details_lists_every_skill):
         t()
     print()
     if skips:

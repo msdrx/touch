@@ -3,17 +3,7 @@
     "type": "command",
     "command": ".claude/statusline.sh"
   },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Read|Glob|Grep|Edit|Write|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}\"/plugin/touch/hooks/orch_scope_guard.py"
-          }
-        ]
-      }
-    ]
+  "enabledPlugins": {
+    "touch@inline": true
   }
 }

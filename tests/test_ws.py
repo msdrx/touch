@@ -20,7 +20,11 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import MON, SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import ws                                       # noqa: E402
 from aggregator.ws import (                                     # noqa: E402
@@ -363,7 +367,7 @@ def test_drain_frames_parity_with_monitor_server():
     except TypeError:
         check(True, "drain_frames states its in-place contract (TypeError on bytes)")
 
-    entry = str(REPO / ".claude" / "shared" / "monitoring")
+    entry = str(MON)
     sys.path.insert(0, entry)
     try:
         import monitor_server                                    # noqa: E402
@@ -408,7 +412,7 @@ def test_module_does_no_io():
     print("test_module_does_no_io")
     # "No socket I/O in this module" (T3) asserted on the import graph and the
     # call graph, not on prose: the docstring legitimately talks about sockets.
-    src = (REPO / "aggregator" / "ws.py").read_text()
+    src = (SRC / "aggregator" / "ws.py").read_text()
     tree = ast.parse(src)
     imported = set()
     calls = set()

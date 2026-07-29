@@ -7,15 +7,16 @@
 Touch shows you what the subagents in a Claude Code session are actually
 doing: a session sidebar, the live agent tree, per-loop cards and running
 token counters, served as a local web page over the transcripts the CLI
-already writes. It ships as a Claude Code plugin, together with four
-orchestration skills whose research → plan → implementation loops report to
-the same dashboards that render them.
+already writes. It ships as a Claude Code plugin, together with ten skills:
+four orchestration skills whose research → plan → implementation loops report
+to the same dashboards that render them, and six engineering-practice skills
+the agents inside those loops can draw on.
 
 Touch never writes to `~/.claude`. It tails it, keeps its own history under
 `.touch/` in your project (the CLI's retention sweep deletes transcripts), and
 optionally mirrors that history into a local MongoDB.
 
-Version 0.1.0 is **read-only**: it renders no button it cannot honestly
+Version 0.2.0 is **read-only**: it renders no button it cannot honestly
 honour, so nothing here starts, stops or restarts anything yet.
 
 ## Install
@@ -69,7 +70,9 @@ binds `127.0.0.1` only, and the wrappers refuse to open a public bind on your
 behalf. To reach the page from another machine, forward the port over SSH
 (`ssh -L 8932:127.0.0.1:8932 you@host`) instead of exposing it.
 
-The four skills invoke under the plugin's namespace:
+The ten skills invoke under the plugin's namespace, in two groups.
+
+**Orchestration** — the loops the dashboards render:
 
 | skill | what it does |
 |---|---|
@@ -77,6 +80,24 @@ The four skills invoke under the plugin's namespace:
 | `/touch:implement-plan` | divide a plan by file ownership, then run gated implement → test → critique loops per sub-plan |
 | `/touch:orchestrate` | the naming, spawn-ledger and control-file standards that make subagents visible to the dashboard |
 | `/touch:m-orchestrator` | wire live monitoring into an orchestrator you write yourself |
+
+**Engineering practice** — what the agents inside those loops are asked to do
+well:
+
+| skill | what it does |
+|---|---|
+| `/touch:architecture-boundaries` | module boundaries, layering and dependency direction |
+| `/touch:architecture-tradeoffs` | a significant decision analysed as an explicit trade-off, then recorded |
+| `/touch:code-quality-review` | review a diff, file or module and report `file:line` findings with fixes |
+| `/touch:pattern-selection` | match a problem to the right design pattern — or argue against one |
+| `/touch:refactoring-pass` | safe, incremental, behaviour-preserving cleanup with a test safety net |
+| `/touch:testing-discipline` | write or restructure tests, and read testability pain as an architecture signal |
+
+The six are condensed guidance derived from the books named on each one's
+`Sources:` line — not the works themselves. They cost context on every
+session: `claude plugin details touch` reports ~1,257 tokens always-on across
+all ten, up from the ~459 measured at 0.1.0. The plugin's own
+[README](plugin/touch/README.md) has the per-skill breakdown.
 
 Orchestration runs get their own dashboard: `touch-monitor` (port 8931, same
 loopback-and-token posture), plus `touch-status`, `touch-watcher` and
@@ -101,13 +122,23 @@ gone too.
 
 ## Running from this repository
 
-The aggregator is plain Python 3 stdlib — nothing to install:
+The aggregator is plain Python 3 stdlib — nothing to install. It lives in the
+shipping subtree, which is the only copy of it, so run the wrapper that knows
+where that is:
 
 ```bash
-python3 -m aggregator.server                 # binds 127.0.0.1:8932
+plugin/touch/bin/touch-serve                 # binds 127.0.0.1:8932
 # prints:  open: http://127.0.0.1:8932/?token=<per-boot token>
 #          token written to .touch/server.json (0600)
 ```
+
+`touch-serve`, `touch-monitor` and `touch-watcher` are the three you invoke
+directly; `touch-status` and `touch-cycle-reporter` are the same kind of
+program, called by the skills rather than by you, and `touch-selfcheck`
+verifies an installation. All six are on `PATH` in any session that has the
+plugin enabled, and `plugin/touch/bin/` is where they are otherwise. The
+equivalent of the first, for hacking on the module itself, is
+`PYTHONPATH=plugin/touch python3 -m aggregator.server`.
 
 Every route except `/health` requires that per-boot token, and the WebSocket
 upgrade enforces an Origin/Host allowlist.
@@ -126,10 +157,10 @@ gate, how to add a test — live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 | area | state |
 |---|---|
-| session discovery, transcript/journal ingest, agent + run graph, token rollups | implemented (`aggregator/`) |
-| read API + WebSocket with bounded replay and `(stream, seq)` resume | implemented (`aggregator/server.py`) |
+| session discovery, transcript/journal ingest, agent + run graph, token rollups | implemented (`plugin/touch/aggregator/`) |
+| read API + WebSocket with bounded replay and `(stream, seq)` resume | implemented (`plugin/touch/aggregator/server.py`) |
 | touch-visual v0 — sidebar, agent tree, loop cards, live token counters | implemented, **read-only** |
-| Mongo mirror (optional, write-behind, rebuildable) | implemented (`aggregator/mirror.py`, see `docs/mongo.md`) |
+| Mongo mirror (optional, write-behind, rebuildable) | implemented (`plugin/touch/aggregator/mirror.py`, see `plugin/touch/docs/mongo.md`) |
 | control plane — start / stop / restart / terminate | **not shipped.** No control affordance renders in v0 |
 | terminal-fidelity PTY view | not shipped (the transcript supports a semantic re-render, not a terminal) |
 
@@ -157,7 +188,8 @@ Two stop granularities, never conflated (GD-8): a **run-level** stop exists for
 Workflow runs via the launch `toolUseResult.taskId` and stops the whole loop; a
 **per-agent** stop exists only for Agent-tool spawns, where the task id is the
 agent's own 17-hex id. A Workflow agent renders its per-agent stop disabled,
-with that reason. Full ladder and session classes: `docs/control-semantics.md`.
+with that reason. Full ladder and session classes:
+`plugin/touch/docs/control-semantics.md`.
 
 ## Optional: the Mongo mirror
 
@@ -167,8 +199,8 @@ absent, down, or `pymongo` is not installed, the live view is unaffected and
 `/health` says `mirror: absent | down | degraded`. Only history and backfill
 degrade.
 
-If you want it, `docs/mongo.md` has the exact recipe. Two rules from it, here
-so nobody has to go looking: the database binds **loopback only**
+If you want it, `plugin/touch/docs/mongo.md` has the exact recipe. Two rules
+from it, here so nobody has to go looking: the database binds **loopback only**
 (`-p 127.0.0.1:27017:27017`, `--auth`, a named volume) — Touch refuses to
 mirror into a mongod with zero configured users — and the database port is
 **never** published (no `sbx ports … 27017`, not "just for a minute"); the
@@ -186,8 +218,10 @@ lost — the isolation you asked for is a filter, not a namespace.
 
 ## Where the design lives
 
-- `docs/control-semantics.md` — the verb ladder and session classes.
-- `docs/mongo.md` — the database recipe and its security baseline.
+- `plugin/touch/docs/control-semantics.md` — the verb ladder and session
+  classes.
+- `plugin/touch/docs/mongo.md` — the database recipe and its security
+  baseline.
 - `inception.md` — everything verified about the substrate, summarized.
 - `CLAUDE.md` — the session guide, and the authority ladder over the full
   design record (whose run folders are local history, absent from a clean

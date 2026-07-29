@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Stdlib-only tests for the run-scope guard
-(plugin/touch/hooks/orch_scope_guard.py) and its two registrations — the
-plugin's `hooks/hooks.json` (exec form) and this repo's `.claude/settings.json`
-(shell form), which must carry an identical matcher.
+(plugin/touch/hooks/orch_scope_guard.py) and its ONE registration — the
+plugin's `hooks/hooks.json`, exec form (GD-U5).
 Run as `python3 test_scope_guard.py`; exits non-zero on failure. No pytest.
+
+There used to be a second registration, in this repo's `.claude/settings.json`,
+shell form, same matcher, and the docstring called the pair deliberate. It was
+not an either/or: the dogfood loop is `claude --plugin-dir plugin/touch` with
+`touch@inline` enabled, so both fired — measured 2 hook processes per tool call
+against 1 with the plugin unloaded (PLUGIN-RUNTIME-4). The settings block is
+gone; what lives there now is the `enabledPlugins` opt-in that makes the
+plugin's registration the one that runs. `test_settings_registration` pins BOTH
+halves, so the double registration cannot silently return.
 
 The guard is exercised as it runs in production: a subprocess fed the
 PreToolUse JSON on stdin, against a throwaway task tree — never against the
@@ -19,11 +27,22 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Nothing here imports a payload module today, but the guard is one `import`
+# away at all times and a `__pycache__/` under `plugin/touch/hooks/` is exactly
+# the untracked stray `test_package.py`'s working-tree arm now fails on
+# (DUP-MAP-7). Stop it at the source rather than sweeping it up: this flag for
+# anything this file imports, `PYTHONDONTWRITEBYTECODE` in `guard_env()` for
+# every subprocess it starts.
+sys.dont_write_bytecode = True
+
 REPO = Path(__file__).resolve().parents[1]
 GUARD = REPO / "plugin" / "touch" / "hooks" / "orch_scope_guard.py"
 HOOKS_JSON = REPO / "plugin" / "touch" / "hooks" / "hooks.json"
 SETTINGS = REPO / ".claude" / "settings.json"
 MATCHER_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write", "Bash")
+#: The whole of `.claude/settings.json` after item 07 — a closed set, so a
+#: third top-level key has to be argued for rather than merely committed.
+SETTINGS_KEYS = {"statusLine", "enabledPlugins"}
 
 failures = []
 
@@ -44,6 +63,7 @@ def guard_env(**overrides):
     env.pop("CLAUDE_PROJECT_DIR", None)
     env.pop("ORCH_TASKS_ROOT", None)
     env.pop("CLAUDE_PLUGIN_OPTION_RUN_SCOPE_GUARD", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"   # never litter the payload tree
     for k, v in overrides.items():
         if v is None:
             env.pop(k, None)
@@ -89,42 +109,79 @@ def make_tree(tmp):
 
 
 def names_guard(hook):
-    """True for either registration form: the shell-string `command` this repo
-    uses, or the exec form (`command: python3`, `args: [...]`) the plugin's
-    hooks.json uses. Recognising both matters because the matcher-parity
-    assertion is the only thing keeping the two registrations from diverging —
-    if it stopped matching, it would stop asserting, silently."""
+    """True for either registration form: a shell-string `command`, or the exec
+    form (`command: python3`, `args: [...]`) the plugin's hooks.json uses. Both
+    shapes are still recognised, because the settings-side assertion is now
+    "there is NO registration here" — a detector that only knew one form would
+    let the other one back in silently."""
     if "orch_scope_guard.py" in hook.get("command", ""):
         return True
     return any("orch_scope_guard.py" in str(a) for a in hook.get("args", []))
 
 
-def settings_entry():
+def settings_entries():
+    """Every PreToolUse entry in `.claude/settings.json` that names the guard.
+
+    Post-GD-U5 this must be EMPTY. It is computed rather than assumed absent so
+    a re-added block is reported as "registered again", not as a KeyError.
+    """
     settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
     entries = settings.get("hooks", {}).get("PreToolUse", [])
     return [e for e in entries if any(names_guard(h) for h in e.get("hooks", []))]
 
 
+def test_settings_registration():
+    """GD-U5: the plugin is the ONLY registration, and settings.json says so.
+
+    Two halves, and both matter. NO `hooks` key — the second registration is
+    gone and cannot creep back. AND the `enabledPlugins` opt-in, committed:
+    without it the dev loop's plugin is loaded but disabled, which would leave
+    the repo with no guard at all rather than with one.
+
+    The accepted consequence, recorded where the arm lives: a session started
+    WITHOUT the plugin now has no guard. That is deliberate, not an oversight —
+    the guard is inert without an ACTIVE sentinel anyway (see
+    `test_inert_modes`), and every orchestration run already requires the
+    plugin, whose `bin/` is the driver toolchain.
+    """
+    print("test_settings_registration")
+    check(SETTINGS.is_file(), ".claude/settings.json exists")
+    try:
+        settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        check(False, f".claude/settings.json parses as JSON ({exc})")
+        return
+    check(True, ".claude/settings.json parses as JSON")
+    check("hooks" not in settings,
+          "settings.json carries NO hooks key — the plugin registers the guard "
+          "exactly once (GD-U5); a second registration fired twice per tool call")
+    check(settings_entries() == [],
+          "...and no PreToolUse entry anywhere in it names orch_scope_guard.py")
+    # `.get(...).get(...)` would raise on a hand-edited `enabledPlugins` that is
+    # a list or a string; this file reports FAIL and keeps going instead of
+    # dying with a traceback before the arms below it run.
+    enabled = settings.get("enabledPlugins")
+    check(isinstance(enabled, dict) and enabled.get("touch@inline") is True,
+          'settings.json commits "enabledPlugins": {"touch@inline": true} so '
+          "the plugin's registration is actually live in the dev loop")
+    # The file's other resident is not collateral: the status line is the one
+    # thing that was in here before the hooks block and must survive its removal.
+    status_line = settings.get("statusLine")
+    check(isinstance(status_line, dict)
+          and status_line.get("command", "").endswith("statusline.sh"),
+          "the statusline entry is untouched by the hooks-block removal")
+    # A closed set, in the same spirit as `test_package.py`'s TOP_ALLOWLIST: the
+    # two assertions above are a deny list, and this arm exists precisely
+    # because a second registration mechanism crept into this one committed,
+    # session-wide file unnoticed once. Fail on ADDITION, not just on `hooks`.
+    check(set(settings) == SETTINGS_KEYS,
+          f"the committed settings file carries exactly {sorted(SETTINGS_KEYS)} "
+          f"(found: {sorted(settings)}) — a new top-level key is how a second "
+          f"registration mechanism arrives")
+
+
 def test_registration():
     print("test_registration")
-    ours = settings_entry()
-    check(len(ours) == 1, "settings.json registers orch_scope_guard once")
-    settings_matcher = ours[0].get("matcher", "") if ours else ""
-    for tool in MATCHER_TOOLS:
-        check(tool in settings_matcher.split("|"), f"settings matcher covers {tool}")
-    check("NotebookEdit" not in settings_matcher,
-          "settings matcher no longer carries NotebookEdit")
-    # Coverage alone would pass a seventh tool silently (and parity would then
-    # propagate it to hooks.json unremarked). The matcher is a closed set:
-    # widening what this hook intercepts is a decision, not a diff.
-    check(sorted(settings_matcher.split("|")) == sorted(MATCHER_TOOLS),
-          "settings matcher is exactly the six matched tools, no more")
-    if ours:
-        cmd = ours[0]["hooks"][0]["command"]
-        check("plugin/touch/hooks/orch_scope_guard.py" in cmd,
-              "settings.json points at the relocated guard in the plugin subtree")
-        check(".claude/hooks/" not in cmd,
-              "settings.json no longer points at the old .claude/hooks/ copy")
     check(GUARD.is_file() and os.access(GUARD, os.X_OK),
           "guard script lives in the plugin subtree and is executable")
     check(not (REPO / ".claude" / "hooks" / "orch_scope_guard.py").exists(),
@@ -151,13 +208,16 @@ def test_hooks_json():
           "hooks.json uses exec form: command is the bare interpreter")
     check(h.get("args") == ["${CLAUDE_PLUGIN_ROOT}/hooks/orch_scope_guard.py"],
           "hooks.json passes the guard via args[] with ${CLAUDE_PLUGIN_ROOT}")
-    # Parity is asserted unconditionally: a settings.json that stopped
-    # registering the guard must fail HERE, not silently skip the one check
-    # that guarantees the two registrations cannot diverge.
-    ours = settings_entry()
-    check(len(ours) == 1, "settings.json registers the guard exactly once")
-    check(bool(ours) and ours[0].get("matcher", "") == plugin_matcher,
-          "matcher parity: settings.json and hooks.json match identically")
+    # The matcher used to be pinned via parity with settings.json. With one
+    # registration left there is nothing to compare it against, so the closed
+    # set moves here: widening what this hook intercepts is a decision, not a
+    # diff, and it is now asserted where the decision is actually recorded.
+    for tool in MATCHER_TOOLS:
+        check(tool in plugin_matcher.split("|"), f"hooks.json matcher covers {tool}")
+    check("NotebookEdit" not in plugin_matcher,
+          "hooks.json matcher does not carry NotebookEdit")
+    check(sorted(plugin_matcher.split("|")) == sorted(MATCHER_TOOLS),
+          "hooks.json matcher is exactly the six matched tools, no more")
 
 
 def test_scoping():
@@ -631,7 +691,8 @@ def test_inert_modes():
 
 
 def main():
-    for t in (test_registration, test_hooks_json, test_scoping,
+    for t in (test_settings_registration, test_registration, test_hooks_json,
+              test_scoping,
               test_sentinels_reachable, test_halt, test_bash_and_glob,
               test_multi_run, test_project_root_ceiling,
               test_tasks_root_override, test_off_switch,

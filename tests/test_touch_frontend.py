@@ -44,14 +44,18 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import agents as agents_mod                        # noqa: E402
 from aggregator import legacy as legacy_mod                        # noqa: E402
 from aggregator import server as server_mod                        # noqa: E402
 from aggregator import store as store_mod                          # noqa: E402
 
-VISUAL = REPO / "touch-visual"
+VISUAL = SRC / "touch-visual"
 HTML_PATH = VISUAL / "index.html"
 JS_PATH = VISUAL / "app.js"
 CSS_PATH = VISUAL / "style.css"
@@ -168,7 +172,7 @@ def test_the_three_files_are_where_the_server_serves_them_from():
     # the three handlers name exactly these three files, and a 503 naming a
     # missing one is what this replaces.
     for name in ("index.html", "app.js", "style.css"):
-        check(f'"{name}"' in read(REPO / "aggregator" / "server.py"),
+        check(f'"{name}"' in read(SRC / "aggregator" / "server.py"),
               f"server.py serves {name} by name")
     check(server_mod.CONTROL_ROUTES == {},
           "the server's control route group is empty — v0 has no verb to render")
@@ -381,7 +385,7 @@ def test_the_class_whitelists_match_the_servers_vocabulary():
 
 def test_the_wire_contract_is_restated_verbatim():
     print("test_the_wire_contract_is_restated_verbatim")
-    server_src = read(REPO / "aggregator" / "server.py")
+    server_src = read(SRC / "aggregator" / "server.py")
 
     def block(src):
         start = src.find('{"type":"hello"')
@@ -579,7 +583,7 @@ def test_the_notice_surface_states_the_current_cycle():
 
 def test_the_resync_never_asks_to_be_moved_forward():
     print("test_the_resync_never_asks_to_be_moved_forward")
-    server_src = read(REPO / "aggregator" / "server.py")
+    server_src = read(SRC / "aggregator" / "server.py")
     # `_advance` clamps the published cursor to `pending_floor - 1` while the
     # coalescer holds a token record, yet the frames after the held one still
     # go out — so "max seq I received" is genuinely AHEAD of the socket on the
@@ -604,7 +608,7 @@ def test_the_resync_never_asks_to_be_moved_forward():
 
 def test_the_token_rollup_key_is_an_identity_not_a_display_string():
     print("test_the_token_rollup_key_is_an_identity_not_a_display_string")
-    server_src = read(REPO / "aggregator" / "server.py")
+    server_src = read(SRC / "aggregator" / "server.py")
     key_of = slice_fn(server_src, "    def key_of(", "\n    def ")
     check('"|".join(f"{name}={ref[name]}" for name in sorted(ref))' in key_of,
           "server.TokenCoalescer.key_of joins sorted name=value pairs with '|'")
@@ -698,7 +702,7 @@ def test_load_older_never_fetches_a_page_it_cannot_paint():
           "false statement the per-stream history exists to prevent")
     # Prepending the page whole is only contiguous because the backwards arm
     # returns the newest `limit` of the older set, ascending.
-    check("page = older[-limit:]" in read(REPO / "aggregator" / "server.py"),
+    check("page = older[-limit:]" in read(SRC / "aggregator" / "server.py"),
           "h_events' before= arm returns the newest `limit` older records, ascending")
     check("anchor.oldest = page.oldest" in older,
           "the anchor advances to what was actually painted, so the next click "
@@ -824,7 +828,7 @@ def test_a_run_stream_the_run_routes_cannot_answer_for_is_not_a_link():
     # is a documented one; `ID_PATTERNS["run"]` is `_NAME_RE`, which has no
     # colon. So `runIdOf("run:legacy:x")` names something every run route 400s.
     accepts_run_id = server_mod.ID_PATTERNS["run"][0]
-    check("run:legacy:" in read(REPO / "aggregator" / "store.py"),
+    check("run:legacy:" in read(SRC / "aggregator" / "store.py"),
           "the store names `run:legacy:<task>` as a real stream id shape")
     try:
         store_mod.validate_stream("run:legacy:touch-repo-recon")
@@ -902,7 +906,7 @@ def test_the_session_timeline_can_reach_every_record_it_admits_to():
 
 def test_the_expensive_route_is_polled_on_its_own_slow_cadence():
     print("test_the_expensive_route_is_polled_on_its_own_slow_cadence")
-    h_tasks = slice_fn(read(REPO / "aggregator" / "server.py"), "def h_tasks", "\ndef ")
+    h_tasks = slice_fn(read(SRC / "aggregator" / "server.py"), "def h_tasks", "\ndef ")
     check("legacy_mod.scan(" in h_tasks,
           "h_tasks re-reads and re-reduces every legacy folder from disk on "
           "every call — it is not served from the in-memory reduction")
@@ -979,7 +983,7 @@ def test_no_liveness_class_is_attached_outside_a_whitelist():
     # GD-23 failure this whole plan exists to end, and the run list's `current`
     # marker was doing it: `_current_run_stream` picks that stream by
     # `os.stat().st_mtime` and says so in its own docstring.
-    server_src = read(REPO / "aggregator" / "server.py")
+    server_src = read(SRC / "aggregator" / "server.py")
     check("A file mtime is not a record timestamp" in server_src,
           "the server itself insists its `current` pick is not a sequencing or "
           "liveness fact")
@@ -1012,7 +1016,7 @@ def test_a_run_that_starts_after_the_handshake_reaches_the_sidebar():
     # `live:false` backfill. A page that consumes those records into the log,
     # the rollup and `state.delivered` but not into `state.streams` prints a
     # run's rows under a sidebar that says the run does not exist.
-    server_src = read(REPO / "aggregator" / "server.py")
+    server_src = read(SRC / "aggregator" / "server.py")
     check("A stream that came into existence after the mode switch" in server_src,
           "the server has a late-stream arm and describes it in those words")
     check("/api/runs" not in server_src,
@@ -1036,7 +1040,7 @@ def test_the_agent_tree_is_drawn_as_containment():
     # `_agent_payload` and are harness facts, so nesting on them is rendering,
     # not deriving — while a flat list beside a `depth N` chip announces that a
     # hierarchy exists without showing it.
-    server_src = read(REPO / "aggregator" / "server.py")
+    server_src = read(SRC / "aggregator" / "server.py")
     check('"root", "parent"' in server_src,
           "the agent projection carries the spawn edge")
     tree = slice_fn(CODE, "function agentTree", "\nfunction ")

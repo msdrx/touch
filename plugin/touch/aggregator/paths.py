@@ -45,6 +45,15 @@ guess.
 This module is **pure**: stdlib only (GD-21), no I/O beyond `os.path` stats,
 no package imports — so `store.py`, `legacy.py`, `mirror.py` and `server.py`
 can all import it at module level without touching GD-15's ownership rules.
+
+One consequence of GD-U1 worth stating where the roots are defined
+(PLUGIN-RUNTIME-12): `touch-serve` puts the PLUGIN ROOT on `sys.path`, so every
+directory name at that root — `aggregator`, `docs`, `hooks`, `bin`, `shared`,
+`skills`, `touch-visual` — becomes a top-level import name AHEAD of
+site-packages. Adding a directory here can therefore shadow an installed
+package of the same name for the whole process. `plugin_root()` itself needs no
+change for any of this: it is `__file__`-derived, and `touch-visual/` is still
+the package's sibling wherever the payload is unpacked.
 """
 
 from __future__ import annotations

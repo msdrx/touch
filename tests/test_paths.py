@@ -32,7 +32,11 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import paths                                   # noqa: E402
 from aggregator.mirror import database_name                    # noqa: E402
@@ -68,7 +72,7 @@ def check(cond, msg):
 def stage(tmp, version):
     """Copy the package into `<tmp>/cache/msdrx-tools/touch/<version>/`."""
     root = Path(tmp) / "cache" / "msdrx-tools" / "touch" / version
-    shutil.copytree(REPO / "aggregator", root / "aggregator",
+    shutil.copytree(SRC / "aggregator", root / "aggregator",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     # The assets tree ships with the code, so the relocated copy has one too;
     # its presence is what makes the assets assertion meaningful.
@@ -170,7 +174,7 @@ def test_home_is_not_a_project():
 def test_only_paths_mentions_dunder_file():
     print("test_only_paths_mentions_dunder_file")
     offenders = []
-    for module in sorted((REPO / "aggregator").glob("*.py")):
+    for module in sorted((SRC / "aggregator").glob("*.py")):
         if module.name == "paths.py":
             continue
         for lineno, line in enumerate(module.read_text(encoding="utf-8").splitlines(), 1):

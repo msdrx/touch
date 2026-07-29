@@ -58,6 +58,8 @@ WHAT IT ASSERTS, IN ORDER
   4. EXEC BITS — `bin/*` and `hooks/*.py` must be executable (a lost bit fails
      only on the consumer's machine), and nothing that is not a `*.sh`/`*.py`
      entry point may be;
+  4b. ZERO SYMLINKS in the stage, checked twice — the archived members AND an
+     `os.lstat` walk of the extraction (item 08 / GD-U2);
   5. POSTURE source-text (GD-T8): no staged Python carries a quoted `0.0.0.0`
      outside its `OPEN_HOST` constant, and every module that can bind a socket
      carries a per-boot token and an Origin/Host check;
@@ -66,6 +68,21 @@ WHAT IT ASSERTS, IN ORDER
   7. the MANIFESTS, `claude plugin validate --strict`, on the STAGED copies,
      by explicit file path (GD-T7 — a directory-level run leaves remote-source
      entries unchecked).
+
+AND ONE ARM THAT LOOKS AT THE DISK ON PURPOSE
+---------------------------------------------
+Everything above reads the archive, which is blind to untracked files BY
+CONSTRUCTION — that is the property that keeps a stray in someone's working
+tree from failing a gate about what ships. It also means nothing at all watched
+`plugin/touch/` on disk: `test_plugin_tree.py`'s stray walk only ever visited
+the pinned trees, so `hooks/`, `bin/` and `skills/` had no gate, and
+`plugin/touch/hooks/__pycache__/orch_scope_guard.cpython-313.pyc` sat there
+untracked and unnoticed (DUP-MAP-7 = PLUGIN-RUNTIME-11 = SKILLS-INTEGRATION-12
+(ii)). `test_working_tree_strays` closes that hole with the SAME deny patterns,
+over the working tree: it is the gate the `--plugin-dir` dev loop and any
+hand-built (`cp -a`) zip actually need, and it is deliberately the deny list
+only — a top-level allowlist over the disk would fail on scratch work that will
+never be committed.
 
 The matchers for the Mongo URI and the token shape are IMPORTED from
 `test_publish_hygiene.py` rather than restated: two copies of a detector is
@@ -365,6 +382,56 @@ def deny_hits(entries):
     return hits
 
 
+def working_tree_strays(root):
+    """[relative path (matched pattern)] for every denied path ON DISK.
+
+    A pure function over a directory so the canary can run it against a
+    poisoned temp tree instead of dirtying the real payload. `os.walk` does not
+    follow symlinks: a link is a path like any other here, and item 08's arms
+    are what judge links.
+
+    Deliberately the DENY list only, unlike its archive-side sibling
+    `test_top_level_allowlist`: the working tree legitimately carries scratch
+    work an allowlist would fail on, so this arm names what may never exist
+    rather than what may.
+    """
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = Path(dirpath).relative_to(root)
+        for name in sorted(dirnames):
+            denied = _denied_component(name)
+            if denied:
+                hits.append(f"{(rel / name).as_posix()} (matches {denied})")
+        # A denied directory is reported once, by name, and NOT descended into:
+        # listing the 40 `.pyc` files inside a `__pycache__/` adds noise to the
+        # failure message and no information to it.
+        dirnames[:] = [d for d in dirnames if not _denied_component(d)]
+        for name in sorted(filenames):
+            denied = _denied_component(name)
+            if denied:
+                hits.append(f"{(rel / name).as_posix()} (matches {denied})")
+    return sorted(hits)
+
+
+def stage_symlinks(entries, root):
+    """(archived link members, on-disk links under the extraction).
+
+    Two views of the same ban because they fail differently: `git archive`
+    records an escaping link verbatim, so it is a member here AND a dangling
+    link on disk, while a filtered extraction may refuse it and leave only the
+    member. Either sighting is the failure.
+    """
+    members = sorted(e.path for e in entries if e.kind == "link")
+    on_disk = []
+    if root is not None:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in sorted(dirnames) + sorted(filenames):
+                full = os.path.join(dirpath, name)
+                if os.path.islink(full):        # lstat, never stat
+                    on_disk.append(os.path.relpath(full, root))
+    return members, sorted(on_disk)
+
+
 def _account_name(raw):
     """A captured path segment reduced to the account name it stands for."""
     return raw.lower().strip("<>${}.-")
@@ -493,6 +560,51 @@ def test_detectors():
           "an ordinary directory name is not denied")
 
 
+def test_disk_scanners_go_red():
+    """The two scanners that read a DIRECTORY, proven against a poisoned one.
+
+    The real payload is (rightly) clean, so an arm over it alone can only ever
+    report "found nothing" — which is what a broken walk reports too. Both
+    scanners are pure functions of a root, so they are exercised here over a
+    throwaway tree that carries exactly the strays they exist to catch, and
+    then over a clean one so the poison is what they measured.
+    """
+    print("test_disk_scanners_go_red")
+    with tempfile.TemporaryDirectory(prefix="touch-package-disk-") as td:
+        clean = Path(td) / "clean"
+        (clean / "skills" / "orchestrate").mkdir(parents=True)
+        (clean / "skills" / "orchestrate" / "SKILL.md").write_text("x\n")
+        check(working_tree_strays(clean) == [],
+              "a clean tree yields no stray (the control)")
+        check(stage_symlinks([], clean) == ([], []),
+              "a clean tree yields no symlink (the control)")
+
+        dirty = Path(td) / "dirty"
+        shutil.copytree(clean, dirty)
+        (dirty / "hooks" / "__pycache__").mkdir(parents=True)
+        (dirty / "hooks" / "__pycache__" / "guard.cpython-313.pyc").write_bytes(b"\xed\x0c")
+        (dirty / "aggregator").mkdir()
+        (dirty / "aggregator" / "touch.log").write_text("noise\n")
+        hits = working_tree_strays(dirty)
+        check(any(h.startswith("hooks/__pycache__ ") for h in hits),
+              f"the working-tree walk flags an untracked __pycache__/ ({hits})")
+        check(not any("guard.cpython-313.pyc" in h for h in hits),
+              "...once, by directory name, without listing what is inside it")
+        check(any(h.startswith("aggregator/touch.log ") for h in hits),
+              f"the working-tree walk flags a stray matching a deny glob ({hits})")
+
+        # A link to a directory lands in os.walk's dirnames, a dangling one in
+        # its filenames; both must be seen, and neither may be descended into.
+        (dirty / "shared").symlink_to(clean / "skills")
+        (dirty / "docs").symlink_to(Path(td) / "nowhere")
+        members, on_disk = stage_symlinks(
+            [Entry("aggregator", 0o777, None, "link")], dirty)
+        check(members == ["aggregator"],
+              f"an archived link member is reported ({members})")
+        check(sorted(on_disk) == ["docs", "shared"],
+              f"both a live and a dangling on-disk link are reported ({on_disk})")
+
+
 # --------------------------------------------------------------------------
 # (1)-(5): the gate itself
 # --------------------------------------------------------------------------
@@ -529,11 +641,58 @@ def test_exec_bits(label, entries):
           f"every bin/ wrapper and hooks/*.py is executable (missing: {missing})")
     check(not extra,
           f"nothing else carries the exec bit (unexpected: {extra})")
-    links = [e.path for e in entries if e.kind == "link"]
-    # PLUGIN-SPEC-12: a symlink out of the plugin root survives a marketplace
-    # install and is SKIPPED under `--plugin-dir`, i.e. it breaks in the loop a
-    # developer runs all day. The payload is copies, only ever copies.
-    check(not links, f"the payload contains no symlink (found: {links})")
+
+
+def test_no_symlinks(label, entries, root):
+    """Item 08 — the payload is copies, only ever copies.
+
+    GD-U2, the CORRECTED symlink law (probed three ways on CLI 2.1.220,
+    2026-07-28; the earlier "a symlink is SKIPPED under `--plugin-dir`" clause
+    is REFUTED and must never be re-derived):
+
+      `--plugin-dir <directory>`   escaping symlinks are HONOURED
+      `--plugin-dir <zip>` / `--plugin-url`   SILENTLY DROPPED — the plugin
+                                   loads, reports one fewer component, says
+                                   nothing
+      `git archive` of the subtree (what `release.sh` step 5 does) — preserved
+                                   verbatim, so the link DANGLES in the stage
+
+    So the ban is a PACKAGING rule about archived payloads, not a `--plugin-dir`
+    rule, and this is the arm that enforces it. Checked twice because
+    `find -type f` (and every count like it) does not count links: a dangling
+    payload would otherwise report a plausible number and ship.
+    """
+    print(f"test_no_symlinks [{label}]")
+    members, on_disk = stage_symlinks(entries, root)
+    check(not members,
+          f"the archived payload carries no symlink member (found: {members})")
+    if root is None:
+        skip("the stage could not be extracted — the on-disk link walk not run")
+    else:
+        check(not on_disk,
+              f"nothing under the extracted stage is a symlink (found: {on_disk})")
+
+
+def test_working_tree_strays():
+    """Item 06 — the one arm that looks at `plugin/touch/` ON DISK.
+
+    Everything else here reads a `git archive` stage, which cannot see an
+    untracked file. This applies the same deny patterns to the working tree, so
+    `hooks/`, `bin/` and `skills/` — which no stray walk ever visited — are
+    covered for the `--plugin-dir` dev loop and any hand-built zip.
+    """
+    print("test_working_tree_strays")
+    payload = REPO / PAYLOAD
+    if not payload.is_dir():
+        skip(f"{PAYLOAD}/ is not a directory — no working tree to walk")
+        return
+    hits = working_tree_strays(payload)
+    check(not hits,
+          f"no never-ship path exists under {PAYLOAD}/ on disk "
+          f"({len(hits)}: {hits[:8]}) — delete it; tests that import payload "
+          f"modules set `sys.dont_write_bytecode = True` AND pass "
+          f"`PYTHONDONTWRITEBYTECODE=1` to every python child they spawn "
+          f"(the flag does not survive fork/exec) so it stays deleted")
 
 
 def test_posture_source_text(label, entries):
@@ -667,6 +826,10 @@ def main():
               "meaning in an archive/tarball checkout")
         return
     test_detectors()
+    test_disk_scanners_go_red()
+    # The one arm that reads the working tree rather than a stage — it does not
+    # depend on git building anything, so it runs whether or not a stage exists.
+    test_working_tree_strays()
     with tempfile.TemporaryDirectory(prefix="touch-package-") as td:
         stages = build_stages(Path(td))
         if not stages:
@@ -675,8 +838,14 @@ def main():
         for label, entries, root in stages:
             print(f"--- stage {label}: {len(entries)} file(s)")
             for t in (test_top_level_allowlist, test_deny_patterns,
-                      test_content_scan, test_exec_bits,
-                      test_posture_source_text, test_shipped_wrappers_are_stdlib,
+                      test_content_scan, test_exec_bits):
+                t(label, entries)
+            # (4b) runs HERE, where the docstring index says it does. It takes
+            # the extraction root as a third argument, so it cannot ride the
+            # uniform two-argument tuples around it — that is the only reason
+            # it is spelled out rather than listed.
+            test_no_symlinks(label, entries, root)
+            for t in (test_posture_source_text, test_shipped_wrappers_are_stdlib,
                       test_canary_goes_red):
                 t(label, entries)
             test_staged_manifests_validate(label, root)

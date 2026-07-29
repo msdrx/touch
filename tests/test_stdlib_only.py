@@ -27,16 +27,17 @@ sub-plans (SD-2):
 The two Mongo modules land in later sub-plans (sp-05/sp-06); this guard passes
 before they exist and tightens automatically when they appear.
 
-SCOPE (item 10). "The ingest and serve critical path" stopped being one
-directory the day Touch grew a shipping subtree: `plugin/touch/` carries a
-pinned copy of `aggregator/`, the two monitoring daemons, the scope-guard hook
-and the `bin/` wrappers, and a consumer runs THOSE bytes. A guard that only
-looked at `aggregator/` would be green while the payload grew a dependency, so
-the AST arm walks a list of SCAN_ROOTS covering the canonical sources and the
-payload alike. Two arms stay narrower on purpose and say why at their
-definition: the subprocess import arm (only `aggregator/` is an importable
-package) and the pymongo exception (pinned to two file NAMES inside a
-directory named `aggregator`, so no `hooks/mirror.py` inherits it by analogy).
+SCOPE (item 10, as amended by GD-U1). "The ingest and serve critical path"
+stopped being one directory the day Touch grew a shipping subtree:
+`plugin/touch/` now IS the canonical home of `aggregator/`, the two monitoring
+daemons, the scope-guard hook and the `bin/` wrappers, and a consumer runs
+exactly those bytes. A guard that only looked at `aggregator/` would be green
+while the rest of the payload grew a dependency, so the AST arm walks a list of
+SCAN_ROOTS covering the package and the whole payload alike (de-duplicated —
+the package sits inside the payload). Two arms stay narrower on purpose and say
+why at their definition: the subprocess import arm (only `aggregator/` is an
+importable package) and the pymongo exception (pinned to two file NAMES inside
+a directory named `aggregator`, so no `hooks/mirror.py` inherits it by analogy).
 """
 
 import ast
@@ -46,22 +47,26 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import MON, PAYLOAD, REPO, SRC              # noqa: E402
 
 #: The one importable Python package, and the only root the subprocess arm can
-#: use: `plugin/touch/` has no `__init__.py` chain and `.claude/shared/` is not
-#: a package at all — both are run as scripts, never imported.
-PKG = REPO / "aggregator"
+#: use: the payload root has no `__init__.py` chain and the monitoring module is
+#: not a package at all — both are run as scripts, never imported.
+PKG = SRC / "aggregator"
 
 #: (root, recursive) — every tree whose Python must import with nothing
-#: third-party installed. `.claude/shared/monitoring/` is NON-recursive: its
-#: `tests/` subtree is dev-only, never ships (GD-T2), and is not on the
-#: critical path. Roots that do not exist yet are skipped, so this guard is
-#: green before `plugin/touch/` is built and tightens the moment it appears.
+#: third-party installed. Since GD-U1 there is ONE tree: `SRC is PAYLOAD` and
+#: `MON` sits inside it, so the recursive `PAYLOAD` entry already subsumes the
+#: other two (`scan_files()` de-duplicates). The three entries are kept
+#: deliberately redundant because they name the three *questions* separately —
+#: "the package", "the monitoring module", "everything a consumer installs" —
+#: and they are the seam if the trees ever split again. Roots that do not exist
+#: are skipped, so the list stays correct either way.
 SCAN_ROOTS = (
-    (REPO / "aggregator", True),
-    (REPO / ".claude" / "shared" / "monitoring", False),
-    (REPO / "plugin" / "touch", True),
+    (SRC / "aggregator", True),
+    (MON, False),
+    (PAYLOAD, True),
 )
 
 #: The shipped shell entry points. GD-21 binds them too: a wrapper that shells
@@ -69,7 +74,7 @@ SCAN_ROOTS = (
 #: the consumer may not have. (`test_package.py` asserts the same thing over
 #: the git-built stage; this arm runs in the working tree, without git, and is
 #: about the dependency law rather than the payload gate.)
-BIN_ROOT = REPO / "plugin" / "touch" / "bin"
+BIN_ROOT = PAYLOAD / "bin"
 FOREIGN_INTERPRETERS = re.compile(r"\b(jq|node|npx|deno|bun|ruby|perl|php|Rscript)\b")
 
 #: GD-21's single exception. File name -> the top-level module names it may
@@ -118,9 +123,9 @@ def pymongo_allowance(path):
     """What `path` may import beyond the stdlib.
 
     Keyed by file NAME *and* by the directory it sits in: `mirror.py` earns the
-    exception because it is `aggregator/mirror.py` (or the payload's pinned
-    copy of it), never because of what it is called. GD-21 says the exception
-    is never widened by analogy — this is the line that enforces it.
+    exception because it is `aggregator/mirror.py`, never because of what it is
+    called. GD-21 says the exception is never widened by analogy — this is the
+    line that enforces it.
     """
     if path.parent.name != "aggregator":
         return set()
@@ -219,14 +224,12 @@ def test_the_exception_is_named_and_narrow():
     print("test_the_exception_is_named_and_narrow")
     check(set(PYMONGO_ALLOWED) == {"mongo_store.py", "mirror.py"},
           "exactly two files may import pymongo (GD-21) — no third by analogy")
-    # The name alone must not be enough. With the payload subtree in the scan
-    # set there are now two files called `mirror.py` that legitimately qualify
-    # and any number of directories where one would not.
-    check(pymongo_allowance(REPO / "aggregator" / "mirror.py"),
+    # The name alone must not be enough. Since GD-U1 there is exactly ONE
+    # `mirror.py`, and the exception is keyed on its DIRECTORY, not its name —
+    # so the discriminating pair is "inside an aggregator/" vs "anywhere else".
+    check(pymongo_allowance(SRC / "aggregator" / "mirror.py"),
           "aggregator/mirror.py earns the exception")
-    check(pymongo_allowance(REPO / "plugin" / "touch" / "aggregator" / "mirror.py"),
-          "the payload's pinned copy earns it too (same package directory)")
-    check(not pymongo_allowance(REPO / "plugin" / "touch" / "hooks" / "mirror.py"),
+    check(not pymongo_allowance(PAYLOAD / "hooks" / "mirror.py"),
           "a same-named file outside an aggregator/ directory does NOT (GD-21)")
     for name in PYMONGO_ALLOWED:
         path = PKG / name
@@ -237,17 +240,18 @@ def test_the_exception_is_named_and_narrow():
 def test_every_module_imports_without_third_party_packages():
     print("test_every_module_imports_without_third_party_packages")
     # `aggregator/` only, and deliberately: this arm PROVES the claim by
-    # importing, which needs an importable package. The payload's copy is
-    # byte-equal to what is imported here (`tests/test_plugin_tree.py` is the
-    # pin), so proving it once proves it for both.
+    # importing, which needs an importable package. There is one tree — the
+    # payload IS the package under test (GD-U1), so proving it once proves it;
+    # nothing is pinned to anything.
     for path in package_modules():
-        rel = path.relative_to(REPO).with_suffix("")
+        rel = path.relative_to(SRC).with_suffix("")
         dotted = ".".join(rel.parts)
         if dotted.endswith(".__init__"):
             dotted = dotted[: -len(".__init__")]
         code = (
             "import sys, json\n"
-            f"sys.path.insert(0, {str(REPO)!r})\n"
+            "sys.dont_write_bytecode = True\n"
+            f"sys.path.insert(0, {str(SRC)!r})\n"
             f"import {dotted}\n"
             "names = sorted(n for n in sys.modules\n"
             "               if '.' not in n and not n.startswith('_')\n"
@@ -274,9 +278,9 @@ def test_shipped_wrappers_add_no_dependency():
     check(bool(wrappers), f"found {len(wrappers)} shipped wrapper(s)")
     for path in wrappers:
         text = path.read_text(encoding="utf-8", errors="replace")
-        # Full-line comments are stripped first: a wrapper's header is allowed
-        # to explain why it uses no `jq`, and a naive substring search would
-        # flag its own rationale (the `sync_plugin.sh` precedent).
+        # Full-line comments are stripped before the search, as elsewhere in
+        # this suite: a wrapper's header is allowed to explain why it uses no
+        # `jq`, and a naive substring search would flag its own rationale.
         code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
         found = sorted({m.group(0) for m in FOREIGN_INTERPRETERS.finditer(code)})
         check(not found,

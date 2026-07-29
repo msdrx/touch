@@ -42,7 +42,11 @@ import urllib.parse
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import server as server_mod                        # noqa: E402
 from aggregator import store as store_mod                          # noqa: E402
@@ -72,7 +76,7 @@ from aggregator.server import (                                    # noqa: E402
 
 failures = []
 TMPDIRS = []
-SOURCE = (REPO / "aggregator" / "server.py").read_text()
+SOURCE = (SRC / "aggregator" / "server.py").read_text()
 TREE = ast.parse(SOURCE)
 
 
@@ -610,7 +614,7 @@ def test_the_server_derives_nothing_and_differences_nothing():
     # tokenizer rather than by a regex, so the guard cannot be satisfied by
     # spelling a variable name inside a docstring.
     code = []
-    with open(REPO / "aggregator" / "server.py", "rb") as fh:
+    with open(SRC / "aggregator" / "server.py", "rb") as fh:
         for token in tokenize.tokenize(fh.readline):
             if token.type not in (tokenize.COMMENT, tokenize.STRING, tokenize.NL,
                                   tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):

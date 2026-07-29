@@ -50,7 +50,11 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import ingest                            # noqa: E402
 from aggregator import mirror as mr                      # noqa: E402
@@ -1374,7 +1378,7 @@ def test_tsraw_is_the_sources_own_spelling_not_ours():
 
 def test_the_module_has_no_clock():
     print("test_the_module_has_no_clock")
-    source = (REPO / "aggregator" / "ingest.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "ingest.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     banned = {"now", "utcnow", "time", "monotonic", "time_ns", "perf_counter",
               "today", "fromtimestamp"}
@@ -1415,7 +1419,7 @@ def test_mappers_are_registered_pure_and_write_only_our_collections():
           "every mapped kind has a source and vice versa — a kind with no source "
           "never rebuilds, and one with no mapper is data the mirror drops")
 
-    source = (REPO / "aggregator" / "ingest.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "ingest.py").read_text(encoding="utf-8")
     check("pymongo" not in source,
           "the package name does not appear at all (GD-21: only mongo_store and "
           "mirror may import it)")

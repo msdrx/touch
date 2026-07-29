@@ -16,7 +16,10 @@ was once wrong in this repo:
   correct fold — R-38),
 * an unqualified "pause" promise (GD-4 forbids rendering a verb that cannot be
   honest),
-* a `0.0.0.0` database and a published 27017 (GD-27).
+* a `0.0.0.0` database and a published 27017 (GD-27),
+* a layout table describing the tree as it was two migrations ago, and a hook
+  path that had not existed since the plugin absorbed it (DUP-MAP-10 /
+  PLUGIN-RUNTIME-13 — the middle section below).
 
 A guard that only asserted the *presence* of good text would pass while the bad
 text sat next to it, so the negative halves are the load-bearing ones.
@@ -43,12 +46,16 @@ plugin-pack plan) rather than this repo's own:
   `jq`, and never `cp -r`s the working tree into a release — the three ways
   that file stops being the thing it claims to be.
 
-The packaging guards use `have_plugin()`, which draws the same line `have()`
-does: a tree with no `plugin/touch/` at all SKIPS with a reason (the payload
-gate builds its own stage precisely because the subtree need not be committed
-yet), while a subtree that is on disk minus one of its documents FAILS.
-`scripts/release.sh` gets no such arm — it is a repo-only file that ships in no
-payload, so "absent" is a failure and never a skip.
+The packaging guards use `have_plugin()`, which — unlike `have()` — never
+skips: a payload document that is missing FAILS, whatever else is on disk.
+There is deliberately no "the shipping subtree is absent" branch to balance
+`have()`'s, because that state cannot reach this file. Post-GD-U1 the subtree
+is not an optional build product, it is the source, and the import of
+`tests/_roots.py` a few lines down asserts the canonical trees exist; a tree
+without the payload therefore dies LOUDLY at import, before any guard runs,
+which is the bargain `_roots` exists to make. `scripts/release.sh` gets no skip
+arm either — it is a repo-only file that ships in no payload, so "absent" is a
+failure and never a skip.
 
 The `jq` and `cp -r` guards read the script's CODE only — comments dropped,
 whole-line and trailing alike, and the body of the checklist heredoc dropped
@@ -75,11 +82,23 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+# The canonical trees are named through `tests/_roots.py`, never by a literal
+# under REPO: GD-U1 moved `docs/` into the payload and this is the single flip
+# point. `README.md`, `CLAUDE.md`, `CONTRIBUTING.md` and `inception.md` stay
+# repo-root files — they are development documents that deliberately do not
+# ship — so they keep their REPO anchors.
+sys.dont_write_bytecode = True   # no .pyc droppings next to the tests (house
+                                 # pattern, item 06; this file imports only
+                                 # `tests/_roots.py`, nothing under the payload)
+from _roots import SRC   # noqa: E402  (the bytecode flag must precede the
+                         # first import, so this one cannot sit with the rest)
+
 README = REPO / "README.md"
 CLAUDE = REPO / "CLAUDE.md"
+CONTRIBUTING = REPO / "CONTRIBUTING.md"
 INCEPTION = REPO / "inception.md"
-CONTROL_DOC = REPO / "docs/control-semantics.md"
-MONGO_DOC = REPO / "docs/mongo.md"
+CONTROL_DOC = SRC / "docs/control-semantics.md"
+MONGO_DOC = SRC / "docs/mongo.md"
 
 # The run-history artifacts. `.claude/local-orchestrators/` is gitignored and
 # untracked (2026-07-27 amendment), so these files exist in a working tree that
@@ -92,10 +111,12 @@ PLAN = RECON / "plan/touch-full-recon-plan.md"
 PROBES = RECON / "report/probes.md"
 REGISTER = RECON / "plan/findings-register.md"
 
-# The packaging set (items 11 + 12). Neither half is guaranteed present: the
-# shipping subtree may not exist yet in a given tree (hence `have_plugin()`
-# below), and `scripts/release.sh` is a repo-only file that is simply expected
-# to be there — its guards fail rather than skip, which is the difference.
+# The packaging set (items 11 + 12). BOTH halves are guaranteed present, which
+# is why neither has a skip path: the shipping subtree is the source after
+# GD-U1 (`_roots` asserts it at import, above), and `scripts/release.sh` is a
+# repo-only file that is simply expected to be there. `have_plugin()` below
+# therefore reports a missing payload document as a FAILURE — that, and not a
+# second skip rule, is the whole difference from `have()`.
 PLUGIN = REPO / "plugin/touch"
 PLUGIN_README = PLUGIN / "README.md"
 PLUGIN_CHANGELOG = PLUGIN / "CHANGELOG.md"
@@ -137,6 +158,35 @@ def have(path):
     return False
 
 
+def have_plugin(path):
+    """`have()`'s counterpart for the shipping subtree — and it never skips.
+
+    A missing payload document is always a real failure, because `plugin.json`
+    claims a README and a LICENSE that a consumer will look for. There is
+    deliberately no `PLUGIN.is_dir()` branch mirroring `have()`'s skip: `from
+    _roots import SRC` at the top of this module asserts the canonical trees
+    and dies at import if they are absent, and since GD-U1 that tree and this
+    one are the same directory (`tests/_roots.py`: `SRC == PAYLOAD ==
+    plugin/touch/`). "No payload at all" therefore cannot reach this function,
+    and writing the branch anyway would be unreachable code whose printed
+    reason nobody could ever see. After GD-U1 the subtree is not an optional
+    build product, it is the source, and "the payload is missing" must be loud
+    rather than silently skipped.
+
+    The bool is what callers use to stop before reading a file that is not
+    there, so one absent document costs one FAIL line rather than a traceback.
+    It sits here beside `have()` rather than under the Item 11 banner it was
+    written for, because the GD-U1 section above that banner calls it too: the
+    file's convention is that a helper is introduced before the first section
+    that uses it, and it now has two.
+    """
+    if path.is_file():
+        return True
+    check(False, f"{path.relative_to(REPO)} exists (the payload is the source, "
+                 f"not an optional build product)")
+    return False
+
+
 def read(path):
     return path.read_text(encoding="utf-8", errors="replace")
 
@@ -146,6 +196,38 @@ def paragraphs(text):
     line: a wrapped sentence puts 'never' and the thing it forbids on
     different lines, and a line-local check would then fail on correct prose."""
     return re.split(r"\n\s*\n", text)
+
+
+def flatten(text):
+    """`text` with every run of whitespace collapsed to a single space.
+
+    Prose wraps, and a wrapped phrase is still the phrase. CLAUDE.md's GD-U5
+    note really does read "`.claude/settings.json` no\\nlonger carries a
+    `hooks` block", so a literal `"no longer" in block` misses it — and a guard
+    whose exemption vocabulary cannot survive a line break reports the opposite
+    of the truth on correct text. Every phrase-level match flattens first.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+def guard_blocks(text):
+    """`paragraphs()`, except a markdown TABLE is split into its rows.
+
+    A table has no blank lines in it, so `paragraphs()` returns the whole thing
+    as one block — and any per-block exemption then covers every row at once.
+    That is how CLAUDE.md's layout table (one row of which says "moved")
+    silently exempted the other twenty from the dead-path guard. A `|`-row
+    carries its own claim and can carry its own reason, so it is the right
+    unit; everything else stays a paragraph, because prose wraps and a
+    line-local check would then fail on correct text.
+    """
+    for para in paragraphs(text):
+        lines = para.splitlines()
+        if sum(1 for ln in lines if ln.lstrip().startswith("|")) >= 2:
+            for ln in lines:
+                yield ln
+        else:
+            yield para
 
 
 # --------------------------------------------------------------- R-05: CLAUDE.md
@@ -356,27 +438,298 @@ def test_register_is_reachable():
 
 
 # ============================================================================
-# Item 11 — the shipped README and CHANGELOG (the plugin's trust surface)
+# GD-U1 / GD-U4 / GD-U5 — the layout claims, after `plugin/touch/` went canonical
 # ============================================================================
 
-def have_plugin(path):
-    """`have()` for the shipping subtree, with the same distinction.
+#: The documents that TELL A READER WHERE TO LOOK. A path named in one of these
+#: is a direction someone will follow, which is why they are guarded as a set
+#: and why the set is exactly this.
+#:
+#: `inception.md` is deliberately absent: it is a DATED snapshot ("Updated
+#: 2026-07-26") of what was verified about the substrate, and its `.claude/`
+#: paths are the record of a tree that existed then. A guard that forced it
+#: current would destroy the one thing it is for.
+#: Two PAYLOAD files are absent for a different and much less comfortable
+#: reason: NO sub-plan of this migration owns their prose. Both live inside the
+#: tree item 05 moved, and item 05 is a pure rename — editing them from here
+#: would be the scope violation the migration's whole safety argument rests on
+#: — while item 12 owns the documents listed below and not those. Three lines,
+#: exhaustively, so the next reader does not stop at the first file:
+#:   * `plugin/touch/shared/monitoring/monitoring.md:5` — "This module lives in
+#:     `.claude/shared/monitoring/`", the module's own self-location;
+#:   * `plugin/touch/shared/monitoring/monitoring.md:467` — the same path named
+#:     as the non-authoritative state dir;
+#:   * `plugin/touch/touch-visual/app.js:124` — a code comment pointing at
+#:     `.claude/shared/monitoring/monitor_server.py` for the caching precedent.
+#: All three ship to consumers. That is an OPEN, escalated gap, recorded here
+#: and in this sub-plan's returned findings, not a guarded file and not a closed
+#: one. Do NOT read the absence as coverage from somewhere else:
+#: `tests/monitoring/test_shell.py` asserts the module's event schema and
+#: lifecycle, and its only `.claude/shared/monitoring` mentions are `.gitignore`
+#: arms — nothing there checks where the module lives. Whoever is handed those
+#: files: fix the three lines, add `monitoring.md` to DIRECTION_DOCS, delete
+#: this paragraph.
+DIRECTION_DOCS = (README, CLAUDE, CONTRIBUTING)
 
-    A tree that carries no `plugin/touch/` at all is not a regression — the
-    payload gate builds its own stage precisely because the subtree may not be
-    committed yet — so that case SKIPS with a printed reason. A subtree that IS
-    on disk while one of its documents is missing is a real failure, because
-    `plugin.json` claims a README and a LICENSE that a consumer will look for.
-    """
-    if path.is_file():
-        return True
-    rel = path.relative_to(REPO)
-    if not PLUGIN.is_dir():
-        skip(f"{rel}: the shipping subtree is not in this tree")
-        return False
-    check(False, f"{rel} exists (its subtree is on disk, so it must be)")
-    return False
+#: Paths that stopped existing when the plugin became the canonical home. Each
+#: was a live instruction in a committed document at some point, and each now
+#: resolves to nothing: the hook is `plugin/touch/hooks/`, the skills are
+#: `plugin/touch/skills/`, the monitoring module is
+#: `plugin/touch/shared/monitoring/`.
+#:
+#: Matched with the trailing slash STRIPPED, because a doc that writes
+#: `` `.claude/hooks` `` or "the `.claude/skills` directory" directs a reader
+#: exactly as hard as one that writes the slash. None of the three stems has a
+#: live homonym in this tree (`.claude/` still holds `settings.json`,
+#: `statusline.sh`, `shared/scripts/` and the untracked run history — no
+#: `hooks`, no `skills`, no `shared/monitoring`), so the wider match costs no
+#: false positives.
+DEAD_PATHS = (".claude/hooks/", ".claude/skills/", ".claude/shared/monitoring/")
 
+#: Words that mark a mention as HISTORY rather than an instruction. The
+#: exemption is the same bargain `strip_comment()` makes further down: a guard
+#: that cannot tell "run this" from "this is where it used to live" forbids
+#: writing down why the layout changed, and that reason is exactly what stops
+#: the next reader from rebuilding the old one.
+#:
+#: Kept DELIBERATELY narrow. `"until "` and `"moved"` were in this tuple and
+#: cost the guard most of its reach: they are ordinary words, and one of them
+#: appearing anywhere in a block exempted the block. Every mention that
+#: legitimately needs the exemption today (`CLAUDE.md:74`, `CONTRIBUTING.md`'s
+#: pinned-copy history) says "gone" or "no longer" outright, so nothing is
+#: paid for the narrowing — and a sentence that cannot spell out that a path is
+#: retired probably is not saying so.
+RETIRED = ("gone", "no longer", "used to", "does not exist")
+
+
+def test_direction_docs_name_no_dead_claude_path():
+    print("test_direction_docs_name_no_dead_claude_path")
+    bad = []
+    for path in DIRECTION_DOCS:
+        for para in guard_blocks(read(path)):
+            low = para.lower()
+            for dead in DEAD_PATHS:
+                if dead.rstrip("/") in low and not any(r in low for r in RETIRED):
+                    bad.append(f"{path.name}: `{dead}` in {para.strip()[:70]!r}")
+    check(not bad,
+          f"no document that directs a reader names a path GD-U1 retired, "
+          f"except to say it is retired (bad: {bad})")
+
+
+def test_claude_md_layout_table_is_current():
+    print("test_claude_md_layout_table_is_current")
+    text = read(CLAUDE)
+    # DUP-MAP-10: the table listed only the pre-plugin trees, so "why are there
+    # two copies?" had no answer in the file an agent reads first.
+    #
+    # Asserted on the ROW, not on the file. `token in text` said "the layout
+    # table names X" while checking nothing of the kind: `"scripts/"` was
+    # satisfied by the unrelated `shared/scripts/*-sox-installation.sh` mention
+    # in the `.claude/` row, and `"plugin/"` by any of the forty
+    # `plugin/touch/...` references elsewhere in the file — so both rows could
+    # be deleted with the arm still green, which is precisely the DUP-MAP-10
+    # regression it was written for. `guard_blocks()` already splits a markdown
+    # table into rows; a row's FIRST cell is the path it documents.
+    rows = [b.strip() for b in guard_blocks(text) if b.lstrip().startswith("|")]
+    for token in ("plugin/", "scripts/", "tests/monitoring/",
+                  "plugin/touch/aggregator/", "plugin/touch/shared/monitoring/"):
+        check(any(r.startswith(f"| `{token}`") for r in rows),
+              f"CLAUDE.md's layout table has a row whose subject is {token}")
+    check("plugin/touch/hooks/orch_scope_guard.py" in text,
+          "CLAUDE.md names the hook at the path that exists (PLUGIN-RUNTIME-13)")
+    check(".claude/hooks/orch_scope_guard.py" not in text,
+          "CLAUDE.md no longer names the retired hook path")
+    # The same defect one directory over: the hook MANIFEST is
+    # `plugin/touch/hooks/hooks.json`, sibling to the script — NOT
+    # `.claude-plugin/hooks.json`, which has never existed and which
+    # `plugin.json` (no `hooks` key) does not imply. GD-U5's claim is "there is
+    # exactly one registration, and it is here", so the one thing a reader will
+    # open to check must be at the path the sentence gives them.
+    # One property per `check()`: folding the positive and the negative into
+    # one `and` makes a failure message that cannot say which half went red.
+    # The negative is not repeated here — the loop below already asserts it for
+    # CLAUDE.md, because CONTRIBUTING.md carries the same layout table and made
+    # the same mistake, so it is checked across every document that directs.
+    check("hooks/hooks.json" in text,
+          "CLAUDE.md names hooks.json at the path that exists (GD-U5)")
+    for doc in DIRECTION_DOCS:
+        check(".claude-plugin/hooks.json" not in read(doc),
+              f"{doc.name} does not invent a hook manifest under "
+              f"`.claude-plugin/` (it is `hooks/hooks.json`)")
+
+
+def test_claude_md_records_the_single_hook_registration():
+    print("test_claude_md_records_the_single_hook_registration")
+    # GD-U5: the two registrations had the same matcher and fired the hook
+    # TWICE per tool call (measured 2 vs 1). The note exists so the next reader
+    # does not "fix" the absent `.claude/settings.json` block by restoring it.
+    #
+    # `"GD-U5" in text and "settings.json" in text` was the first spelling of
+    # this arm and it could not fail: both substrings are already in CLAUDE.md
+    # independently of the note — `GD-U5` in the `hooks/` layout row,
+    # `settings.json` in the `.claude/` row — so the whole paragraph could be
+    # deleted with the arm still green. Same defect class as the layout-token
+    # arm above. So: locate the note as ONE block, and separately forbid the
+    # sentence that would mean the double registration is back.
+    text = read(CLAUDE)
+    note = [b for b in guard_blocks(text)
+            if "GD-U5" in b and "settings.json" in b
+            and any(r in flatten(b).lower() for r in RETIRED)]
+    check(note,
+          "CLAUDE.md carries the GD-U5 note as one block: the plugin's "
+          "`hooks/hooks.json` is the single registration and "
+          "`.claude/settings.json` no longer carries a `hooks` block")
+    # The negative half, which is what actually bites: a document that tells a
+    # reader the guard IS registered in `.claude/settings.json` is the
+    # regression, half-landed in prose. Exempt a block that says the
+    # registration is retired (`RETIRED`, the file's own vocabulary) or states
+    # it in the negative — CLAUDE.md's `.claude/` section says "it registers NO
+    # hooks", which is the true sentence and must not trip the guard.
+    #
+    # Checked per SENTENCE, not per block. "Rules that bite" is a bullet list
+    # with no blank lines in it, so `guard_blocks()` hands back the whole list
+    # as ONE unit — and the true note's "no longer" then exempts every other
+    # bullet in it, including a freshly added "the guard is also registered in
+    # `.claude/settings.json`". That is the same one-exemption-covers-the-lot
+    # failure `guard_blocks()` was written to fix for tables, one construct
+    # over; a sentence is the unit that carries this claim, and it is the unit
+    # that must carry the reason.
+    negated = ("no hooks", "registers no", "not registered", "never registered")
+    restored = []
+    for doc in DIRECTION_DOCS:
+        for sentence in re.split(r"(?<=[.!?])\s+", flatten(read(doc))):
+            low = sentence.lower()
+            if ".claude/settings.json" not in low or "regist" not in low:
+                continue
+            if any(r in low for r in RETIRED) or any(n in low for n in negated):
+                continue
+            restored.append(f"{doc.name}: {sentence.strip()[:70]}")
+    check(not restored,
+          f"no document says the scope guard is registered in "
+          f"`.claude/settings.json` — the plugin's `hooks/hooks.json` is the "
+          f"one and only registration (GD-U5) (bad: {restored})")
+
+
+def test_claude_md_status_sh_fallback_is_the_real_one():
+    print("test_claude_md_status_sh_fallback_is_the_real_one")
+    text = read(CLAUDE)
+    # `status.sh` does NOT spool into its own directory when `ORCH_STATE_DIR`
+    # is unset. It resolves the project's tasks root, writes the newest task
+    # folder there with a loud warning, and exits 2 when that fails too —
+    # deliberately, because "a spool nobody reads is data loss with extra
+    # steps" and an installed payload is a version-stamped cache that gets
+    # swept. GD-U1 sharpened this rather than softening it: the "module dir"
+    # is now INSIDE the payload, i.e. the exact write `in_plugin_cache()`
+    # exists to refuse.
+    #
+    # The negative is the load-bearing half. CLAUDE.md carried the true ladder
+    # in "Rules that bite" AND the retired fallback in the monitoring section,
+    # 195 lines apart — two mutually exclusive behaviours for one program —
+    # and a positive-only guard passes happily while the false sentence sits
+    # next to the true one.
+    check("falls back to the module dir" not in text,
+          "CLAUDE.md does not promise the retired module-dir spool for `status.sh`")
+    check("exits 2" in text,
+          "CLAUDE.md states what `status.sh` does when it cannot resolve a task "
+          "folder (exit 2 — never a write into the payload)")
+
+
+def test_entry_points_are_the_wrappers():
+    print("test_entry_points_are_the_wrappers")
+    # GD-U4 / SINGLE-SOURCE-10: one supported entry point per program. The
+    # module-direct form survives in exactly one shape — carrying the
+    # PYTHONPATH that makes it work at all now that there is no root package.
+    for path in DIRECTION_DOCS:
+        text = read(path)
+        for cmd in ("touch-serve", "touch-monitor", "touch-watcher"):
+            check(cmd in text, f"{path.name} names the `{cmd}` entry point (GD-U4)")
+        # Normalise whitespace first, then match, then exempt by looking for
+        # the PYTHONPATH assignment ANYWHERE earlier on the line. The obvious
+        # spelling — a fixed-width lookbehind on one literal — is wrong twice
+        # over: `PYTHONPATH="plugin/touch" python3 …`, a double space or a
+        # leading `env ` all become FALSE POSITIVES (the guard fires on correct
+        # text), while `python3 -c "import aggregator…"`, the shape CLAUDE.md
+        # actually uses for the mirror, is not matched at all — so half the
+        # "there is no root package to import" property went unguarded.
+        bare = []
+        for ln in text.splitlines():
+            flat = re.sub(r"\s+", " ", ln)
+            m = re.search(r"python3 (?:-\w+ )*(?:-m aggregator|-c [\"']import aggregator)",
+                          flat)
+            if m is None:
+                continue
+            if re.search(r"PYTHONPATH=[\"']?plugin/touch", flat[:m.start()]):
+                continue
+            bare.append(ln.strip())
+        check(not bare,
+              f"{path.name}: every `python3 -m aggregator…` / `python3 -c "
+              f"\"import aggregator…\"` carries `PYTHONPATH=plugin/touch` — "
+              f"there is no root package to import (bad: {bare})")
+    # test_readme_run_section pins the substring `python3 -m aggregator.server`;
+    # GD-U4 keeps it literally true rather than deleting the pin.
+    check("PYTHONPATH=plugin/touch python3 -m aggregator.server" in read(README),
+          "the README's one module-direct line is the PYTHONPATH form (GD-U4)")
+
+
+def test_shipped_docs_quote_measured_skill_costs():
+    print("test_shipped_docs_quote_measured_skill_costs")
+    if not (have_plugin(PLUGIN_README) and have_plugin(PLUGIN_CHANGELOG)):
+        return
+    # SKILLS-INTEGRATION-11: the count and the token figure were written out in
+    # prose in nine places, and 459/"four skills" became false the day the six
+    # engineering-practice skills landed. Both numbers are MEASURED claims
+    # (`claude --plugin-dir plugin/touch plugin details touch`), the same
+    # standard the hook's ~22 ms disclosure is held to two functions up.
+    readme = read(PLUGIN_README)
+    check("1,257" in readme,
+          "the shipped README quotes the re-measured always-on figure")
+    check(re.search(r"~459 tokens\s+always-on", readme) is None,
+          "the shipped README no longer quotes 459 as the CURRENT always-on cost")
+    # The `or "~1,257" in readme` this arm used to carry was satisfied by the
+    # substring the arm above already requires, so it could not fail while that
+    # one passed — a tautology dressed as a second check. The count claim has to
+    # stand on its own.
+    check("ten skills" in readme.lower(),
+          "the shipped README says how many skills that figure covers")
+    for name in ("architecture-boundaries", "architecture-tradeoffs",
+                 "code-quality-review", "pattern-selection",
+                 "refactoring-pass", "testing-discipline"):
+        check(f"/touch:{name}" in readme,
+              f"the shipped README's skill table lists /touch:{name}")
+    # SKILLS-CONTENT-14: the six are condensations of named books shipping
+    # under MIT. The attribution must say derived-from, not "here are the
+    # books".
+    check("not the works themselves" in readme,
+          "the shipped README says the six are condensed guidance, not the works")
+    check("1,257" in read(PLUGIN_CHANGELOG),
+          "the CHANGELOG entry that adds the six also prices them")
+
+
+def test_manifest_declares_both_skill_families():
+    print("test_manifest_declares_both_skill_families")
+    if not have_plugin(PLUGIN_MANIFEST):
+        return
+    raw = read(PLUGIN_MANIFEST)
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        check(False, f"plugin.json is valid JSON ({exc})")
+        return
+    desc = manifest.get("description", "")
+    # SKILLS-CONTENT-13 / SKILLS-INTEGRATION-6: the `/plugin` UI shows this
+    # string and never the README, so a user who enables Touch on it must not
+    # then discover six skills nobody mentioned.
+    check("engineering-practice" in desc,
+          "the manifest description names the second skill family "
+          "(SKILLS-CONTENT-13)")
+    keywords = manifest.get("keywords") or []
+    for kw in ("code-quality", "architecture"):
+        check(kw in keywords, f"keywords carry `{kw}`")
+
+
+# ============================================================================
+# Item 11 — the shipped README and CHANGELOG (the plugin's trust surface)
+# ============================================================================
 
 def parenthesized(text, index):
     """True when `text[index]` sits inside a `(...)` on the same block.
@@ -965,6 +1318,14 @@ def main():
               test_control_semantics_doc,
               test_docs_agree_on_restart,
               test_register_is_reachable,
+              # GD-U1/-U4/-U5 — the layout claims after the migration
+              test_direction_docs_name_no_dead_claude_path,
+              test_claude_md_layout_table_is_current,
+              test_claude_md_records_the_single_hook_registration,
+              test_claude_md_status_sh_fallback_is_the_real_one,
+              test_entry_points_are_the_wrappers,
+              test_shipped_docs_quote_measured_skill_costs,
+              test_manifest_declares_both_skill_families,
               # item 11 — the shipped README / CHANGELOG
               test_plugin_readme_install_and_update_commands,
               test_plugin_readme_trust_section,

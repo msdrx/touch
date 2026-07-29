@@ -48,7 +48,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import mirror as mr                            # noqa: E402
@@ -229,7 +233,7 @@ def run(coro):
 # --- GD-21: the dependency is lazy, and its absence is a state ------------
 def test_pymongo_is_lazy_and_its_absence_is_a_state():
     print("test_pymongo_is_lazy_and_its_absence_is_a_state")
-    tree = ast.parse((REPO / "aggregator" / "mirror.py").read_text(encoding="utf-8"))
+    tree = ast.parse((SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8"))
 
     top_level = []
     for node in tree.body:
@@ -273,7 +277,7 @@ def test_pymongo_is_lazy_and_its_absence_is_a_state():
 # --- GD-30: enqueue is the only thing the poll loop calls -----------------
 def test_enqueue_never_blocks_never_raises_and_never_awaits():
     print("test_enqueue_never_blocks_never_raises_and_never_awaits")
-    source = (REPO / "aggregator" / "mirror.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     enqueue = next(n for n in ast.walk(tree)
                    if isinstance(n, ast.FunctionDef) and n.name == "enqueue")
@@ -1280,7 +1284,7 @@ def test_the_scrub_runs_once_per_operation_and_off_the_poll_loop():
 
 def test_the_module_has_no_delete_verbs_outside_the_one_exception():
     print("test_the_module_has_no_delete_verbs_outside_the_one_exception")
-    source = (REPO / "aggregator" / "mirror.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     # Over the AST, not the text: the module's own prose explains which verbs it
@@ -1340,7 +1344,7 @@ def test_the_module_has_no_delete_verbs_outside_the_one_exception():
 # --- R-45: backfill and rebuild ------------------------------------------
 def test_backfill_is_never_live_and_refuses_a_future_timestamp():
     print("test_backfill_is_never_live_and_refuses_a_future_timestamp")
-    source = (REPO / "aggregator" / "mirror.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     backfill = next(n for n in ast.walk(tree)
                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "backfill")
@@ -1496,7 +1500,7 @@ def test_the_backfill_walk_is_wired_to_the_cli():
 
     # The seam is declared, not implied: the signature sp-07…sp-11 implement
     # against is in `iter_sources`'s docstring, and `main()` calls the walk.
-    source_text = (REPO / "aggregator" / "mirror.py").read_text(encoding="utf-8")
+    source_text = (SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8")
     tree = ast.parse(source_text)
     main_fn = next(n for n in ast.walk(tree)
                    if isinstance(n, ast.FunctionDef) and n.name == "main")
@@ -1712,6 +1716,73 @@ def test_the_owned_suites_are_executable_like_their_siblings():
               f"…and carries the shebang that makes the mode mean something: {first!r}")
 
 
+def test_user_facing_messages_name_a_path_the_reader_can_open():
+    print("test_user_facing_messages_name_a_path_the_reader_can_open")
+    # PLUGIN-RUNTIME-10. "see docs/mongo.md" is true for someone standing in
+    # this checkout and false for everyone else: under a plugin install the
+    # reader's cwd is their own project, and the file lives inside a
+    # version-stamped cache directory whose name they have no reason to know.
+    # Since GD-U1 `docs/` is a sibling of the package under the plugin root, so
+    # the resolved path is correct in both deployments.
+    resolved = mr.mongo_doc_path()
+    check(os.path.isabs(resolved), f"the doc path is absolute: {resolved}")
+    check(os.path.isfile(resolved), f"…and it exists on disk: {resolved}")
+    check(os.path.basename(resolved) == "mongo.md"
+          and os.path.basename(os.path.dirname(resolved)) == "docs",
+          f"…and it is docs/mongo.md, not some other file: {resolved}")
+
+    # The message that carries it. The refusal branch needs a mongod reporting
+    # zero users, which no fake backend here models, so this half is a
+    # source-text guard (the house form for "the fixed pattern is present and
+    # the vulnerable one is absent") scoped to that one message.
+    source = (SRC / "aggregator" / "mirror.py").read_text(encoding="utf-8")
+    emitted = re.search(r"reports zero configured users.*?\)", source, re.S)
+    check(emitted is not None, "the zero-users refusal message is still there")
+    if emitted:
+        check("mongo_doc_path()" in emitted.group(0),
+              "…and it interpolates the resolved path, not a relative one")
+        check("docs/mongo.md" not in emitted.group(0),
+              f"…and carries no bare relative `docs/mongo.md`: "
+              f"{emitted.group(0)[:200]!r}")
+
+    # And no OTHER emitted string does either. Comments and docstrings keep the
+    # repo-relative spelling on purpose — they address a developer reading the
+    # file — so the arm looks at string literals only, via the AST.
+    for name in ("mirror.py", "server.py"):
+        tree = ast.parse((SRC / "aggregator" / name).read_text(encoding="utf-8"))
+        # Exempt docstrings by NODE IDENTITY, never by value: a runtime literal
+        # that merely happens to equal some docstring must not inherit the
+        # exemption by coincidence.
+        doc_nodes = set()
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None) if isinstance(
+                node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                       ast.ClassDef)) else None
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                doc_nodes.add(id(body[0].value))
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) not in doc_nodes and "docs/mongo.md" in node.value:
+                    offenders.append(node.value)
+            elif isinstance(node, ast.JoinedStr):
+                # An f-string is fragments, so the substring never appears in
+                # one Constant: join the literal parts before testing. The
+                # FIXED form is itself an f-string, which makes the f-string
+                # the most likely way the bare path comes back.
+                joined = "".join(
+                    part.value for part in node.values
+                    if isinstance(part, ast.Constant)
+                    and isinstance(part.value, str))
+                if "docs/mongo.md" in joined:
+                    offenders.append(joined)
+        check(not offenders,
+              f"aggregator/{name}: no runtime string names the bare relative "
+              f"`docs/mongo.md` (found: {[o[:80] for o in offenders]})")
+
+
 def test_cursors_round_trip_as_tailer_checkpoints():
     print("test_cursors_round_trip_as_tailer_checkpoints")
     mirror, backend = live_mirror()
@@ -1864,7 +1935,7 @@ def test_one_kind_has_one_owner_and_mapper_output_is_validated():
     # so this asserts the rule against whichever have landed.
     checked = 0
     for name in mr.ENTITY_MODULES:
-        path = REPO / "aggregator" / f"{name}.py"
+        path = SRC / "aggregator" / f"{name}.py"
         if not path.exists():
             continue
         checked += 1
@@ -1917,7 +1988,7 @@ def test_health_is_r45s_block_and_carries_no_credential():
     # code (`backend` and `db` were returned and undocumented). Asserted in both
     # directions: a field added here without a doc edit is an undocumented API,
     # and a field documented without being returned is a lie to sp-12.
-    page = (REPO / "docs" / "mongo.md").read_text(encoding="utf-8")
+    page = (SRC / "docs" / "mongo.md").read_text(encoding="utf-8")
     match = re.search(r"`mirror` block is\s*\n?`\{([^}]*)\}`", page)
     check(match is not None, "docs/mongo.md states the /health mirror block's fields")
     if match:
@@ -2193,6 +2264,7 @@ def main():
         test_wipe_and_rebuild_produce_the_same_fingerprint,
         test_rebuild_survives_an_unmapped_kind_and_keeps_derived,
         test_the_owned_suites_are_executable_like_their_siblings,
+        test_user_facing_messages_name_a_path_the_reader_can_open,
         test_cursors_round_trip_as_tailer_checkpoints,
         test_one_kind_has_one_owner_and_mapper_output_is_validated,
         test_health_is_r45s_block_and_carries_no_credential,

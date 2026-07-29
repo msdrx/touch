@@ -7,7 +7,9 @@
 # (GD-20) and a green Touch suite over a red monitoring suite would be a lie:
 #
 #   tests/test_*.py                              — Touch's own
-#   .claude/shared/monitoring/tests/test_*.py    — the module's
+#   tests/monitoring/test_*.py                   — the module's (GD-U6: the
+#                                                  module's dev-only material
+#                                                  lives OUTSIDE the payload)
 #
 # Registration is by GLOB, not by a hand-maintained list: dropping a
 # `test_<thing>.py` into either directory registers it, and nothing else in
@@ -55,7 +57,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MON="$REPO/.claude/shared/monitoring/tests"
+MON="$REPO/tests/monitoring"
 export PYTHONDONTWRITEBYTECODE=1
 PY="${PYTHON:-python3}"
 

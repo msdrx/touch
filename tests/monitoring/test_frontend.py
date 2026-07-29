@@ -17,8 +17,14 @@ import os
 import re
 import sys
 
-HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "monitor.html")
-PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "monitor_server.py")
+# The module under test is named through `tests/_roots.py` (GD-U1/GD-U6): this
+# file lives in `tests/monitoring/`, the module it asserts about does not.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _roots import MON                                  # noqa: E402
+
+HTML = os.path.join(str(MON), "monitor.html")
+PY = os.path.join(str(MON), "monitor_server.py")
 
 
 def _slice(src, start_marker, end_marker=None):

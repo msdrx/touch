@@ -347,6 +347,23 @@ _SCHEME_SEP = "://"
 _SCHEMES = ("mongodb", "mongodb" + "+srv")
 
 
+def mongo_doc_path() -> str:
+    """The absolute path of the database recipe, for user-facing messages.
+
+    A message that says "see `docs/mongo.md`" is only true for someone standing
+    in this checkout (PLUGIN-RUNTIME-10). Under a plugin install the reader's
+    cwd is their OWN project, which has no `docs/`; the file lives inside a
+    version-stamped cache directory they have no reason to know the name of.
+    Since GD-U1 `docs/` is a sibling of this package under the plugin root, so
+    :func:`paths.plugin_root` resolves it correctly in both cases — and the
+    printed string is something the reader can actually open.
+
+    Comments and docstrings still say `docs/mongo.md`: they address a developer
+    reading this file, for whom the repo-relative name is the clearer one.
+    """
+    return os.path.join(paths.plugin_root(), "docs", "mongo.md")
+
+
 # --- redaction ------------------------------------------------------------
 
 
@@ -1854,8 +1871,8 @@ class Mirror:
             self.state = STATE_REFUSED
             self.last_error = (
                 "the mongod reports zero configured users: it is unauthenticated, and "
-                "Touch will not mirror transcripts into it — see docs/mongo.md for the "
-                "loopback+auth recipe (GD-27)")
+                f"Touch will not mirror transcripts into it — see {mongo_doc_path()} "
+                "for the loopback+auth recipe (GD-27)")
             return self.state
         if ensure_schema:
             try:

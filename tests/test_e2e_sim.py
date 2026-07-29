@@ -62,7 +62,11 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import MON, SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import agents as agents_mod                       # noqa: E402
 from aggregator import ingest as ingest_mod                       # noqa: E402
@@ -78,7 +82,7 @@ FIX = REPO / "tests" / "fixtures"
 RUN_FIX = FIX / "run-wf_829e6f58"
 DISCOVERY = FIX / "mirror" / "discovery"
 LEGACY_FIX = FIX / "legacy"
-WATCHER = REPO / ".claude" / "shared" / "monitoring" / "decision_watcher.py"
+WATCHER = MON / "decision_watcher.py"
 
 #: The run ids and session ids the plan names. Spelled out because every
 #: assertion below is about *these* specimens, not about "some run".
@@ -500,7 +504,7 @@ def test_a_bare_checkout_reduces_to_the_same_state():
 
         result = subprocess.run(
             [sys.executable, "-c", _BARE_CHECKOUT_CHILD],
-            cwd=str(REPO), env={**os.environ, **corpus.env,
+            cwd=str(SRC), env={**os.environ, **corpus.env,
                                 "PYTHONDONTWRITEBYTECODE": "1"},
             capture_output=True, text=True, timeout=300)
         if result.returncode != 0:

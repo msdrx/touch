@@ -15,7 +15,13 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODULE_PATH = os.path.abspath(os.path.join(HERE, "..", "monitor_server.py"))
+# The module under test is named through `tests/_roots.py` (GD-U1/GD-U6): this
+# file lives in `tests/monitoring/`, the module it loads does not.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+sys.path.insert(0, os.path.dirname(HERE))
+from _roots import MON                                  # noqa: E402
+
+MODULE_PATH = os.path.join(str(MON), "monitor_server.py")
 
 # Resolve STATE_DIR/PORT at import to a throwaway dir so nothing touches the
 # live task folder. No server is started (main() is never called).
@@ -406,9 +412,9 @@ def test_plan_states_last_event_wins():
 #
 # The corpus lives in the REPO (`<repo>/tests/fixtures/legacy`), never in the
 # module, and the module ships without it. Resolve it by walking UP from this
-# file rather than by a fixed count of `..` hops: the module sits at
-# `<repo>/.claude/shared/monitoring/tests/` here and one level shallower inside
-# a plugin, and a hop count that is right for one layout silently points at a
+# file rather than by a fixed count of `..` hops: this file sits at
+# `<repo>/tests/monitoring/` here (GD-U6) and its ancestors differ in any other
+# checkout, and a hop count that is right for one layout silently points at a
 # stranger's directory in the other. When the walk finds nothing, every read
 # skips with a printed reason and `run_all.sh` reports the count.
 #
@@ -553,7 +559,7 @@ def test_no_root_events_shortcircuit():
 # Item 04 — one tasks-root resolver, duplicated verbatim in both daemons.
 # --------------------------------------------------------------------------
 
-WATCHER_PATH = os.path.abspath(os.path.join(HERE, "..", "decision_watcher.py"))
+WATCHER_PATH = os.path.join(str(MON), "decision_watcher.py")
 
 
 def _function_source(path, name):
@@ -596,6 +602,9 @@ def _tasks_root(env, cwd, as_file=WATCHER_PATH):
     import subprocess
     clean = {k: v for k, v in os.environ.items()
              if k not in ("ORCH_TASKS_ROOT", "CLAUDE_PROJECT_DIR", "ORCH_STATE_DIR")}
+    # no .pyc droppings in the payload tree — the parent's
+    # sys.dont_write_bytecode does not reach a child
+    clean["PYTHONDONTWRITEBYTECODE"] = "1"
     clean.update(env)
     code = (
         "import os\n"
@@ -812,6 +821,10 @@ def _boot_probe(env, argv, expr):
     import subprocess
     clean = {k: v for k, v in os.environ.items()
              if not k.startswith(("ORCH_", "CLAUDE_"))}
+    # no .pyc droppings in the payload tree — the parent's
+    # sys.dont_write_bytecode does not reach a child, and the comprehension
+    # above strips only ORCH_/CLAUDE_, so this has to be set explicitly
+    clean["PYTHONDONTWRITEBYTECODE"] = "1"
     clean["ORCH_STATE_DIR"] = _STATE_DIR
     clean.update(env)
     code = (
@@ -992,7 +1005,7 @@ def test_the_token_file_is_written_0600():
 
 def test_the_page_plumbs_the_token_through_every_gated_url():
     """monitor.html is never executed here — the assertion is on source text."""
-    html = open(os.path.join(HERE, "..", "monitor.html"), encoding="utf-8").read()
+    html = open(os.path.join(str(MON), "monitor.html"), encoding="utf-8").read()
     assert 'const TOKEN = new URLSearchParams(location.search).get("token") || "";' in html
     assert 'withToken("/tasks")' in html
     assert 'withToken("/artifacts?task="' in html
@@ -1026,7 +1039,7 @@ def test_the_page_says_token_instead_of_failing_silently():
     a rejected handshake, so "never opened + no token" is the only evidence
     there is, and without it the page opens a fresh socket every 1-10 s forever.
     """
-    html = open(os.path.join(HERE, "..", "monitor.html"), encoding="utf-8").read()
+    html = open(os.path.join(str(MON), "monitor.html"), encoding="utf-8").read()
     assert 'id="authBanner"' in html, "no banner element to put the reason in"
     assert "function showAuthBanner(" in html
     assert "TOKEN_HINT" in html and "monitor.json" in html, \

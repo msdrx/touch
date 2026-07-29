@@ -38,7 +38,10 @@ task folder, inside the user's project), deciding only:
    that literal expands to right here, in this instruction.
 2. TARGETED_TEST_COMMAND / FULL_SUITE_COMMAND / BASELINE_NOTES, folding in
    `<test_hints>`.
-3. REVIEW_CHECKLIST for the critique.
+3. REVIEW_CHECKLIST for the critique — the `/touch:code-quality-review` skill
+   is a ready-made checklist to fold in (its severities are already the
+   blocker/major/minor/nit vocabulary the critique schema gates on); load it
+   only when the run wants it, since it is paid per attempt.
 4. Serial vs parallel, per the strategy above.
 
 Run it, keeping the template's invariants:

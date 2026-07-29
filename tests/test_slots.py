@@ -40,7 +40,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import PAYLOAD, SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import custom_state as cs                       # noqa: E402
@@ -65,12 +69,12 @@ from aggregator.custom_state import (                           # noqa: E402
 failures = []
 skipped = []
 
-MODULE = REPO / "aggregator" / "custom_state.py"
+MODULE = SRC / "aggregator" / "custom_state.py"
 # The skill MOVED into the shipping subtree and lost its `touch-` prefix (item
 # 09: a plugin skill invokes as `/<plugin>:<skill>`, so `touch-orchestrate`
 # inside a plugin named `touch` read `/touch:touch-orchestrate`). One canonical
 # copy, in the payload — this constant follows it.
-SKILL = REPO / "plugin" / "touch" / "skills" / "orchestrate" / "SKILL.md"
+SKILL = PAYLOAD / "skills" / "orchestrate" / "SKILL.md"
 AGENT = "a2fc883c96ff7b837"
 AGENT2 = "b1de44f0c1e2a3b45"
 SESSION = "622-10028"                 # <pid>-<procStart>, the live session key

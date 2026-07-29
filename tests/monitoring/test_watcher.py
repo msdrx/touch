@@ -19,7 +19,13 @@ import sys
 import tempfile
 import time
 
-MOD_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The module under test is named through `tests/_roots.py` (GD-U1/GD-U6): this
+# file lives in `tests/monitoring/`, the module it imports does not.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _roots import MON                                  # noqa: E402
+
+MOD_DIR = str(MON)
 if MOD_DIR not in sys.path:
     sys.path.insert(0, MOD_DIR)
 
@@ -94,11 +100,11 @@ def is_repo_corpus(fixtures):
 def find_repo_fixtures(start=None):
     """`<repo>/tests/fixtures`, found by walking up — or None.
 
-    Walking up rather than counting `..` hops: the module sits at
-    `<repo>/.claude/shared/monitoring/` here and one level shallower inside a
-    plugin, and a hop count that is right for one layout points at a stranger's
-    directory in the other. None means "not in a repo checkout" and every arm
-    below skips.
+    Walking up rather than counting `..` hops: this file sits at
+    `<repo>/tests/monitoring/` here (GD-U6) and at a different depth in any
+    other checkout, and a hop count that is right for one layout points at a
+    stranger's directory in the other. None means "not in a repo checkout" and
+    every arm below skips.
 
     The walk is ANCHORED by is_repo_corpus(): an unanchored walk installed under
     an unrelated project would accept the first `tests/fixtures/legacy` it met
@@ -522,7 +528,10 @@ def _tick_in_env(value):
     out = subprocess.run(
         [sys.executable, "-c",
          "import decision_watcher as d; print(d.TOKEN_TICK_SECS)"],
-        env=dict(os.environ, ORCH_TOKEN_TICK_SECS=value),
+        # no .pyc droppings in the payload tree — the parent's
+        # sys.dont_write_bytecode does not reach a child
+        env=dict(os.environ, ORCH_TOKEN_TICK_SECS=value,
+                 PYTHONDONTWRITEBYTECODE="1"),
         cwd=MOD_DIR, capture_output=True, text=True)
     return out.stdout.strip()
 
@@ -1605,6 +1614,9 @@ def run_watcher(state_dir, wf_dir, env_extra=None, wait=6.0, during=None,
     env["ORCH_WF_DIR"] = wf_dir
     env["ORCH_WF_GLOB_ROOT"] = glob_root or os.path.join(BASE, "glob")
     env["ORCH_DRAIN_SECS"] = "0"
+    # no .pyc droppings in the payload tree — the parent's
+    # sys.dont_write_bytecode does not reach a child
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(env_extra or {})
     proc = subprocess.Popen([sys.executable, WATCHER], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -2431,8 +2443,11 @@ print(json.dumps({"cache": sorted(os.path.basename(p) for p in d._USAGE_CACHE),
 """
 bf_out = subprocess.run(
     [sys.executable, "-c", BACKFILL_PROBE],
+    # no .pyc droppings in the payload tree — the parent's
+    # sys.dont_write_bytecode does not reach a child
     env=dict(os.environ, ORCH_STATE_DIR=bf_state, ORCH_WF_DIR=bf_wf,
-             ORCH_WF_GLOB_ROOT=os.path.join(BASE, "glob")),
+             ORCH_WF_GLOB_ROOT=os.path.join(BASE, "glob"),
+             PYTHONDONTWRITEBYTECODE="1"),
     cwd=MOD_DIR, capture_output=True, text=True)
 bf = json.loads(bf_out.stdout.strip().splitlines()[-1]) if bf_out.stdout.strip() else {}
 bf_tokens = [e for e in events_of(bf_state) if e["stage"] == "tokens"]

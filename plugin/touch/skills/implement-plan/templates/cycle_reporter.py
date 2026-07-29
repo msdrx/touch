@@ -112,14 +112,41 @@ class Reporter:
         self._load_state()
 
     def _find_status_sh(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        for cand in (
-            os.path.join(self.task, "..", "..", "shared", "monitoring", "status.sh"),
-            os.path.join(here, "..", "..", "..", "shared", "monitoring", "status.sh"),
-        ):
-            cand = os.path.normpath(cand)
-            if os.path.isfile(cand):
-                return cand
+        """The plugin's OWN status.sh — one candidate, deliberately.
+
+        There used to be a first candidate derived from `self.task`
+        (`$ORCH_STATE_DIR/../../shared/monitoring/status.sh` — a monitoring
+        copy inside the reported-on project's own dot-claude directory). It is
+        deleted, not merely reordered: the reporter feeds this path to `bash`
+        below, so that rung executed a PROJECT-controlled script with the
+        plugin's authority — and Touch's docs used to tell people to keep
+        exactly such a file. Where one existed it also shadowed the payload
+        copy, so drift between the two was invisible during development and
+        would surface only on a stranger's machine. The payload copy IS the
+        canonical monitoring module; a project-side copy has no legitimate
+        resolution target anywhere.
+
+        `templates/` -> `implement-plan/` -> `skills/` -> the plugin root, and
+        `bin/touch-cycle-reporter` guarantees `here` is that templates
+        directory, so this resolves under every install.
+
+        The "payload incomplete" warning is deliberately gated on
+        `self.emit_status`: under `--no-status` the reporter never spawns
+        status.sh at all, so its absence is not an error for that mode. Do not
+        ungate it — the repo's own test suite pins the quiet path.
+        """
+        # realpath, not abspath: it resolves symlinks, so this agrees with
+        # `bin/touch-cycle-reporter`'s `readlink -f "$0"`. With no fallback
+        # rung left, a link on the way in must not cost the reporter its
+        # status.sh.
+        here = os.path.dirname(os.path.realpath(__file__))
+        cand = os.path.normpath(
+            os.path.join(here, "..", "..", "..", "shared", "monitoring", "status.sh"))
+        if os.path.isfile(cand):
+            return cand
+        if self.emit_status:
+            print(f"status.sh not found at {cand}; payload incomplete — "
+                  "no loop-close events will be emitted", file=sys.stderr)
         return None
 
     # -- checkpoint ---------------------------------------------------------
@@ -255,6 +282,8 @@ class Reporter:
         else:
             msg = f"attempts exhausted {info['attempt']}/{info['cap']} ({info['cls']})"
         try:
+            # self.status_sh is always the payload's own script (see
+            # _find_status_sh) — never a path the reported-on project supplies.
             r = subprocess.run(
                 ["bash", self.status_sh, plan, "plan", info["state"], msg],
                 env={**os.environ, "ORCH_STATE_DIR": self.task},

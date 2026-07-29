@@ -31,7 +31,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import refs                                    # noqa: E402
@@ -523,7 +527,7 @@ def test_provenance_and_agent_exemptions_agree():
 # --- purity (SD-1) --------------------------------------------------------
 def test_the_module_is_pure():
     print("test_the_module_is_pure")
-    tree = ast.parse((REPO / "aggregator" / "refs.py").read_text())
+    tree = ast.parse((SRC / "aggregator" / "refs.py").read_text())
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

@@ -41,7 +41,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 
 from aggregator import legacy as lg                            # noqa: E402
 from aggregator import mongo_store as ms                       # noqa: E402
@@ -824,7 +828,7 @@ def test_the_rollup_replica_still_matches_the_page():
     # `_rollup_list_per_plan` is only evidence about the page while it is the
     # same rule as the page's. Source text, the house convention for app.js
     # (tests/test_touch_frontend.py) — the JS is never executed by Python.
-    source = (REPO / "touch-visual" / "app.js").read_text(encoding="utf-8")
+    source = (SRC / "touch-visual" / "app.js").read_text(encoding="utf-8")
     start = source.find("function rollupList(")
     check(start != -1, "app.js still defines rollupList")
     end = source.find("\n}", start)
@@ -909,7 +913,7 @@ def test_the_watcher_checkpoint_is_never_read():
     # GD-14/RUNSTATE-5: `.watcher-state.json` contradicts its own stream and is
     # never closed on kill. Asserted three ways, because "we just don't" is not
     # an assertion.
-    source = (REPO / "aggregator" / "legacy.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "legacy.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     literals = [node for node in ast.walk(tree)
                 if isinstance(node, ast.Constant) and node.value == ".watcher-state.json"]
@@ -1188,7 +1192,7 @@ def test_the_mapping_half_is_pure():
     # SD-1: mappers do no I/O and read no clock. `tests/test_mirror.py` walks
     # every entity module for the driver import; this walks the mappers
     # themselves, which is the half a package-name grep cannot see.
-    source = (REPO / "aggregator" / "legacy.py").read_text(encoding="utf-8")
+    source = (SRC / "aggregator" / "legacy.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     banned_calls = {"open", "print", "input"}
     banned_attrs = ("os.", "time.", "random.", "subprocess.", "socket.")

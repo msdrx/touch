@@ -321,6 +321,45 @@ else
     fail "git archive HEAD:$PLUGIN failed — is the subtree committed?"
 fi
 
+# The payload is copies, only ever copies — and the count above is exactly why
+# this needs its own gate: `find -type f` does not count symlinks, so a stage
+# whose components are all dangling links reports a plausible number and sails
+# on to step 8's `cp -a`, which copies the dangle into the release clone.
+#
+# GD-U2, the CORRECTED law (probed three ways on CLI 2.1.220, 2026-07-28; the
+# old "a symlink is SKIPPED under --plugin-dir" rationale is REFUTED and must
+# never be re-derived):
+#   --plugin-dir <directory>          escaping symlinks are HONOURED
+#   --plugin-dir <zip> / --plugin-url SILENTLY DROPPED — the plugin loads,
+#                                     reports one fewer component, says nothing
+#   git archive of the subtree        preserved verbatim, so the link DANGLES
+#                                     (there is no target inside the archive)
+# The ban is therefore a PACKAGING rule about archived payloads, which is this
+# script's business and not the dev loop's.
+if [ "$staged" = yes ]; then
+    # Strip the stage prefix with `${link#"$STAGE"/}`, not `sed "s#^$STAGE/##"`:
+    # $STAGE comes from `mktemp -d` under $TMPDIR and would be interpolated into
+    # a BRE, where a regex metacharacter in TMPDIR mangles the reported paths.
+    # Join with ", " rather than `tr '\n' ' '` so a path containing a space
+    # cannot read as two separate links.
+    links=""
+    link_count=0
+    while IFS= read -r link; do
+        [ -n "$link" ] || continue
+        link_count=$((link_count + 1))
+        links="$links${links:+, }${link#"$STAGE"/}"
+    done <<<"$(find "$STAGE" -type l | sort)"
+    if [ "$link_count" -eq 0 ]; then
+        ok "the stage contains no symlink (an archived link would ship dangling)"
+    else
+        fail "the stage contains $link_count symlink(s) — they ship DANGLING (or vanish from a zip install): $links"
+    fi
+else
+    # Every other conditional gate in this file announces itself; a silent one is
+    # indistinguishable from a deleted one in a --check transcript.
+    skip "the stage was not built (see step 5) — the symlink gate has nothing to walk"
+fi
+
 # --- 6. validate both manifests, by explicit file path ---------------------
 # GD-T7: validate is a SCHEMA check and nothing more — it passes a tree full of
 # `sk-ant-` blobs without a murmur, which is why step 2's payload gate is the

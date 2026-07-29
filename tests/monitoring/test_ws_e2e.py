@@ -47,8 +47,14 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODULE_PATH = os.path.abspath(os.path.join(HERE, "..", "monitor_server.py"))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+# The module under test is named through `tests/_roots.py` (GD-U1/GD-U6): this
+# file lives in `tests/monitoring/`, the module it loads does not.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+sys.path.insert(0, os.path.dirname(HERE))
+import _roots                                           # noqa: E402
+
+MODULE_PATH = os.path.join(str(_roots.MON), "monitor_server.py")
+REPO = str(_roots.REPO)
 FIXTURE = os.path.join(REPO, "tests", "fixtures", "legacy",
                        "touch-mongo-live-events.jsonl")
 

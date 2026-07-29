@@ -13,16 +13,22 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[4]
-STATUS_SH = REPO / ".claude/shared/monitoring/status.sh"
-WATCHER_PY = REPO / ".claude/shared/monitoring/decision_watcher.py"
+# The canonical monitoring module is named through `tests/_roots.py` (GD-U1):
+# this file lives in `tests/monitoring/` (GD-U6), the module it asserts about
+# does not, and a `parents[N]` hop count is right for exactly one layout.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _roots import MON, PAYLOAD, REPO                   # noqa: E402
+
+STATUS_SH = MON / "status.sh"
+WATCHER_PY = MON / "decision_watcher.py"
 # The skills MOVED into the shipping subtree (item 09, GD-T2): one canonical
 # copy, in the payload. These constants follow them — the assertions below are
 # about the reference protocol's text, wherever that text now lives.
-SKILLS = REPO / "plugin/touch/skills"
+SKILLS = PAYLOAD / "skills"
 TEMPLATE = SKILLS / "implement-plan/templates/implement.workflow.js"
 RESEARCH_TEMPLATE = SKILLS / "execute-research/templates/research.workflow.js"
-MONITORING_MD = REPO / ".claude/shared/monitoring/monitoring.md"
+MONITORING_MD = MON / "monitoring.md"
 M_SKILL = SKILLS / "m-orchestrator/SKILL.md"
 D_SKILL = SKILLS / "implement-plan/SKILL.md"
 GITIGNORE = REPO / ".gitignore"

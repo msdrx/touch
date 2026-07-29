@@ -5,11 +5,13 @@
 Touch shows you what the subagents in a Claude Code session are actually doing:
 a session sidebar, the live agent tree, per-loop cards and running token
 counters, served as a local web page over the transcripts the CLI already
-writes. It also ships the four orchestration skills that produce those
-loops — deterministic research→plan and plan→implementation drivers whose
-every stage reports to a dashboard Touch renders too (the run dashboard
-below, and the same stream in the session view). Version 0.1.0 is
-**read-only**: it renders no button it cannot honestly honour, so nothing
+writes. It also ships ten skills: the four orchestration skills that produce
+those loops — deterministic research→plan and plan→implementation drivers
+whose every stage reports to a dashboard Touch renders too (the run dashboard
+below, and the same stream in the session view) — and six engineering-practice
+skills for architecture, testing, refactoring, design patterns and code
+review, which are what those loops apply once they are running. Version 0.2.0
+is **read-only**: it renders no button it cannot honestly honour, so nothing
 here starts, stops or restarts anything (see `docs/control-semantics.md` for
 the verb ladder that a later version would implement).
 
@@ -100,15 +102,34 @@ The main terminal agent is never restricted; only subagents are.
   yourself. (The plugin format has an `experimental.monitors` feature that
   would auto-start one; Touch deliberately does not use it.)
 
-**Context cost.** `claude plugin details touch` reports **~459 tokens
-always-on** — the four skill descriptions, and nothing else — added to
-every session. On invocation each skill costs more (`m-orchestrator` ~4.7k,
-`implement-plan` ~3.4k, `orchestrate` ~2.1k, `execute-research` ~2k), paid only
-when that skill actually fires. The hook is harness-only and adds no model
-context at all.
+**Context cost — the biggest thing this plugin charges you.**
+`claude plugin details touch` reports **~1,257 tokens always-on** (measured
+2026-07-29 against this payload) — the ten skill descriptions, and nothing
+else — added to every session in which Touch is enabled. Ten, not four:
+0.1.0 shipped the four orchestration skills at ~459 tokens, and 0.2.0 adds six
+engineering-practice ones that cost the rest. Per skill, always-on and then
+on invocation:
+
+| skill | always-on | on invoke |
+|---|---|---|
+| `m-orchestrator` | ~130 | ~4.4k |
+| `implement-plan` | ~120 | ~3.3k |
+| `orchestrate` | ~120 | ~2k |
+| `execute-research` | ~100 | ~1.8k |
+| `architecture-tradeoffs` | ~170 | ~2.6k |
+| `pattern-selection` | ~140 | ~2.8k |
+| `architecture-boundaries` | ~130 | ~2.4k |
+| `code-quality-review` | ~120 | ~2.3k |
+| `refactoring-pass` | ~120 | ~1.6k |
+| `testing-discipline` | ~120 | ~1.6k |
+
+The on-invoke column is paid only when that skill actually fires. The hook is
+harness-only and adds no model context at all. If you want the dashboard
+without the skills' bill, leave the plugin disabled except in the projects
+where you orchestrate — it installs disabled anyway.
 
 **Auditing it.** The payload is Python 3 standard library, bash, two pages of
-HTML/CSS/JS, the five Markdown files under `skills/` that the model reads as
+HTML/CSS/JS, the eleven Markdown files under `skills/` that the model reads as
 instructions, and two JavaScript workflow templates the harness runs when a
 skill fires. It has no runtime dependencies (the optional `pymongo` is
 imported lazily by two modules and by nothing else), and it ships no test
@@ -180,16 +201,34 @@ spawn/verdict/retry/advance events and token accounting from a workflow
 journal) and `touch-cycle-reporter` (one report per implement→test→critique
 cycle). The skills call them by name; you rarely need to.
 
-The four skills invoke under the plugin's namespace:
+The ten skills invoke under the plugin's namespace, in two groups.
 
-- `/touch:execute-research` — parallel read-only researchers, then one
-  synthesizer that writes a single complete plan.
-- `/touch:implement-plan` — divide that plan by file ownership, then run each
-  sub-plan through gated implement→test→critique loops.
-- `/touch:orchestrate` — the naming, spawn-ledger and control-file standards
-  that make subagents visible to the dashboard.
-- `/touch:m-orchestrator` — wire live monitoring into any orchestrator you
-  write yourself.
+**Orchestration** — the loops the dashboards render:
+
+| skill | what it does |
+|---|---|
+| `/touch:execute-research` | parallel read-only researchers, then one synthesizer that writes a single complete plan |
+| `/touch:implement-plan` | divide that plan by file ownership, then run each sub-plan through gated implement→test→critique loops |
+| `/touch:orchestrate` | the naming, spawn-ledger and control-file standards that make subagents visible to the dashboard |
+| `/touch:m-orchestrator` | wire live monitoring into any orchestrator you write yourself |
+
+**Engineering practice** — what the agents inside those loops are asked to do
+well:
+
+| skill | what it does |
+|---|---|
+| `/touch:architecture-boundaries` | module boundaries, layering and dependency direction |
+| `/touch:architecture-tradeoffs` | a significant decision analysed as an explicit trade-off, then recorded |
+| `/touch:code-quality-review` | review a diff, file or module and report `file:line` findings with fixes |
+| `/touch:pattern-selection` | match a problem to the right design pattern — or argue against one |
+| `/touch:refactoring-pass` | safe, incremental, behaviour-preserving cleanup with a test safety net |
+| `/touch:testing-discipline` | write or restructure tests, and read testability pain as an architecture signal |
+
+One plugin carries both because the second group is what the first group's
+agents are for: a review loop with no review standard produces loops, not
+quality. Each of the six is condensed guidance derived from the books named on
+its own `Sources:` line — not the works themselves, and no substitute for
+reading them.
 
 ## Update / uninstall
 

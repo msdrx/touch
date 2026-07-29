@@ -10,12 +10,18 @@ else denied. Two deliberate non-restrictions: the main terminal agent (no
 always sees everything, and with no ACTIVE file the guard is inert, so ordinary
 sessions are unaffected.
 
-Registered twice against ONE file, with an identical matcher so the two can
-never diverge: the plugin ships `hooks/hooks.json` in **exec form**
-(`command: "python3"`, `args: ["${CLAUDE_PLUGIN_ROOT}/hooks/…"]` — `args[]` is
-substituted, a shell-form `command` string is not), and this repo's own
-`.claude/settings.json` points at the same script under `plugin/touch/hooks/`.
-Stdlib only.
+Registered exactly ONCE, by the plugin (GD-U5): `hooks/hooks.json` in **exec
+form** (`command: "python3"`, `args: ["${CLAUDE_PLUGIN_ROOT}/hooks/…"]` —
+`args[]` is substituted, a shell-form `command` string is not). This repo's
+`.claude/settings.json` used to register the same script a second time in shell
+form with an identical matcher; both were live at once in the dogfood loop and
+the hook fired twice per tool call (measured 2 vs 1), so that block is gone and
+`"enabledPlugins": {"touch@inline": true}` is committed there instead — every
+`claude --plugin-dir plugin/touch` session auto-enables the one registration.
+Accepted consequence: a session started WITHOUT the plugin has no guard. That
+is fine — the guard is inert without an ACTIVE file anyway, and every
+orchestration run already needs the plugin, whose `bin/` is the driver
+toolchain. Stdlib only.
 
 Where the sentinels are looked for — GD-T5's task-state order, which item 04's
 `resolve_tasks_root()` is to adopt for `status.sh` and both monitoring daemons

@@ -35,7 +35,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[0]
 FIX = HERE / "fixtures"
-sys.path.insert(0, str(REPO))
+# The canonical trees are named through `tests/_roots.py`, never by a
+# literal under REPO: GD-U1 moves them and this is the single flip point.
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
+from _roots import SRC                # noqa: E402  (path juggling first)
+sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
 
 from aggregator import mongo_store as ms                       # noqa: E402
@@ -664,7 +668,7 @@ def test_bulk_upsert_applies_the_same_guards_as_the_memory_pass():
     # A source-level assertion, because the ordering it pins is invisible at
     # runtime on any machine that has pymongo. AST, not grep: a text search for
     # "check_id(" passes on a comment and fails on a rename.
-    tree = ast.parse((REPO / "aggregator" / "mongo_store.py").read_text())
+    tree = ast.parse((SRC / "aggregator" / "mongo_store.py").read_text())
     body = function_def(tree, "bulk_upsert")
     called = {node.func.id for node in ast.walk(body)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
@@ -1625,7 +1629,7 @@ def test_ts_is_supplied_by_the_aggregator():
 # --- static guards --------------------------------------------------------
 def test_no_delete_verbs_and_no_clock_in_the_module():
     print("test_no_delete_verbs_and_no_clock_in_the_module")
-    source = (REPO / "aggregator" / "mongo_store.py").read_text()
+    source = (SRC / "aggregator" / "mongo_store.py").read_text()
     tree = ast.parse(source)
     called = {node.func.attr for node in ast.walk(tree)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
