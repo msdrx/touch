@@ -2,7 +2,7 @@
 artifact registry (R-27 + R-51 + R-58's read-time half).
 
 The one module that reads the monitoring module's task folders
-(`.claude/local-orchestrators/<task>/`). Everything it produces is *derived* —
+(`.touch/local-orchestrators/<task>/`). Everything it produces is *derived* —
 no stream is ever rewritten, no file under a task folder is ever written, and
 `.watcher-state.json` is never read at all (GD-14; RUNSTATE-5: it contradicts
 its own stream and is never closed on kill).
@@ -38,9 +38,11 @@ on the never-delete rule** for `events.jsonl` (CLAUDE.md: "Never delete a
 finished task folder or its `events.jsonl`", MONGOSCHEMA-7) — and on that rule
 **alone**. An earlier version of this paragraph also leaned on "GD-16 keeps the
 streams tracked in git"; that is false since the 2026-07-27 amendment ignored
-`.claude/local-orchestrators/` outright (`.gitignore:12`, guarded by
-`tests/test_bootstrap.py`), so no committed copy exists to recover a renumbered
-stream from. The dependency is recorded here because it is load bearing:
+the task folders outright — and it stays false at their new location, where
+`/.touch/*` ignores them and the ONE re-included subtree is
+`.touch/memory/*.md` (G9, guarded by `tests/test_bootstrap.py`). No committed
+copy exists to recover a renumbered stream from. The dependency is recorded
+here because it is load bearing:
 renumbering a stream would silently re-point every `_id` after the edit, and
 unlike `stream_meta` (GD-26's single legal scoped delete) this collection has
 no repair path.
@@ -253,7 +255,11 @@ SUPERSEDED_STATE = "superseded"
 STALE_STATE = "stale"
 
 #: Task-folder layout (RUNSTATE-13: none of these can be assumed present).
-TASK_ROOT = os.path.join(".claude", "local-orchestrators")
+#: The root is `paths.TASKS_REL` and not a second spelling of the same two
+#: components: `server.default_tasks_root` used to re-join them inline, which is
+#: exactly the CM-2 failure mode `paths.py`'s docstring was written about — four
+#: wrong roots and one right one, indistinguishable (LAYOUT-8).
+TASK_ROOT = paths.TASKS_REL
 EVENTS_FILE = "events.jsonl"
 CONFIG_FILE = "orch-config.json"
 
@@ -640,27 +646,24 @@ def read_events(path, task=None) -> tuple:
 
 
 def orchestrator_root(root=None, env=None) -> str:
-    """Where the task folders live: arg > `$TOUCH_LEGACY_ROOT` > `<project>/…`.
+    """Where the task folders live — :func:`paths.tasks_root`, and nothing else.
 
-    The default is derived from :func:`paths.project_root`, the same way
-    `store.state_root` derives `.touch/`, so both halves of Touch's state agree
-    on which checkout is being served. It is deliberately **not** derived from
-    this file's location any more (CM-2/GD-T5): the directory above an
-    installed package holds no `local-orchestrators/`, so the task list would
-    be silently empty rather than wrong-and-loud.
+    This function is the adapter's *name* for that root, not a second resolver:
+    the ladder (arg > `$ORCH_TASKS_ROOT` > `$TOUCH_LEGACY_ROOT` >
+    `<project>/.touch/local-orchestrators`) lives in `paths.py` so the daemons,
+    the hook, `status.sh`, `server.default_tasks_root` and this file cannot
+    disagree about which tree is live (PROTOCOL-8/G10). It used to read
+    `$TOUCH_LEGACY_ROOT` and *not* `$ORCH_TASKS_ROOT`, which is how one cwd
+    could give the dashboard and the API two different task lists.
 
-    `$TOUCH_LEGACY_ROOT` still wins over everything, and an explicit argument
-    over that, so there remains no cwd-shaped way to point the adapter at
-    another checkout's history behind a caller's back (GD-12's wrong-target
-    invariant): the caller either passes the root or exports the variable.
+    Nothing here is derived from this file's location (CM-2/GD-T5): the
+    directory above an installed package holds no `local-orchestrators/`, so
+    the task list would be silently empty rather than wrong-and-loud. An
+    explicit argument still wins over every variable, so there remains no
+    cwd-shaped way to point the adapter at another checkout's history behind a
+    caller's back (GD-12's wrong-target invariant).
     """
-    if root:
-        return os.path.abspath(os.fspath(root))
-    environ = os.environ if env is None else env
-    configured = environ.get("TOUCH_LEGACY_ROOT")
-    if configured:
-        return os.path.abspath(configured)
-    return os.path.join(paths.project_root(env=environ), TASK_ROOT)
+    return paths.tasks_root(root, env=env)
 
 
 @dataclass(frozen=True)
@@ -1868,7 +1871,7 @@ MIRROR_MAPPERS = {
 # `--rebuild` calls each source with `path=None`: the whole orchestrator root.
 # `--backfill` calls every registered source once per `.jsonl` under
 # `~/.claude/projects/**`, and **no legacy file lives there** — the streams are
-# repo history under `.claude/local-orchestrators/`. Both sources therefore
+# repo history under `.touch/local-orchestrators/`. Both sources therefore
 # answer `()` for any path they do not own, decided from the path alone (one
 # `basename` comparison, per `iter_backfill_observations`' contract), and the
 # legacy arm contributes nothing to a backfill. That is the correct answer, not

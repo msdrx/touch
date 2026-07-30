@@ -238,10 +238,17 @@ def test_status_walk_up_is_forkless_and_still_walks():
           "both loops take the parent by parameter expansion")
     base = tempfile.mkdtemp(dir=TMP_ROOT)
     try:
-        # ...and it still reaches a marker several levels up (the walk-up rung),
-        deep = os.path.join(base, "proj", "a", "b", "c", "d")
+        # ...and it still reaches a marker several levels up (the walk-up rung).
+        # G10: the MARKER dir and the STATE dir are deliberately different — the
+        # walk-up looks for `.claude/` (that is what marks a Claude Code project;
+        # `.touch/` is created by Touch and gitignored, so it cannot mark one) and
+        # then joins `.touch/local-orchestrators`. Both dirs exist here, and the
+        # assertion is that the event lands under `.touch/`, not `.claude/`.
+        proj = os.path.join(base, "proj")
+        deep = os.path.join(proj, "a", "b", "c", "d")
         os.makedirs(deep)
-        tasks = os.path.join(base, "proj", ".claude", "local-orchestrators", "t")
+        os.makedirs(os.path.join(proj, ".claude"))          # the marker only
+        tasks = os.path.join(proj, ".touch", "local-orchestrators", "t")
         os.makedirs(tasks)
         Path(tasks, "events.jsonl").write_text("")
         proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True,
@@ -249,7 +256,10 @@ def test_status_walk_up_is_forkless_and_still_walks():
         check(proc.returncode == 0,
               f"the cwd walk-up still finds a .claude/ 5 levels up ({proc.stderr})")
         check(len(Path(tasks, "events.jsonl").read_text().splitlines()) == 1,
-              "the event landed in the resolved task folder")
+              "the event landed in the resolved task folder under .touch/")
+        check(not os.path.exists(
+                  os.path.join(proj, ".claude", "local-orchestrators")),
+              "nothing was created under the MARKER dir .claude/")
         # ...and the plugin-cache walk-up still refuses several levels down.
         plugin = os.path.join(base, "cache", "touch", "0.1.0")
         os.makedirs(os.path.join(plugin, ".claude-plugin"))
@@ -258,6 +268,72 @@ def test_status_walk_up_is_forkless_and_still_walks():
         proc = run_status(state, ["p", "s", "running", "hi"])
         check(proc.returncode == 2,
               f"the plugin-cache walk-up still refuses (got {proc.returncode})")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# --- status.sh: the ladder is THREE rungs and joins `.touch/local-orchestrators`
+#     (G10). Rung 1 ($ORCH_TASKS_ROOT) is covered by
+#     test_status_unset_resolves_tasks_root above; this covers rung 2
+#     ($CLAUDE_PROJECT_DIR) and the DELETION of the former fourth, module-relative
+#     rung ($DIR/../../local-orchestrators). That rung was already dead after
+#     GD-U1 — nothing sits two levels above the monitoring module in the payload —
+#     and in an installed copy it would glob whatever sits beside the plugin, so
+#     its removal is asserted behaviourally, not only as absent source text: a
+#     sibling tree that WOULD have resolved must now be ignored and the call must
+#     refuse (exit 2) rather than write somewhere nobody reads.
+def test_status_ladder_is_three_rungs():
+    print("test_status_ladder_is_three_rungs")
+    src = STATUS_SH.read_text()
+    # code only, for the same reason the forkless test above filters comments:
+    # the docstring NAMES the deleted rung so a reader knows why it is not there,
+    # and a prose mention must not read as the rung itself.
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    check("../../local-orchestrators" not in code,
+          "the module-relative fourth rung is gone from the source")
+    check(".claude/local-orchestrators" not in code,
+          "no rung joins the old .claude/ tasks root any more")
+    check(code.count(".touch/local-orchestrators") == 2,
+          "rungs 2 and 3 both join .touch/local-orchestrators")
+    base = tempfile.mkdtemp(dir=TMP_ROOT)
+    try:
+        isolated = os.path.join(base, "cwd")
+        os.makedirs(isolated)
+        marker = nearest_claude_marker(isolated)
+        if marker:
+            print(f"  skip: an ancestor of {TMP_ROOT} holds {marker} — the cwd "
+                  "walk-up would resolve and these arms would not mean what they say")
+            return
+        # rung 2: $CLAUDE_PROJECT_DIR, joined with .touch/local-orchestrators.
+        # No `.claude/` marker is created at all, so only this rung can answer.
+        proj = os.path.join(base, "proj")
+        tasks = os.path.join(proj, ".touch", "local-orchestrators", "t")
+        os.makedirs(tasks)
+        Path(tasks, "events.jsonl").write_text("")
+        proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True,
+                          cwd=isolated,
+                          extra_env={"CLAUDE_PROJECT_DIR": proj})
+        check(proc.returncode == 0,
+              f"$CLAUDE_PROJECT_DIR resolves the tasks root ({proc.stderr})")
+        check(len(Path(tasks, "events.jsonl").read_text().splitlines()) == 1,
+              "the event landed under $CLAUDE_PROJECT_DIR/.touch/local-orchestrators")
+        # the deleted rung: a copy of the script two levels below a sibling tree
+        # that the OLD `$DIR/../../local-orchestrators` rung would have found.
+        pkg = os.path.join(base, "pkg")
+        mod = os.path.join(pkg, "shared", "monitoring")
+        os.makedirs(mod)
+        script_copy = os.path.join(mod, "status.sh")
+        shutil.copy(STATUS_SH, script_copy)
+        sibling = os.path.join(pkg, "local-orchestrators", "t")
+        os.makedirs(sibling)
+        Path(sibling, "events.jsonl").write_text("")
+        proc = run_status(None, ["p", "s", "running", "hi"], unset_state_dir=True,
+                          script=script_copy, cwd=isolated)
+        check(proc.returncode == 2,
+              f"the module-relative rung no longer resolves (got {proc.returncode})")
+        check(Path(sibling, "events.jsonl").read_text() == "",
+              "nothing was written into the module's sibling tree")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -908,27 +984,59 @@ def test_gitignore():
     check(not any(".claude/shared/monitoring/.watcher-state.json" in ln for ln in rules),
           ".gitignore no longer sanctions a module-dir .watcher-state.json")
     # SD-3: the verbatim entry list, asserted here and written by the bootstrap.
-    for entry in (".touch/", ".touch*/", ".claude/settings.local.json", "*.pid",
+    # This tuple is the TWIN of tests/test_bootstrap.py's GITIGNORE_ENTRIES and
+    # must stay character-for-character the same — including the order of G9's
+    # five `/.touch…` lines, which is the mechanism and not a style choice
+    # (git cannot re-include a file under an excluded DIRECTORY, so `memory/`
+    # is re-included as a directory before its children are re-ignored except
+    # `*.md`). The `.claude/local-orchestrators/…` line is legacy defence: since
+    # the tasks-root move the live tree is `.touch/local-orchestrators/`, ignored
+    # by `/.touch/*`, and that rule stays so a re-created old tree is still
+    # ignored.
+    for entry in ("/.touch/*", "/.touch?*/", "!/.touch/memory/",
+                  "/.touch/memory/*", "!/.touch/memory/*.md",
+                  ".claude/settings.local.json", "*.pid",
                   ".claude/local-orchestrators/*/.watcher-state.json",
                   "mongo-data/", "mongo-dump/", "*.bson"):
         check(entry in gi, f".gitignore contains {entry}")
     # 2026-07-27 amendment: the whole per-task run-state tree is ignored and
     # untracked (kept on disk only). `git check-ignore` exits 0 when ignored.
+    # `--no-index` (LAYOUT-18): check-ignore consults the index and answers "not
+    # ignored" for a TRACKED path whatever the rules say, and `.touch/memory/*.md`
+    # is tracked now — so the negative arm below has to bypass the index or it
+    # would pass for the wrong reason. Every path here is hypothetical.
     def ignored(rel):
-        return subprocess.run(["git", "check-ignore", "-q", rel], cwd=REPO,
-                              capture_output=True).returncode == 0
+        return subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", rel],
+                              cwd=REPO, capture_output=True).returncode == 0
     if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=REPO,
                       capture_output=True).returncode != 0:
         print("  skip: not a git repo")
         return
-    check(ignored(".claude/local-orchestrators/"),
-          ".claude/local-orchestrators/ itself is ignored")
-    check(ignored(".claude/local-orchestrators/touch-full-recon/events.jsonl"),
-          "events.jsonl under .claude/local-orchestrators/ is ignored")
-    check(ignored(".claude/local-orchestrators/touch-full-recon/.watcher-state.json"),
-          "watcher checkpoints under local-orchestrators ARE ignored")
+    orch = ".touch/" + "local-orchestrators"
+    legacy = ".claude/" + "local-orchestrators"
+    check(ignored(orch + "/"), f"{orch}/ itself is ignored")
+    check(ignored(orch + "/a-task/events.jsonl"),
+          f"events.jsonl under {orch}/ is ignored")
+    check(ignored(orch + "/a-task/.watcher-state.json"),
+          "watcher checkpoints under the tasks root ARE ignored")
+    # legacy defence: the old location stays ignored too, so a re-created old
+    # tree is never offered for commit.
+    check(ignored(legacy + "/") and ignored(legacy + "/a-task/events.jsonl")
+          and ignored(legacy + "/a-task/.watcher-state.json"),
+          "the legacy tasks root and its state stay ignored")
     check(ignored(".touch/x") and ignored("mongo-data/x") and ignored("dump.bson"),
           "Touch runtime state and Mongo dumps are ignored")
+    # G9's carve: exactly one subtree comes through, and its awkward neighbours
+    # do not. Asserted here as well as in test_bootstrap.py because this file is
+    # the monitoring suite's own copy of the SD-3 twin and a half-flipped carve
+    # must fail on both sides.
+    check(not ignored(".touch/memory/does-not-exist.md"),
+          ".touch/memory/*.md is the ONE tracked subtree of .touch/")
+    for leaked in (".touch/memory/x.pid", ".touch/memory/x.token",
+                   ".touch/memory/draft.md.bak", ".touch/memory/.history/x.md",
+                   ".touch/memory/.trash/x.md", ".touch/memory-audit.jsonl",
+                   ".touch/sessions/x", ".touch/server.json", ".touch/mongo.json"):
+        check(ignored(leaked), f"the carve stays narrow: {leaked} is ignored")
 
 
 def main():
@@ -941,6 +1049,7 @@ def main():
               test_append_sites_take_lock_ex,
               test_status_argv_call_is_injection_safe, test_status_plans_total,
               test_status_walk_up_is_forkless_and_still_walks,
+              test_status_ladder_is_three_rungs,
               test_template_static, test_templates_emit_terminal_events,
               test_docs_static, test_gitignore):
         t()

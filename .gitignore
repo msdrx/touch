@@ -7,21 +7,20 @@
 # purpose — tests/test_bootstrap.py asserts they stay gone, so the behaviour
 # cannot quietly return under cover of an ignore rule.
 
-# Per-task orchestration run state is local working data, kept on disk for
-# monitor replay and the Mongo legacy keyspace but no longer versioned
-# (untracked 2026-07-27). The narrower rules below predate the tree-wide one
-# and are kept because the verbatim guard lists in tests/test_bootstrap.py and
-# monitoring's test_shell.py assert them.
+# LEGACY DEFENCE (kept deliberately, G9/LAYOUT-4). Per-task orchestration run
+# state is local working data, kept on disk for monitor replay and the Mongo
+# legacy keyspace but no longer versioned (untracked 2026-07-27). Since the
+# tasks-root move the live tree is `.touch/local-orchestrators/`, ignored by the
+# `/.touch/*` rule below; these three lines stay so a RE-CREATED old tree is
+# still ignored rather than silently offered for commit. They also remain in the
+# verbatim guard lists in tests/test_bootstrap.py and monitoring's test_shell.py.
 .claude/local-orchestrators/
 .claude/local-orchestrators/*/*.log
 .claude/local-orchestrators/*/.watcher-state.json
 
 # --- Touch runtime state --------------------------------------------------
-# .touch/ holds raw PTY capture and the hook spool: verbatim terminal output,
-# tokens and prompt text by construction. It must be ignored BEFORE any code
-# creates it. .touch*/ covers TOUCH_STATE_DIR variants (.touch-dev/, ...).
-.touch/
-.touch*/
+/.touch/*
+/.touch?*/
 *.pid
 
 # Per-machine harness overrides (never shared, may hold local paths/secrets).

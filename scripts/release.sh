@@ -365,10 +365,31 @@ fi
 # so a missing *tested* file shows up there, but a new wrapper or doc nobody
 # asserts about still ships as absence. Untracked-blind is the one thing this
 # gate cannot afford to be — it is the only one that sees the file itself.
+#
+# Two shapes of dirt, told apart since `.touch/memory/*.md` became the ONE
+# tracked subtree of `.touch/`: a dirty payload or doc is the classic release
+# accident, while a dirty memory tree is a note somebody wrote during the day.
+# Both still REFUSE — `git archive HEAD` ships the committed memory files, so an
+# uncommitted one means the release carries yesterday's notes — but they get
+# different sentences, because "uncommitted changes" sends an operator hunting
+# through the payload for something that is actually one edited `.md`. The
+# remedy is named in the message too: stage that subtree BY NAME. `git add
+# .touch/` would sweep in the per-boot token file, the run history and the
+# memory tree's own `.history/`/`.trash/` copies, all of which the ignore carve
+# exists to keep out.
 step 1 "Dirty-tree refusal"
 dirty="$(git status --porcelain 2>/dev/null)"
+# Porcelain is `XY <path>`, so drop the two status columns and the separator,
+# plus a leading quote on a path git chose to quote. `grep -v` exits 1 on "every
+# line matched" (i.e. nothing is outside the memory tree), which is an answer and
+# not a failure, hence the `|| true` — under `set -e` it would abort the release.
+outside="$(printf '%s\n' "$dirty" | sed -e 's/^...//' -e 's/^"//' \
+    | grep -v '^\.touch/memory/' || true)"
 if [ -z "$dirty" ]; then
     ok "working tree and index are clean (tracked, staged and untracked)"
+elif [ -z "$outside" ]; then
+    fail "the only dirt is under .touch/memory/ — that subtree IS tracked and git archive HEAD ships it, so commit it with 'git add .touch/memory' (never 'git add .touch/') or set it aside; step 5 builds from HEAD and would publish the previous notes"
+    note "memory entries: $(printf '%s' "$dirty" | tr '\n' ';' | cut -c1-160)"
 else
     fail "uncommitted or untracked changes — step 5 builds from HEAD, so they would silently not ship"
     # `tr` then `cut`, never `head`: an early-exiting consumer under pipefail is
@@ -383,10 +404,14 @@ fi
 #       into a temp directory and run the COMMITTED `tests/run_all.sh` there.
 #       That is this file's headline (WHAT SHIPS IS WHAT GIT HAS) and the
 #       procedure `run_all.sh`'s own header prescribes before any release: the
-#       extracted tree has no `.git` ephemera, no `.claude/local-orchestrators/`
+#       extracted tree has no `.git` ephemera, no `.touch/local-orchestrators/`
 #       run history and no untracked anything, which is what a packaged copy
 #       looks like, so files that read absent things SKIP there instead of
-#       passing on this machine's leftovers.
+#       passing on this machine's leftovers. One thing it DOES carry now:
+#       `.touch/memory/*.md`, the one tracked subtree of `.touch/` — so "no
+#       untracked anything" is still exact, but "no `.touch/` at all" stopped
+#       being true, and a test that reads the memory tree runs there for real
+#       instead of skipping.
 #
 #   (b) "does the payload carry a secret" — and that one the clean tree CANNOT
 #       answer. `tests/test_package.py` and `tests/test_publish_hygiene.py` both

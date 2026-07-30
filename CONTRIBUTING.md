@@ -112,7 +112,7 @@ The dashboard on port 8931 is the page that works today. Point it at one task
 folder:
 
 ```bash
-TASK=$PWD/.claude/local-orchestrators/<task-name>
+TASK=$PWD/.touch/local-orchestrators/<task-name>
 ORCH_STATE_DIR="$TASK" plugin/touch/bin/touch-monitor &   # http://127.0.0.1:8931
 ORCH_STATE_DIR="$TASK" plugin/touch/bin/touch-watcher &   # feeds it the run's journal
 ```
@@ -258,13 +258,28 @@ answered by reading the handler.
 404. `CONTROL_ROUTES` is empty in v0 and a test asserts it.
 
 ### The monitoring substrate (`plugin/touch/shared/monitoring/`)
-**What.** Five files — `status.sh`, `monitor_server.py`, `decision_watcher.py`,
-`monitor.html`, `monitoring.md` — the working prototype Touch's visual half
-inherits.
+**What.** Six files — `status.sh`, `monitor_server.py`, `decision_watcher.py`,
+`monitor.html`, `memory.html`, `monitoring.md` — the working prototype Touch's
+visual half inherits, plus the memory editor page the same server hosts.
 **Why.** It already solved live orchestration monitoring with bash, stdlib
 Python and a browser. `monitoring.md` is normative for its event schema.
 **How.** Stateless and task-agnostic: never copy or modify it per task. All
-per-run state lives in `.claude/local-orchestrators/<task-name>/`.
+per-run state lives in `.touch/local-orchestrators/<task-name>/`.
+
+### The memory editor (`/memory` on port 8931)
+**What.** A second page, `memory.html`, plus the JSON group `/api/memory/*` on
+the monitoring server: list, read, create, update and delete the `*.md` files
+Claude Code loads as auto memory from `<project>/.touch/memory/`.
+**Why.** The memory index is loaded into every session in this project, so it
+is the one file set worth editing from a page instead of by hand — and it is on
+*this* server because the monitor page holds only this server's per-boot token.
+**How.** Writes are **off by default** (`--allow-memory-write` /
+`TOUCH_ALLOW_MEMORY_WRITE`), take the token from a header only, require
+`X-Touch-Write: 1` and a same-origin `Origin`, and go through a flat-name
+regex, a symlink refusal, realpath containment, an `~/.claude` refusal, an
+`O_EXCL|O_NOFOLLOW` temp file plus `os.replace`, a required `ifMatch` and the
+content-hygiene rules — in that order, because the order is the security
+property. Memory is now public; write it as if it ships.
 
 ## What ships alongside
 
@@ -286,11 +301,13 @@ them, a measured figure.
 **What.** `orch_scope_guard.py`, a `PreToolUse` hook.
 **Why.** While a run is active, a subagent that wanders into another run's
 folder can read or overwrite work it knows nothing about.
-**How.** While `.claude/local-orchestrators/ACTIVE` lists task names, the hook
-denies subagent access to every unlisted task's folder except its `plan/`. The
-main terminal agent is never restricted, and with no ACTIVE file the guard is
-inert. It is registered exactly once, by the plugin's own `hooks/hooks.json`,
-which sits beside the script.
+**How.** While `.touch/local-orchestrators/ACTIVE` lists task names, the hook
+denies subagent access to every unlisted task's folder except its `plan/`, and
+denies subagent writes to `.touch/memory/**` outright. The main terminal agent
+is never restricted, and with no ACTIVE file the guard is inert. Both roots are
+consulted during the transition (`.touch/` first, then the legacy `.claude/`
+one), so no flip order can disarm `HALT`. It is registered exactly once, by the
+plugin's own `hooks/hooks.json`, which sits beside the script.
 
 ### The loopback + token posture
 **What.** Both servers bind `127.0.0.1` and mint a per-boot token; every route
@@ -519,18 +536,21 @@ flips on that cost, not on the clone size.
 ## If you run the orchestration skills here
 
 They spawn real subagent runs that write into
-`.claude/local-orchestrators/<task>/`. Etiquette that bites:
+`.touch/local-orchestrators/<task>/`. Etiquette that bites:
 
 - When a run ends, stop its watcher; leave its state files in place.
 - Never delete a finished task folder or its `events.jsonl` — completed runs
-  are dashboard history, and the Mongo mirror's key space depends on them.
+  are dashboard history, and the Mongo mirror's key space depends on them. Never
+  rewrite one either: a finished run is dated record, paths included.
 - Don't commit while a watcher is writing inside the paths being committed.
+- **Never `git add .touch/`; always `git add .touch/memory`** — that one subtree
+  is tracked and the rest of `.touch/` is transcripts and tokens.
 - Every `touch-status` call sets `ORCH_STATE_DIR`.
 
 ## Where design decisions live
 
 `CLAUDE.md` carries the authority ladder over the full design record. The run
-folders it cites (under `.claude/local-orchestrators/`) are local history and
+folders it cites (under `.touch/local-orchestrators/`) are local history and
 gitignored — absent from a clean checkout **by design**, which is why doc
 guards that read them skip with a reason instead of failing. `inception.md` is
 the tracked summary of everything verified about the substrate; when in doubt,

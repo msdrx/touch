@@ -10,16 +10,21 @@ terminal shows you almost nothing about them. Touch puts that run on a local web
 page: which plans are running, what stage each loop is in, what the gates
 decided, and what it all costs in tokens.
 
-> **Alpha — v0.2.0.** Touch is early software: incomplete, moving, and rough in
+> **Alpha — v0.3.0.** Touch is early software: incomplete, moving, and rough in
 > places. Interfaces, layout and command behaviour can change between releases
 > without a migration path.
 
 - **Local only.** Both servers bind `127.0.0.1` and print a URL carrying a
   per-boot token; every route but `/health` needs it.
-- **Read-only on your machine.** Touch never writes to `~/.claude` — it only
-  reads what the CLI already wrote. Its own history lives in `.touch/`.
-- **It renders no button it cannot honour.** Nothing here starts, stops or
-  restarts anything yet.
+- **It never writes to `~/.claude`.** It reads what the CLI already wrote, and
+  keeps its own history in `.touch/` inside your project. The one thing it
+  writes for you is Claude Code's auto memory — and it does that by pointing the
+  CLI at `<project>/.touch/memory` instead of reaching into `~/.claude`.
+- **One write plane, off by default.** The dashboard can edit those memory
+  files, but only when started with `--allow-memory-write`; everything else it
+  serves is read-only.
+- **It renders no button it cannot honour.** No session verb ships: nothing here
+  starts, ends or re-invokes an agent loop.
 
 ## The six commands
 
@@ -28,11 +33,11 @@ They land on your `PATH` when the plugin is enabled, and live in
 
 | command | what it does |
 |---|---|
-| `touch-monitor` | serves the dashboard (port 8931): live plan cards, stages, gate verdicts, token counters |
+| `touch-monitor` | serves the dashboard (port 8931): live plan cards, stages, gate verdicts, token counters — and, at `/memory`, an editor over the memory files Claude Code loads in this project (reads always, writes only with `--allow-memory-write`) |
 | `touch-watcher` | daemon that turns a run's journal into dashboard events — this is what makes the page move |
 | `touch-status` | appends one progress event; the line a script or an agent writes to say where it is |
 | `touch-cycle-reporter` | writes one report per implement → test → critique cycle, so a finished run leaves a readable record |
-| `touch-selfcheck` | eight PASS/FAIL checks of an installation, so "it doesn't work" becomes one failing line |
+| `touch-selfcheck` | nine PASS/FAIL checks of an installation, so "it doesn't work" becomes one failing line; `--init` is the one mode that writes, mapping auto memory into `<project>/.touch/memory` |
 | `touch-serve` | the Touch page (port 8932) — **not implemented yet**: the backend behind it works and is tested, the page it serves is a placeholder |
 
 `touch-monitor` is the page you actually use today. The plan is for
@@ -82,10 +87,17 @@ msdrx-tools` → `/plugin update touch@msdrx-tools` → `/reload-plugins`.
 for one task:
 
 ```bash
-TASK=$PWD/.claude/local-orchestrators/<task-name>
+TASK=$PWD/.touch/local-orchestrators/<task-name>
 ORCH_STATE_DIR="$TASK" touch-monitor &   # the dashboard: http://127.0.0.1:8931
 ORCH_STATE_DIR="$TASK" touch-watcher &   # feeds it from the run's journal
 ```
+
+**3. Edit the memory Claude Code loads here.** `touch-selfcheck --init` maps
+this project's auto memory to `<project>/.touch/memory`, and the dashboard's
+header links to `/memory`, a page that lists and reads those files. To let it
+save them, start the dashboard with `--allow-memory-write` — the default is
+read-only, because those files are injected into every future session in this
+project.
 
 The wrappers refuse to open a public bind on your behalf. To reach a page from
 another machine, forward the port: `ssh -L 8931:127.0.0.1:8931 you@host`.

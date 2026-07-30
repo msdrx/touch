@@ -14,7 +14,7 @@ name survives an update that moves the files behind it.
 Everything is bash + Python 3 stdlib + a browser — no pip installs, works
 behind egress proxies. The commands are stateless and task-agnostic; never
 copy or modify them per task. Each orchestration keeps its own state folder at
-`<project>/.claude/local-orchestrators/<task-name>/` — inside the user's
+`<project>/.touch/local-orchestrators/<task-name>/` — inside the user's
 project, never inside this plugin.
 
 Full reference for the **event schema, dashboard behaviour and daemon
@@ -46,15 +46,19 @@ that file that disagrees with this one.
 1. Resolve the **tasks root** once, then create this run's state folder under
    it and (optionally) pin config:
    ```bash
-   ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.claude/local-orchestrators}"
+   ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.touch/local-orchestrators}"
    TASK="$ORCH/<task-name>"
    mkdir -p "$TASK"
    # optional orch-config.json: {"wf_dir": "<workflow transcript dir>", "port": 8931}
    ```
    That expression is the resolution order the run-scope guard uses, in the
    same precedence — `$ORCH_TASKS_ROOT` (only when exported into the `claude`
-   process and naming an existing directory) > `$CLAUDE_PROJECT_DIR/.claude/local-orchestrators`
-   > a marker-ceilinged walk up from the cwd. Anchoring on a bare `$PWD`
+   process and naming an existing directory) > `$CLAUDE_PROJECT_DIR/.touch/local-orchestrators`
+   > a walk up from the cwd to a `.claude/` project marker, then
+   `.touch/local-orchestrators` beneath it. The marker directory and the state
+   directory deliberately differ: `.claude/` is what makes a folder a *Claude
+   Code* project, while `.touch/` is created by Touch and is gitignored, so it
+   cannot mark anything. Anchoring on a bare `$PWD`
    instead is the one mistake that fails **silently**: the daemons and the
    sentinels land somewhere the guard never looks, so the guard reports itself
    inert and the HALT brake never fires for the whole run (step 4).

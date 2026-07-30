@@ -10,6 +10,12 @@ synthesized plan at
 (**the normative design document**; this file is the summary). All facts
 verified against Claude Code CLI 2.1.220.
 
+**Path note, 2026-07-30 — the only edit this file gets for the tasks-root move.**
+Every `.claude/local-orchestrators/…` path below is the tree as it stood at this
+snapshot; run history now lives at `.touch/local-orchestrators/`, and this
+project's Claude Code auto memory at `.touch/memory/`. Nothing else here is
+rewritten: a dated record whose paths are quietly updated stops being a record.
+
 ## 1. What Touch is
 
 A web app for visualizing and managing subagents in a Claude Code session.

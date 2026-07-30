@@ -12,7 +12,7 @@ the upstream research — if no usable plan exists, stop and point the caller at
 `execute-research`.
 
 **Argument**: `<user_prompt>` — which plan (a
-`<project>/.claude/local-orchestrators/<task-name>/` folder, a `plan/*.md`
+`<project>/.touch/local-orchestrators/<task-name>/` folder, a `plan/*.md`
 path, or the `{ plan_file }` from an execute-research auto-chain) and how (strategy
 override). Everything after an optional `Test hints:` marker is `<test_hints>`
 and extends the test gate (e.g. installer / e2e requirements).
@@ -27,7 +27,7 @@ file ownership.
 `${CLAUDE_PLUGIN_ROOT}/skills/implement-plan/templates/implement.workflow.js`
 is the NORMATIVE protocol — prompts, schemas, models, the Divide phase, monitor
 markers, `touch-status` calls, findings handoff, isolation guard. Adapt it into
-`<project>/.claude/local-orchestrators/<task-name>/orch-scripts/implement.workflow.js`,
+`<project>/.touch/local-orchestrators/<task-name>/orch-scripts/implement.workflow.js`,
 invoked with `args = { plan_file, parallel }` (all task state lives under the
 task folder, inside the user's project), deciding only:
 
@@ -133,7 +133,7 @@ daemon fulfills).
 # Same tasks root the other daemons and the run-scope guard resolve
 # (m-orchestrator SKILL.md step 1) — anchoring on a bare $PWD splits the run's
 # state across two directories.
-ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.claude/local-orchestrators}"
+ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.touch/local-orchestrators}"
 TASK="$ORCH/<task-name>"
 ORCH_STATE_DIR="$TASK" nohup touch-cycle-reporter "<wf_dir>" \
   >> "$TASK/cycle-reporter.log" 2>&1 &
@@ -179,11 +179,11 @@ Loop-failure policy (enforced by the template; acted on by you, the driver):
 Emit `touch-status <plan> plan done "..."` for any still-open card, then
 `touch-status orchestrator complete done "<run summary>"`, and clear the run
 scope by removing this task's line from
-`<project>/.claude/local-orchestrators/ACTIVE`
+`<project>/.touch/local-orchestrators/ACTIVE`
 (m-orchestrator §4 — never `rm` the whole file; another run may be active). Build the HTML final
 report via the artifact flow: load the `artifact-design` skill FIRST (design
 guidance), write the page to
-`<project>/.claude/local-orchestrators/<task-name>/report/final-report.html`, then
+`<project>/.touch/local-orchestrators/<task-name>/report/final-report.html`, then
 publish that file with the Artifact tool. The task-folder file is the required
 local copy — the dashboard auto-links artifacts inside the task folder, so it
 must live there, not in /tmp, and stays even after publishing. KEEP the task

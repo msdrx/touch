@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- This URL carries the per-boot token in its query string, and this page
+     renders links out of agent-authored markdown (mdInline). `rel="noopener"`
+     blocks window.opener and NOT the Referer header; a modern browser's default
+     strips the query cross-origin, but the token now also authorizes memory
+     writes, so the policy is PINNED rather than depended upon (SECURITY-5). -->
+<meta name="referrer" content="no-referrer">
 <title>orchestrator monitor</title>
 <style>
   :root {
@@ -22,6 +28,13 @@
   /* lives in the timeplan card's title row, after the right-aligned range */
   #statsLink { color:var(--info); font-size:12px; font-weight:500; text-transform:none; letter-spacing:0; text-decoration:none; white-space:nowrap; }
   #statsLink:hover, #statsLink:focus-visible { text-decoration:underline; text-underline-offset:3px; }
+  /* The ONE link off this page (G4): memory.html is a second document on the
+     same server and the same per-boot token. #overall keeps the header's auto
+     margin in the task/stats views, so the link sits after it there and takes
+     the auto margin itself on home, where #overall is hidden. */
+  #memoryLink { color:var(--info); font-size:12px; font-weight:500; text-decoration:none; white-space:nowrap; flex:none; cursor:pointer; }
+  #memoryLink:hover, #memoryLink:focus-visible { text-decoration:underline; text-underline-offset:3px; }
+  body.home #memoryLink { margin-left:auto; }
   #crumb { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:40vw; }
   #taskSel, #rateSel, #zoomSel { background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 8px; font:12px/1.4 inherit; max-width:280px; }
   #rate, #zoom { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
@@ -385,6 +398,11 @@
     <option value="2">200%</option>
   </select></label>
   <span id="overall"></span>
+  <!-- No href in the markup on purpose: the only URL worth navigating to is the
+       TOKENED one, and the script below writes it. An untokened /memory here
+       would be a live link straight to memory.html's auth banner whenever the
+       script did not run — the dead end the token carrier exists to avoid. -->
+  <a id="memoryLink" title="this project's Claude Code memory files">memory</a>
 </header>
 <div id="authBanner" hidden role="alert"></div>
 <main id="home"></main>
@@ -485,6 +503,11 @@ const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const tokenParam = (sep) => TOKEN ? sep + "token=" + encodeURIComponent(TOKEN) : "";
 /** Same-origin URL with the token appended, whatever the path already carries. */
 const withToken = (url) => url + tokenParam(url.includes("?") ? "&" : "?");
+// The one link off this page (G4). Tokened for the same reason #statsLink is: a
+// bare /memory is a top-level navigation with no carrier, and it lands the
+// operator on memory.html's auth banner — a dead end that reads as a bug.
+const memoryLinkEl = document.getElementById("memoryLink");
+if (memoryLinkEl) memoryLinkEl.href = withToken("/memory");
 // A tokenless page is a page that will 401 on /tasks and get its /ws upgrade
 // closed with no status code the browser will hand to JS. Both failures look
 // EXACTLY like "nothing is happening" — an empty task grid and a socket that
@@ -1332,7 +1355,7 @@ function mdInline(s) {
     .replace(/\*([^*]+)\*/g, "<em>$1</em>")
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, href) =>
       /^(https?:\/\/|#|\.{0,2}\/)/.test(href)
-        ? '<a href="' + href + '" target="_blank" rel="noopener">' + txt + "</a>" : m);
+        ? '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + txt + "</a>" : m);
 }
 function renderMd(src) {
   const lines = src.replace(/\r\n?/g, "\n").split("\n");

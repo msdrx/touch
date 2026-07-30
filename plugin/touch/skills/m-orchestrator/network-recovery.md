@@ -66,7 +66,7 @@ sketch.
 ## Detect: was there an outage / is the run alive?
 
 ```bash
-ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.claude/local-orchestrators}"
+ORCH="${ORCH_TASKS_ROOT:-${CLAUDE_PROJECT_DIR:-$PWD}/.touch/local-orchestrators}"
 TASK="$ORCH/<task-name>"            # the tasks root of SKILL.md step 1
 tail -3 "$TASK/events.jsonl"        # token ticks seconds old => alive
 tail -2 "<wf_dir>/journal.jsonl"    # a started with no result + long silence => stalled
@@ -80,7 +80,7 @@ distinguish by the signatures in layer 1):
 python3 - <<'EOF'
 import json; from datetime import datetime
 prev=None
-for line in open("<project>/.claude/local-orchestrators/<task-name>/events.jsonl"):
+for line in open("<project>/.touch/local-orchestrators/<task-name>/events.jsonl"):
     r=json.loads(line); ts=datetime.fromisoformat(r["ts"])
     if prev and (ts-prev).total_seconds()>90:
         print(prev.strftime("%H:%M:%S"),"->",ts.strftime("%H:%M:%S"),

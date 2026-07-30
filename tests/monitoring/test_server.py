@@ -589,15 +589,15 @@ def test_the_two_daemons_ship_the_same_resolver_byte_for_byte():
             f"{name}() must be self-contained (no module-level ROOT reference)"
 
 
-def _tasks_root(env, cwd, as_file=WATCHER_PATH):
+def _tasks_root(env, cwd):
     """Run the daemons' own resolver in a subprocess with a controlled env/cwd.
 
-    ``as_file`` is the ``__file__`` the function believes it has — that is what
-    the legacy rung measures ``../../local-orchestrators`` from, so pointing it
-    somewhere outside a repo is how the "only if it already exists" arm is
-    exercised without moving the real file. Only the function is exec'd, never
-    the module body (which would tail a journal); it is self-contained by the
-    byte-equality test above.
+    Only the function is exec'd, never the module body (which would tail a
+    journal); it is self-contained by the byte-equality test above. It no longer
+    takes an ``as_file``: the ladder's fourth rung measured
+    ``../../local-orchestrators`` from ``__file__`` and that rung is DELETED
+    (G10), which `test_the_ladder_is_three_rungs` asserts as source text as well
+    as behaviour.
     """
     import subprocess
     clean = {k: v for k, v in os.environ.items()
@@ -611,7 +611,7 @@ def _tasks_root(env, cwd, as_file=WATCHER_PATH):
         f"src = open({WATCHER_PATH!r}, encoding='utf-8').read()\n"
         "body = src[src.index('\\ndef resolve_tasks_root('):"
         "src.index('\\ndef in_plugin_cache(')]\n"
-        f"ns = {{'os': os, '__file__': {as_file!r}}}\n"
+        "ns = {'os': os}\n"
         "exec(body, ns)\n"
         "print(ns['resolve_tasks_root']())\n"
     )
@@ -639,7 +639,13 @@ def _nearest_claude_marker(start):
 
 
 def test_tasks_root_resolution_order():
-    """env > $CLAUDE_PROJECT_DIR > cwd walk-up > legacy-only-if-it-exists."""
+    """env > $CLAUDE_PROJECT_DIR > cwd walk-up, and `.touch/` is the state dir (G10).
+
+    The MARKER dir and the STATE dir are deliberately different: the walk-up
+    looks for `.claude/` (that is what marks a Claude Code project — `.touch/` is
+    created by Touch and gitignored, so it cannot mark one) and then joins
+    `.touch/local-orchestrators`. Every arm below asserts the pair.
+    """
     import shutil
     base = tempfile.mkdtemp(prefix="tasksroot-", dir=_TMP_BASE)
     try:
@@ -649,57 +655,130 @@ def test_tasks_root_resolution_order():
         os.makedirs(explicit)
         os.makedirs(os.path.join(project, ".claude"))
         os.makedirs(deep)
+        want = os.path.join(project, ".touch", "local-orchestrators")
         # 1. $ORCH_TASKS_ROOT wins over everything, including the project.
         assert _tasks_root({"ORCH_TASKS_ROOT": explicit,
                             "CLAUDE_PROJECT_DIR": project}, deep) == explicit
         # 2. $CLAUDE_PROJECT_DIR beats the cwd walk-up (and does NOT need to
         #    exist: the anchor is the project, not a directory listing).
-        assert _tasks_root({"CLAUDE_PROJECT_DIR": project}, deep) == \
-            os.path.join(project, ".claude", "local-orchestrators")
-        # 3. cwd walk-up finds the nearest .claude/ marker.
-        assert _tasks_root({}, deep) == \
-            os.path.join(project, ".claude", "local-orchestrators")
-        # 4a. the legacy rung, from a daemon that DOES have a sibling tasks dir.
-        legacy_home = os.path.join(base, "pkg", "shared", "monitoring")
-        os.makedirs(legacy_home)
-        os.makedirs(os.path.join(base, "pkg", "local-orchestrators"))
+        assert _tasks_root({"CLAUDE_PROJECT_DIR": project}, deep) == want
+        # 3. cwd walk-up finds the nearest .claude/ marker and joins .touch/.
+        assert _tasks_root({}, deep) == want
+        # ...and nothing was resolved under the MARKER dir. The old literal is
+        # ASSEMBLED here (as `test_shell.py` assembles its own): sp-docs adds a
+        # repo-wide grep backstop for it, and a test asserting its ABSENCE must
+        # not be the one tracked file that carries it.
+        legacy = ".claude/" + "local-orchestrators"
+        assert legacy not in _tasks_root({}, deep)
+        # 4. nothing at all: no env, no project, no marker above cwd -> "" (the
+        #    caller exits 1; it never invents a root). The former FOURTH rung,
+        #    a module-relative `../../local-orchestrators`, would have answered
+        #    here — a sibling tree is planted to prove it no longer does.
+        #    This arm only means what it says while NO ancestor of the throwaway
+        #    tree holds a `.claude/`: one anywhere above $TMPDIR (this session's
+        #    own scratchpad lives at /tmp/claude-1000/-home-laniakea-Projects-
+        #    touch/…, one directory away from being exactly that) turns the cwd
+        #    walk-up into a hit and flips "" to a real path. Assert the premise
+        #    rather than assume it, and say so instead of failing on it.
         orphan = os.path.join(base, "orphan")
         os.makedirs(orphan)
-        # Arms 4a and 4b both need `orphan` to be genuinely marker-free: the cwd
-        # walk-up is rung 3 and would answer before either of them.
         marker = _nearest_claude_marker(orphan)
         if marker:
-            _skip(f"tasks-root arms 4a/4b: an ancestor of the temp tree holds {marker}")
+            _skip(f"tasks-root arm 4: an ancestor of the temp tree holds {marker}")
             return
-        assert _tasks_root({}, orphan,
-                           as_file=os.path.join(legacy_home, "decision_watcher.py")) == \
-            os.path.join(base, "pkg", "local-orchestrators")
-        # 4b. ...and nothing at all: no env, no project, no marker above cwd, no
-        #     legacy dir -> "" (the caller exits 1; it never invents a root).
-        #     This arm only means what it says while NO ancestor of the throwaway
-        #     tree holds a `.claude/`: one anywhere above $TMPDIR (this session's
-        #     own scratchpad lives at /tmp/claude-1000/-home-laniakea-Projects-
-        #     touch/…, one directory away from being exactly that) turns the cwd
-        #     walk-up into a hit and flips "" to a real path. Assert the premise
-        #     rather than assume it, and say so instead of failing on it.
-        lonely = os.path.join(base, "lonely", "shared", "monitoring")
-        os.makedirs(lonely)
-        assert _tasks_root({}, orphan,
-                           as_file=os.path.join(lonely, "decision_watcher.py")) == "", \
-            "an unresolvable root must be empty"
+        os.makedirs(os.path.join(base, "pkg", "shared", "monitoring"))
+        os.makedirs(os.path.join(base, "pkg", "local-orchestrators"))
+        assert _tasks_root({}, orphan) == "", "an unresolvable root must be empty"
+        assert os.listdir(os.path.join(base, "pkg", "local-orchestrators")) == [], \
+            "the deleted module-relative rung must not have been consulted"
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
 
-def test_the_legacy_rung_is_taken_only_when_the_directory_exists():
-    """The `../../local-orchestrators` rung is in-repo compatibility, not a guess.
+def test_the_ladder_is_three_rungs():
+    """The module-relative fourth rung is GONE from the source (G10, LAYOUT-15).
 
-    A packaged copy sits at `<plugin>/shared/monitoring`, so `../..` is the
-    plugin root — globbing there would sweep sibling plugins looking for other
-    people's task folders.
+    A packaged copy sits at `<plugin>/shared/monitoring`, so `../..` was the
+    plugin root — resolving there would sweep sibling plugins looking for other
+    people's task folders — and after GD-U1 there is nothing two levels above
+    this directory to find anyway. Asserted as text as well as behaviour because
+    the behavioural arm above depends on a marker-free temp tree and may skip.
     """
     src = _function_source(MODULE_PATH, "resolve_tasks_root")
-    assert 'return legacy if os.path.isdir(legacy) else ""' in src, src
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.strip().startswith(("#", '"""', "*", "1.", "2.",
+                                                   "3.")))
+    assert "__file__" not in src, "the ladder no longer measures anything from __file__"
+    assert "local-orchestrators" in src
+    assert ".claude/" + "local-orchestrators" not in src, \
+        "no rung joins the old .claude/ tasks root any more"
+    assert src.count('".touch", "local-orchestrators"') == 2, \
+        "rungs 2 and 3 both join .touch/local-orchestrators"
+    assert 'return ""' in code, "the ladder must return '' when nothing resolves"
+
+
+def test_the_bash_and_python_ladders_resolve_the_same_root():
+    """status.sh and both daemons must agree, for the same env and cwd (I5).
+
+    Three implementations of one decision (G10) — the bash resolver in
+    `status.sh`, and the byte-pinned Python one in both daemons — so the pin
+    between the two Python copies is not enough: this arm compares the bash
+    answer with the Python answer directly, which is the only check that would
+    catch `status.sh` being flipped to `.touch/` while a daemon was not (or the
+    reverse).
+
+    Rung 1 (`$ORCH_TASKS_ROOT`) is compared for ABSOLUTE values in the loop
+    below, which is what every writer in this repo exports. A RELATIVE value is
+    the one shape where the two spellings differ on the surface — bash echoes it
+    verbatim, the Python resolver returns `os.path.abspath` of it — so the last
+    arm asserts the invariant that actually holds there: read against the SAME
+    cwd, the two answers are the same directory. Asserted rather than left
+    implicit, so a future reader does not mistake the asymmetry for drift.
+    """
+    import shutil
+    import subprocess
+    status_sh = os.path.join(str(MON), "status.sh")
+    base = tempfile.mkdtemp(prefix="ladderpair-", dir=_TMP_BASE)
+    try:
+        project = os.path.join(base, "project")
+        deep = os.path.join(project, "a", "b")
+        os.makedirs(os.path.join(project, ".claude"))
+        os.makedirs(deep)
+        src = open(status_sh, encoding="utf-8").read()
+        body = src[src.index("resolve_tasks_root() {"):
+                   src.index('if [ -n "${ORCH_STATE_DIR:-}" ]')]
+        for env, cwd in (({"CLAUDE_PROJECT_DIR": project}, deep),   # rung 2
+                         ({}, deep),                                # rung 3
+                         ({"ORCH_TASKS_ROOT": os.path.join(base, "x")}, deep)):
+            clean = {k: v for k, v in os.environ.items()
+                     if k not in ("ORCH_TASKS_ROOT", "CLAUDE_PROJECT_DIR",
+                                  "ORCH_STATE_DIR")}
+            clean.update(env)
+            proc = subprocess.run(
+                ["bash", "-c", body + "\nresolve_tasks_root"],
+                env=clean, cwd=cwd, capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stdout.strip() == _tasks_root(env, cwd), \
+                (env, cwd, proc.stdout.strip(), _tasks_root(env, cwd))
+        # ...and a RELATIVE rung-1 value: bash prints it verbatim, Python
+        # absolutises it, and the two still name the same directory when both are
+        # read against the cwd they were resolved in.
+        relative = os.path.join("rel", "runs")
+        env = {"ORCH_TASKS_ROOT": relative}
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("ORCH_TASKS_ROOT", "CLAUDE_PROJECT_DIR",
+                              "ORCH_STATE_DIR")}
+        clean.update(env)
+        proc = subprocess.run(["bash", "-c", body + "\nresolve_tasks_root"],
+                              env=clean, cwd=deep, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == relative, proc.stdout
+        python_answer = _tasks_root(env, deep)
+        assert os.path.isabs(python_answer), python_answer
+        assert os.path.realpath(os.path.join(deep, proc.stdout.strip())) == \
+            os.path.realpath(python_answer), (proc.stdout.strip(), python_answer)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_in_plugin_cache_walks_up_to_a_plugin_manifest():
@@ -918,7 +997,16 @@ def test_the_token_comparison_is_constant_time():
     import inspect
     src = inspect.getsource(ms.token_ok)
     assert "hmac.compare_digest" in src, src
-    assert 'presented = presented_token(headers, query) or ""' in src, src
+    assert 'presented = presented_token(headers, query, header_only=header_only) or ""' \
+        in src, src
+    # ...and the header-only carrier is a real restriction, not a parameter that
+    # is accepted and ignored: a write's token may not ride in the query string
+    # (W4), because the page's own URL carries it there.
+    assert ms.presented_token({}, f"token={ms.TOKEN}") == ms.TOKEN
+    assert ms.presented_token({}, f"token={ms.TOKEN}", header_only=True) == ""
+    assert ms.presented_token({"x-orch-token": ms.TOKEN}, "", header_only=True) == ms.TOKEN
+    assert ms.presented_token({"authorization": f"Bearer {ms.TOKEN}"}, "",
+                              header_only=True) == ms.TOKEN
 
 
 def test_the_ws_origin_allowlist_refuses_a_foreign_page():
@@ -1065,12 +1153,21 @@ def test_report_html_from_file_is_sandboxed_without_scripts():
     are static, so scripts are what gets given up.
     """
     src = open(MODULE_PATH, encoding="utf-8").read()
-    assert r'b"Content-Security-Policy: sandbox\r\n"' in src, "sandbox header gone"
+    # The string is now a NAMED constant, byte-identical with the aggregator's
+    # `FILE_CSP` — GD-20's verbatim twin, made machine-checkable across the two
+    # servers (SECURITY-4; the cross-server comparison itself lives in the
+    # consolidated memory suite, which can import both).
+    assert ms.FILE_CSP == "sandbox", ms.FILE_CSP
+    assert "allow-scripts" not in ms.FILE_CSP, ms.FILE_CSP
+    assert ms.NO_REFERRER == "no-referrer", ms.NO_REFERRER
+    assert 'FILE_CSP = "sandbox"' in src, "the constant must be a bare literal"
+    assert 'f"Content-Security-Policy: {FILE_CSP}\\r\\n"' in src, \
+        "the /file HTML branch must send the constant"
+    assert 'f"Referrer-Policy: {NO_REFERRER}\\r\\n"' in src, src
     # the header itself, not the prose explaining why it is gone
     for line in src.splitlines():
-        assert not (line.lstrip().startswith(("b\"", "b'")) and "allow-scripts" in line), \
+        assert not (line.lstrip().startswith(("b\"", "b'", 'f"')) and "allow-scripts" in line), \
             f"a script in a report can lift the token: {line.strip()}"
-    assert r'b"Referrer-Policy: no-referrer\r\n"' in src, src
 
 
 def test_the_startup_line_does_not_print_the_token_into_a_0644_log():
@@ -2413,6 +2510,1260 @@ def test_repo_fixture_resolution_is_anchored():
     if _FIXTURES is not None:
         assert os.path.isdir(_FIXTURES), _FIXTURES
         assert _is_repo_corpus(os.path.dirname(_FIXTURES))
+
+
+# --------------------------------------------------------------------------
+# I10-I12/I14 — the FILE PLANE: the memory routes, their auth and transport
+# rules, the G7 write path, `/health`'s memory block.
+#
+# Every arm here drives `ms.handle` over a real loopback socket (the module's
+# own HTTP parsing is half of what is under test: methods, bodies, 405, 411,
+# 415), with `ms.MEMORY_ROOT` / `ms.MEMORY_WRITE` swapped to a throwaway tree —
+# never the repo's own `.touch/memory`, which a session actually reads.
+#
+# The consolidated end-to-end pass (both postures, the node+vm page harness, the
+# cross-server `FILE_CSP` equality check) is a separate additive file by GD-U6;
+# what lives here is the per-rule coverage of THIS module's own code.
+# --------------------------------------------------------------------------
+
+
+def _memory_tree(prefix="memtest-"):
+    """A throwaway `<base>/.touch/memory`, returned with its base."""
+    base = tempfile.mkdtemp(prefix=prefix, dir=_TMP_BASE)
+    return base, os.path.join(base, ".touch", "memory")
+
+
+class _memory_root:
+    """Point the module at a throwaway memory root, with the plane on or off.
+
+    A context manager and not a fixture: `MEMORY_ROOT`/`MEMORY_WRITE` are
+    module globals read at CALL time (which is what lets an operator's flag and
+    a test's temp tree use the same code path), so every arm must put them back.
+    """
+
+    def __init__(self, root, write=True):
+        self.root = root
+        self.write = write
+
+    def __enter__(self):
+        self.saved = (ms.MEMORY_ROOT, ms.MEMORY_WRITE)
+        ms.MEMORY_ROOT, ms.MEMORY_WRITE = self.root, self.write
+        # `/health`'s alignment answer is memoised per root for a couple of
+        # seconds (MEMORY_HEALTH_TTL); a test tree is short-lived and may reuse a
+        # path, so the cache is dropped on the way in AND out — no arm may inherit
+        # another arm's answer.
+        ms._MEMORY_ALIGN_CACHE.clear()
+        return self.root
+
+    def __exit__(self, *exc):
+        ms.MEMORY_ROOT, ms.MEMORY_WRITE = self.saved
+        ms._MEMORY_ALIGN_CACHE.clear()
+        return False
+
+
+def _http(method, target, headers=(), body=None, query_token=False,
+          header_token=True, origin=True, content_type="application/json",
+          write_marker=None):
+    """One request over a real socket. Returns `(status, headers, body bytes)`.
+
+    The defaults are what the page sends for a WRITE: the token in
+    `X-Orch-Token`, `X-Touch-Write: 1`, a same-origin `Origin` built from the
+    ephemeral port, and a JSON content type. Every one of them is switchable,
+    because each is a rule with its own arm below.
+    """
+    if write_marker is None:
+        write_marker = method in ("POST", "PUT", "DELETE")
+
+    async def run():
+        server = await asyncio.start_server(ms.handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            path = target
+            if query_token:
+                path += ("&" if "?" in path else "?") + f"token={ms.TOKEN}"
+            head = [f"{method} {path} HTTP/1.1", f"Host: 127.0.0.1:{port}",
+                    "Connection: close"]
+            if header_token:
+                head.append(f"X-Orch-Token: {ms.TOKEN}")
+            if write_marker:
+                head.append("X-Touch-Write: 1")
+            if origin is True:
+                head.append(f"Origin: http://127.0.0.1:{port}")
+            elif origin:
+                head.append(f"Origin: {origin}")
+            raw = b"" if body is None else json.dumps(body).encode()
+            if raw:
+                if content_type:
+                    head.append(f"Content-Type: {content_type}")
+                head.append(f"Content-Length: {len(raw)}")
+            elif content_type and method in ("POST", "PUT"):
+                head.append(f"Content-Type: {content_type}")
+            head.extend(headers)
+            writer.write(("\r\n".join(head) + "\r\n\r\n").encode() + raw)
+            await writer.drain()
+            data = await asyncio.wait_for(reader.read(-1), 10)
+            writer.close()
+            top, _, payload = data.partition(b"\r\n\r\n")
+            lines = top.decode("latin1").split("\r\n")
+            status = int(lines[0].split()[1])
+            got = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    got[key.strip().lower()] = value.strip()
+            return status, got, payload
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    return _run(run())
+
+
+def _json(out):
+    """The JSON body of a `_http` answer, asserting it IS json (UI-1/UI-4)."""
+    status, headers, body = out
+    assert "application/json" in headers.get("content-type", ""), \
+        (status, headers.get("content-type"), body[:80])
+    assert headers.get("cache-control") == "no-store", headers
+    for key in headers:
+        assert not key.startswith("access-control-"), \
+            f"the memory group must never emit CORS headers ({key})"
+    return status, json.loads(body)
+
+
+def _seed(root, name, text):
+    """Write a memory file the way anything but this server would."""
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_memory_routes_dispatch_on_the_method():
+    """SERVER-1/SECURITY-2: a known route on the wrong method is 405 + Allow.
+
+    The bug this closes is not hypothetical: `POST /tasks` and `DELETE /` both
+    answered as GETs, so a `/memory/file?...&op=delete`-shaped URL in the address
+    bar would have been a clickable, prefetchable, `<img src>`-able mutation.
+    """
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            status, body = _json(_http("POST", "/api/memory/list",
+                                       body={"content": "x\n"}))
+            assert status == 405, (status, body)
+            assert body["allow"] == ["GET"], body
+            status, headers, _ = _http("PATCH", "/api/memory/file?name=a.md",
+                                       body={"content": "x\n"})
+            assert status == 405, status
+            allow = headers.get("allow", "")
+            for verb in ("GET", "POST", "PUT", "DELETE"):
+                assert verb in allow, (verb, allow)
+            # ...and a GET on the file route is a READ, never a delete: the table
+            # is keyed by (method, route), so there is no verb smuggling.
+            _seed(root, "a.md", "hi\n")
+            status, body = _json(_http("GET", "/api/memory/file?name=a.md",
+                                       query_token=True, header_token=False))
+            assert status == 200 and body["content"] == "hi\n", body
+            assert os.path.isfile(os.path.join(root, "a.md"))
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_an_unknown_memory_route_is_a_json_404_not_the_dashboard():
+    """SERVER-7/UI-1: the HTML fallback must never own a path under the prefix.
+
+    `GET /nope` still serves the page — that is the existing behaviour and out of
+    scope (SERVER-1b) — but a `fetch` typo under `/api/memory/` used to get 200
+    + 151 KB of HTML, which a client's `res.json()` turns into a silent empty
+    render.
+    """
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            status, body = _json(_http("GET", "/api/memory/fiel?name=a.md"))
+            assert status == 404 and body["category"] == "unknown-route", body
+            status, body = _json(_http("GET", "/api/memory"))
+            assert status == 404, (status, body)
+            # the untouched fallback, for contrast
+            status, headers, page = _http("GET", "/nope", query_token=True)
+            assert status == 200 and "text/html" in headers["content-type"]
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_memory_write_needs_a_header_token_a_marker_and_an_origin():
+    """G5/W2/W3/W4: four independent gates, each refused on its own."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            payload = {"content": "hi\n"}
+            # 1. the token may NOT ride in the query string on a write (W4).
+            #    ...and the API's own 401 is JSON, so the page raises its auth
+            #    banner instead of reporting "this build has no memory API".
+            status, body = _json(_http(
+                "PUT", "/api/memory/file?name=a.md", body=payload,
+                query_token=True, header_token=False))
+            assert status == 401, (status, body)
+            assert body["category"] == "unauthorized", body
+            assert "X-Orch-Token" in body["reason"], body
+            # ...while the same URL is fine for a READ.
+            _seed(root, "a.md", "hi\n")
+            status, _ = _json(_http("GET", "/api/memory/file?name=a.md",
+                                    query_token=True, header_token=False))
+            assert status == 200, status
+            # 2. a foreign Origin is refused (DNS rebinding / cross-site post).
+            status, body = _json(_http("PUT", "/api/memory/file?name=a.md",
+                                       body=payload, origin="http://evil.example"))
+            assert status == 403 and body["category"] == "origin", body
+            # 3. an ABSENT Origin is fine on a read and refused on a write (W3).
+            status, _ = _json(_http("GET", "/api/memory/list", origin=False))
+            assert status == 200, status
+            status, body = _json(_http("PUT", "/api/memory/file?name=a.md",
+                                       body=payload, origin=False))
+            assert status == 403 and body["category"] == "origin", body
+            # 4. and the custom marker header a simple cross-origin request
+            #    cannot set (W2).
+            status, body = _json(_http("PUT", "/api/memory/file?name=a.md",
+                                       body=payload, write_marker=False))
+            assert status == 403 and body["category"] == "write-marker", body
+            assert open(os.path.join(root, "a.md")).read() == "hi\n", \
+                "no refused write may have touched the file"
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_requires_write_auth_is_a_positive_predicate_over_the_route_table():
+    """SECURITY-16/W4: not `route not in OPEN_ROUTES`, which is fail-open."""
+    assert ms.requires_write_auth("PUT", "/api/memory/file") is True
+    assert ms.requires_write_auth("post", "/api/memory/file") is True
+    assert ms.requires_write_auth("DELETE", "/api/memory/file") is True
+    assert ms.requires_write_auth("GET", "/api/memory/file") is False
+    assert ms.requires_write_auth("GET", "/api/memory/list") is False
+    assert ms.requires_write_auth("PUT", "/tasks") is False
+    # derived FROM the table, so a new write entry is covered the moment it exists
+    for (method, route), op in ms.MEMORY_ROUTES.items():
+        assert ms.requires_write_auth(method, route) is (op in ms.MEMORY_WRITE_OPS)
+    assert ms.OPEN_ROUTES == frozenset({"/health"}), \
+        "the memory group must not have widened the open-route set"
+
+
+def test_the_memory_body_reader_is_bounded_and_explicit():
+    """SERVER-2/SECURITY-14/W9: 411 without a length, 413 over the cap, 400 chunked."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            status, body = _json(_http("POST", "/api/memory/file?name=a.md"))
+            assert status == 411 and body["category"] == "no-length", body
+            status, body = _json(_http(
+                "POST", "/api/memory/file?name=a.md",
+                headers=[f"Content-Length: {ms.MAX_MEMORY_BODY_BYTES + 1}"]))
+            assert status == 413 and body["category"] == "body-too-large", body
+            assert not os.path.exists(os.path.join(root, "a.md")), \
+                "an over-cap body must be refused BEFORE it is read"
+            status, body = _json(_http("POST", "/api/memory/file?name=a.md",
+                                       body={"content": "x\n"},
+                                       headers=["Transfer-Encoding: chunked"]))
+            assert status == 400 and body["category"] == "chunked", body
+            status, body = _json(_http("POST", "/api/memory/file?name=a.md",
+                                       body={"content": "x\n"},
+                                       content_type="text/plain"))
+            assert status == 415 and body["category"] == "content-type", body
+            # a length longer than the bytes that arrive is a 400, never a
+            # truncated instruction file
+            async def short():
+                server = await asyncio.start_server(ms.handle, "127.0.0.1", 0)
+                port = server.sockets[0].getsockname()[1]
+                try:
+                    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                    head = ["POST /api/memory/file?name=a.md HTTP/1.1",
+                            f"Host: 127.0.0.1:{port}", "Connection: close",
+                            f"X-Orch-Token: {ms.TOKEN}", "X-Touch-Write: 1",
+                            f"Origin: http://127.0.0.1:{port}",
+                            "Content-Type: application/json",
+                            "Content-Length: 400"]
+                    writer.write(("\r\n".join(head) + "\r\n\r\n").encode()
+                                 + b'{"content": "x')
+                    await writer.drain()
+                    writer.write_eof()
+                    data = await asyncio.wait_for(reader.read(-1), 10)
+                    writer.close()
+                    return int(data.split(b" ")[1])
+                finally:
+                    server.close()
+                    await server.wait_closed()
+            assert _run(short()) == 400, "a short body must be a 400"
+            assert not os.path.exists(os.path.join(root, "a.md"))
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_status_text_never_labels_an_unnamed_status_ok():
+    """SERVER-8: `STATUS_TEXT.get(status, "OK")` would send `409 OK`."""
+    assert ms.status_text(409) == "Conflict"
+    assert ms.status_text(411) == "Length Required"
+    assert ms.status_text(422) == "Unprocessable Content"
+    assert ms.status_text(599) == "Server Error"
+    assert ms.status_text(299) == "Success"
+    assert "OK" not in ms.status_text(599)
+    # ...and the fallback is DERIVED from the code (its class), so it cannot
+    # contradict the status the way a hand-written default did.
+    src = open(MODULE_PATH, encoding="utf-8").read()
+    assert "_STATUS_CLASS.get(status // 100" in src, src
+    for status in (200, 201, 400, 401, 403, 404, 405, 409, 411, 412, 413, 415,
+                   422, 503):
+        assert status in ms.STATUS_TEXT, status
+
+
+def test_the_flat_namespace_kills_traversal_and_config_shaped_names():
+    """G7 step 1 / W7: refused BEFORE any filesystem call."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            _seed(root, "a.md", "hi\n")
+            for name in ("..%2f..%2fserver.json", "../../server.json",
+                         "a/b.md", "settings.json", "settings.local.json",
+                         "hook.py", "run.sh", ".hidden.md", "notes.txt",
+                         "x" * 70 + ".md", "", "MEMORY.md%00.txt"):
+                status, body = _json(_http(
+                    "GET", "/api/memory/file?name=" + name, query_token=True,
+                    header_token=False))
+                assert status == 400, (name, status, body)
+                assert body["category"] == "bad-name", (name, body)
+            # ...and the same rule guards a write, so nothing lands outside
+            status, body = _json(_http("POST", "/api/memory/file?name=../evil.md",
+                                       body={"content": "x\n"}))
+            assert status == 400 and body["category"] == "bad-name", body
+            assert not os.path.exists(os.path.join(base, ".touch", "evil.md"))
+            assert sorted(os.listdir(root)) == ["a.md"], os.listdir(root)
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+    # ...and G7 step 1 is "not path handling ... before any filesystem call", so a
+    # refused name on a FRESH checkout must leave no filesystem effect at all —
+    # not even the memory root the write would have created (M-2, attempt 1: the
+    # seeded root above cannot see this, which is why it gets its own tree).
+    base, root = _memory_tree(prefix="memfresh-")
+    try:
+        with _memory_root(root):
+            assert not os.path.isdir(root), "the fresh tree must start absent"
+            status, body = _json(_http("POST", "/api/memory/file?name=../evil.md",
+                                       body={"content": "x\n"}))
+            assert status == 400 and body["category"] == "bad-name", body
+            assert not os.path.isdir(root), \
+                "a refused name must not create the memory root as a side effect"
+            assert not os.path.isdir(os.path.dirname(root)), \
+                "...nor its .touch/ parent"
+            # ...while a legitimate create on the same fresh tree DOES build it,
+            # so the arm above is about ordering and not about a disabled writer
+            status, body = _json(_http("POST", "/api/memory/file?name=first.md",
+                                       body={"content": "x\n"}))
+            assert status == 201, (status, body)
+            assert os.path.isfile(os.path.join(root, "first.md"))
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_planted_symlink_is_refused_and_never_followed():
+    """G7 step 2 / SERVER-5 / W6: a symlink in the memory dir is not a memory file.
+
+    Any local process — including an agent — can plant one, and following it
+    turns a memory save into an arbitrary-file overwrite.
+    """
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            os.makedirs(root, mode=0o700, exist_ok=True)
+            outside = os.path.join(base, "outside.md")
+            with open(outside, "w") as handle:
+                handle.write("do not touch\n")
+            os.symlink(outside, os.path.join(root, "link.md"))
+            status, body = _json(_http("GET", "/api/memory/file?name=link.md",
+                                       query_token=True, header_token=False))
+            assert status == 409 and body["category"] == "symlink", body
+            status, body = _json(_http("PUT", "/api/memory/file?name=link.md",
+                                       body={"content": "owned\n",
+                                             "ifMatch": "0" * 64}))
+            assert status == 409 and body["category"] == "symlink", body
+            assert open(outside).read() == "do not touch\n", "the link was followed"
+            # ...and the row for it is listed, honestly unwritable, WITHOUT
+            # publishing the target's size or mtime.
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            row = [r for r in listing["files"] if r["name"] == "link.md"][0]
+            assert row["writable"] is False and "symlink" in row["reason"], row
+            assert row["size"] == 0 and row["mtime_ns"] == 0, row
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_read_path_refuses_home_claude_and_a_plugin_cache():
+    """G7 step 3 / PROTOCOL-7 / Part D-9: `~/.claude` is a read-only tap, always.
+
+    The refusal is an explicit ancestor check and not a consequence of the
+    containment rule, so it survives a memory root that is itself configured to
+    point inside `~/.claude` — which is exactly what a hand-written
+    `autoMemoryDirectory` might do.
+    """
+    base = tempfile.mkdtemp(prefix="memhome-", dir=_TMP_BASE)
+    saved_home = os.environ.get("HOME")
+    try:
+        os.environ["HOME"] = base
+        inside = os.path.join(base, ".claude", "projects", "x", "memory")
+        os.makedirs(inside, mode=0o700)
+        try:
+            ms.safe_memory_path(inside, "MEMORY.md")
+            raise AssertionError("a root under ~/.claude must be refused")
+        except ms.MemoryRefusal as exc:
+            assert exc.status == 403 and exc.category == "home-claude", exc.category
+        # a plugin cache, by the same shape (W8, PROTOCOL-6, Part D-8)
+        cache = os.path.join(base, "cache", "touch", "0.2.0")
+        os.makedirs(os.path.join(cache, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(cache, ".claude-plugin", "plugin.json"), "w") as handle:
+            handle.write('{"name":"touch"}')
+        cached_root = os.path.join(cache, ".touch", "memory")
+        try:
+            ms.safe_memory_path(cached_root, "MEMORY.md")
+            raise AssertionError("a root inside a plugin cache must be refused")
+        except ms.MemoryRefusal as exc:
+            assert exc.status == 403 and exc.category == "plugin-cache", exc.category
+        # ...and a legitimate root still resolves, so the arms above mean something
+        ok = os.path.join(base, "proj", ".touch", "memory")
+        os.makedirs(ok, mode=0o700)
+        assert ms.safe_memory_path(ok, "MEMORY.md") == os.path.join(
+            os.path.realpath(ok), "MEMORY.md")
+    finally:
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_plugin_cache_root_disables_the_whole_family():
+    """SERVER-16: the family refuses loudly rather than writing into a cache."""
+    base = tempfile.mkdtemp(prefix="memcache-", dir=_TMP_BASE)
+    try:
+        os.makedirs(os.path.join(base, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(base, ".claude-plugin", "plugin.json"), "w") as handle:
+            handle.write('{"name":"touch"}')
+        root = os.path.join(base, "0.2.0", ".touch", "memory")
+        with _memory_root(root):
+            assert "plugin cache" in ms.memory_unavailable()
+            status, body = _json(_http("GET", "/api/memory/list"))
+            assert status == 503 and body["category"] == "memory-unavailable", body
+            status, body = _json(_http("POST", "/api/memory/file?name=a.md",
+                                       body={"content": "x\n"}))
+            assert status == 503, (status, body)
+            assert not os.path.exists(root), "nothing may be created in a cache"
+            health = ms.health_payload()["memory"]
+            assert health["present"] is False and health["writable"] is False
+        # ...and an unresolved project is the same shape with its own sentence
+        with _memory_root(""):
+            status, body = _json(_http("GET", "/api/memory/list"))
+            assert status == 503, status
+            assert "no project root" in body["reason"], body
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_write_plane_is_off_by_default():
+    """G6/W14/SECURITY-1: reads live, writes refused, and the list says why."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root, write=False):
+            _seed(root, "MEMORY.md", "# index\n")
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert status == 200, status
+            assert listing["memoryWrite"] is False, listing
+            # `writable` is the ROOT's own answer and stays true: the page words
+            # its disabled affordance from whichever of the two is false, so
+            # folding them would print the wrong reason.
+            assert listing["writable"] is True, listing
+            assert listing["files"][0]["writable"] is False, listing["files"]
+            for method, target, body in (
+                    ("POST", "/api/memory/file?name=new.md", {"content": "x\n"}),
+                    ("PUT", "/api/memory/file?name=MEMORY.md",
+                     {"content": "x\n", "ifMatch": "0" * 64}),
+                    ("DELETE", "/api/memory/file?name=MEMORY.md&ifMatch=" + "0" * 64,
+                     None)):
+                status, payload = _json(_http(method, target, body=body))
+                assert status == 403, (method, status, payload)
+                assert payload["category"] == "write-plane-off", payload
+            assert open(os.path.join(root, "MEMORY.md")).read() == "# index\n"
+            assert not os.path.exists(os.path.join(root, "new.md"))
+            assert ms.health_payload()["memoryWrite"] == "off"
+        with _memory_root(root, write=True):
+            assert ms.health_payload()["memoryWrite"] == "on"
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_write_flag_is_read_from_argv_and_the_env():
+    """The default-off decision has exactly two documented ways to be turned on."""
+    saved_argv, saved_env = list(sys.argv), os.environ.get("TOUCH_ALLOW_MEMORY_WRITE")
+    try:
+        os.environ.pop("TOUCH_ALLOW_MEMORY_WRITE", None)
+        sys.argv = ["monitor_server.py"]
+        assert ms.memory_write_enabled() is False
+        sys.argv = ["monitor_server.py", "--allow-memory-write"]
+        assert ms.memory_write_enabled() is True
+        # ...and the flag is not mistaken for a port (it starts with `-`)
+        assert ms.positional_args() == []
+        sys.argv = ["monitor_server.py"]
+        for value, want in (("1", True), ("on", True), ("true", True),
+                            ("0", False), ("", False), ("nope", False)):
+            os.environ["TOUCH_ALLOW_MEMORY_WRITE"] = value
+            assert ms.memory_write_enabled() is want, (value, want)
+    finally:
+        sys.argv = saved_argv
+        if saved_env is None:
+            os.environ.pop("TOUCH_ALLOW_MEMORY_WRITE", None)
+        else:
+            os.environ["TOUCH_ALLOW_MEMORY_WRITE"] = saved_env
+
+
+def test_the_write_path_is_atomic_optimistic_and_0600():
+    """G7 steps 4/5/6 + SECURITY-15: create, save, the two refusals, the modes."""
+    import stat as stat_mod
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            status, created = _json(_http("POST", "/api/memory/file?name=MEMORY.md",
+                                          body={"content": "# index\n"}))
+            assert status == 201, (status, created)
+            assert created["sha256"] == hashlib.sha256(b"# index\n").hexdigest()
+            assert os.path.isfile(os.path.join(root, "MEMORY.md"))
+            assert stat_mod.S_IMODE(os.stat(root).st_mode) == 0o700, "dir mode"
+            assert stat_mod.S_IMODE(
+                os.stat(os.path.join(root, "MEMORY.md")).st_mode) == 0o600
+            assert not [n for n in os.listdir(root) if ".tmp-" in n], \
+                "the temp file must not survive the replace"
+            # a create never overwrites (the page words a restore's 409 from this)
+            status, body = _json(_http("POST", "/api/memory/file?name=MEMORY.md",
+                                       body={"content": "x\n"}))
+            assert status == 409 and body["category"] == "exists", body
+            assert open(os.path.join(root, "MEMORY.md")).read() == "# index\n"
+            # a save carries the sha it read, and the answer's sha is adoptable
+            status, saved = _json(_http("PUT", "/api/memory/file?name=MEMORY.md",
+                                        body={"content": "# index\n\nhi\n",
+                                              "ifMatch": created["sha256"]}))
+            assert status == 200, (status, saved)
+            status, again = _json(_http("PUT", "/api/memory/file?name=MEMORY.md",
+                                        body={"content": "# index\n\nhi again\n",
+                                              "ifMatch": saved["sha256"]}))
+            assert status == 200 and again, (status, again)
+            # ...a stale sha is a 409 that PUBLISHES the current state
+            status, conflict = _json(_http("PUT", "/api/memory/file?name=MEMORY.md",
+                                           body={"content": "clobber\n",
+                                                 "ifMatch": created["sha256"]}))
+            assert status == 409 and conflict["category"] == "precondition", conflict
+            for key in ("sha256", "mtime_ns", "size", "content"):
+                assert key in conflict, (key, conflict)
+            assert conflict["content"] == "# index\n\nhi again\n", conflict
+            # ...and a conflict against bytes that are NOT valid UTF-8 publishes
+            # the sha and the size but no content: the page's reload-then-save
+            # exit would otherwise write replacement characters back over bytes
+            # it never actually read.
+            with open(os.path.join(root, "MEMORY.md"), "wb") as handle:
+                handle.write(b"\xff\xfe not utf-8\n")
+            status, conflict = _json(_http("PUT", "/api/memory/file?name=MEMORY.md",
+                                           body={"content": "clobber\n",
+                                                 "ifMatch": created["sha256"]}))
+            assert status == 409 and "content" not in conflict, conflict
+            assert conflict["sha256"] and conflict["size"], conflict
+            os.remove(os.path.join(root, "MEMORY.md"))
+            _seed(root, "MEMORY.md", "# index\n\nhi again\n")
+            assert open(os.path.join(root, "MEMORY.md")).read() == "# index\n\nhi again\n"
+            # ...and no precondition at all — or `"*"` — is a 412, not a write
+            for if_match in (None, "*"):
+                payload = {"content": "clobber\n"}
+                if if_match:
+                    payload["ifMatch"] = if_match
+                status, body = _json(_http("PUT", "/api/memory/file?name=MEMORY.md",
+                                           body=payload))
+                assert status == 412 and body["category"] == "no-precondition", body
+            assert open(os.path.join(root, "MEMORY.md")).read() == "# index\n\nhi again\n"
+            # ...and a MALFORMED precondition is the same named 412 — the point
+            # being that it is an ANSWER at all. `hmac.compare_digest` raises
+            # TypeError on a non-ASCII `str`, and a TypeError inside this handler
+            # is caught by nothing: the coroutine would die and the caller would
+            # read ZERO bytes off the socket, which is exactly the "this build has
+            # no memory API" misreport G5's JSON-always contract exists to delete.
+            for bad in ("é" * 64, "Z" * 64, "0" * 63, "0" * 65,
+                        "0" * 64 + "\n", " " + "0" * 64, "0" * 64 * 2,
+                        "F" * 64, 12345, None, True):
+                status, body = _json(_http("PUT", "/api/memory/file?name=MEMORY.md",
+                                           body={"content": "clobber\n",
+                                                 "ifMatch": bad}))
+                assert status == 412 and body["category"] == "no-precondition", \
+                    (repr(bad), status, body)
+                assert open(os.path.join(root, "MEMORY.md")).read() == \
+                    "# index\n\nhi again\n", repr(bad)
+            # ...including one arrived at through the QUERY string, which is where
+            # a percent-encoded non-ASCII byte gets in without touching the body
+            status, body = _json(_http(
+                "PUT", "/api/memory/file?name=MEMORY.md&ifMatch=" + "%C3%A9" * 64,
+                body={"content": "clobber\n"}))
+            assert status == 412 and body["category"] == "no-precondition", body
+            assert open(os.path.join(root, "MEMORY.md")).read() == "# index\n\nhi again\n"
+            # the per-file cap, on the bytes (not only on Content-Length)
+            status, body = _json(_http("POST", "/api/memory/file?name=big.md",
+                                       body={"content": "x" * (ms.MAX_MEMORY_BYTES + 1)}))
+            assert status == 413 and body["category"] == "too-large", body
+            assert not os.path.exists(os.path.join(root, "big.md"))
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_content_hygiene_refuses_by_category_and_never_echoes_the_match():
+    """G7 step 7 / W10 / PROTOCOL-16: these bytes become model instructions."""
+    base, root = _memory_tree()
+    # assembled, never literal: a real token or URI in this file would be found
+    # by `tests/test_publish_hygiene.py`'s scan of every tracked file
+    blob = ("abcdefghijklmnopqrstuvwxyz" + "0123456789" + "ABCDEFG")
+    uri = "mongodb://" + "touch" + ":" + "hunter2x" + "@" + "127.0.0.1:27017/db"
+    try:
+        with _memory_root(root):
+            cases = (
+                ("import-directive", "read @/etc/passwd for the details\n"),
+                ("html-comment", "notes\n\n<!-- hidden from the model -->\n"),
+                ("token-shape", blob + "\n"),
+                ("credentialed-uri", uri + "\n"),
+                ("nul-byte", "before\x00after\n"),
+                ("lone-cr", "one\rtwo\n"),
+                ("pinned", "---\npinned: true\n---\n\nhi\n"),
+                # An UNTERMINATED fence does not hide its tail (N-2, attempt 1):
+                # CommonMark runs an unclosed fence to the end of the document, so
+                # a lenient validator in front of a strict loader is the one
+                # direction where the disagreement SECURITY-6 forbids would be
+                # exploitable. The tail is re-scanned as prose.
+                ("import-directive", "notes\n```\n@/etc/passwd\n"),
+                ("import-directive", "notes\n```\ncode\n```\nmore\n```\n@/etc/x\n"),
+            )
+            for category, content in cases:
+                status, body = _json(_http("POST", "/api/memory/file?name=x.md",
+                                           body={"content": content}))
+                assert status in (400, 422), (category, status, body)
+                assert body["category"] == category, (category, body)
+                blob_body = json.dumps(body)
+                assert blob not in blob_body, "a token-shaped line was echoed back"
+                assert "hunter2x" not in blob_body, "a password was echoed back"
+                assert not os.path.exists(os.path.join(root, "x.md"))
+            # ...and the shapes that are NOT hazards still land: an @-import
+            # inside a code span is documentation, a CRLF file is just a file,
+            # and an inline comment mid-sentence is content the model does see.
+            for name, content in (("ok1.md", "use `@./notes.md` to import\n"),
+                                  ("ok2.md", "one\r\ntwo\r\n"),
+                                  ("ok3.md", "text <!-- inline --> more text\n"),
+                                  ("ok4.md", "```\n@/etc/passwd\n```\n"),
+                                  # an unterminated fence is re-scanned, not
+                                  # refused: what it holds is what decides
+                                  ("ok5.md", "notes\n```\nplain code\n")):
+                status, body = _json(_http("POST", "/api/memory/file?name=" + name,
+                                           body={"content": content}))
+                assert status == 201, (name, status, body)
+            # `pinned` with the confirmation the UI spells in words
+            status, body = _json(_http(
+                "POST", "/api/memory/file?name=pin.md",
+                body={"content": "---\npinned: true\n---\n\nhi\n",
+                      "allowPinned": True}))
+            assert status == 201, (status, body)
+            assert "pinned: true" in open(os.path.join(root, "pin.md")).read()
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_frontmatter_is_never_invented_and_modified_is_stamped_when_it_exists():
+    """SERVER-14/DOCS-16: two rules that are one decision about the CLI's contract."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            status, _ = _json(_http("POST", "/api/memory/file?name=plain.md",
+                                    body={"content": "# plain\n"}))
+            assert status == 201, status
+            body = open(os.path.join(root, "plain.md")).read()
+            assert body == "# plain\n", body
+            assert not body.startswith("---"), "frontmatter must never be invented"
+            status, _ = _json(_http("POST", "/api/memory/file?name=front.md",
+                                    body={"content": "---\ntitle: x\n---\n\nbody\n"}))
+            assert status == 201, status
+            stamped = open(os.path.join(root, "front.md")).read()
+            assert "modified:" in stamped, stamped
+            assert stamped.count("modified:") == 1, stamped
+            assert stamped.startswith("---\ntitle: x\n"), stamped
+            assert stamped.endswith("\n\nbody\n"), stamped
+            # a second write refreshes the SAME key rather than stacking another
+            sha = hashlib.sha256(stamped.encode()).hexdigest()
+            status, _ = _json(_http("PUT", "/api/memory/file?name=front.md",
+                                    body={"content": stamped.replace("body", "body2"),
+                                          "ifMatch": sha}))
+            assert status == 200, status
+            again = open(os.path.join(root, "front.md")).read()
+            assert again.count("modified:") == 1, again
+            # exactly one trailing newline, server-side (UI-3)
+            status, _ = _json(_http("POST", "/api/memory/file?name=nl.md",
+                                    body={"content": "text"}))
+            assert status == 201
+            assert open(os.path.join(root, "nl.md")).read() == "text\n"
+            sha = hashlib.sha256(b"text\n").hexdigest()
+            status, _ = _json(_http("PUT", "/api/memory/file?name=nl.md",
+                                    body={"content": "text\n\n\n\n", "ifMatch": sha}))
+            assert status == 200
+            assert open(os.path.join(root, "nl.md")).read() == "text\n"
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_delete_is_a_move_and_a_save_keeps_the_prior_bytes():
+    """G7 steps 8/9 / W11/W12/UI-7: nothing on this plane destroys the only copy."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            first = _seed(root, "note.md", "one\n")
+            status, saved = _json(_http("PUT", "/api/memory/file?name=note.md",
+                                        body={"content": "two\n", "ifMatch": first}))
+            assert status == 200, (status, saved)
+            history = os.path.join(root, ".history", "note.md")
+            kept = sorted(os.listdir(history))
+            assert len(kept) == 1, kept
+            assert open(os.path.join(history, kept[0])).read() == "one\n", \
+                "the bytes a save replaced must be recoverable"
+            status, gone = _json(_http(
+                "DELETE", "/api/memory/file?name=note.md&ifMatch=" + saved["sha256"]))
+            assert status == 200 and gone["deleted"] is True, gone
+            assert gone["trash"].startswith(".trash/note.md/"), gone
+            assert not os.path.exists(os.path.join(root, "note.md"))
+            trashed = os.path.join(root, gone["trash"])
+            assert open(trashed).read() == "two\n", "the deleted bytes must be kept"
+            import stat as stat_mod
+            assert stat_mod.S_IMODE(os.stat(trashed).st_mode) == 0o600
+            assert stat_mod.S_IMODE(
+                os.stat(os.path.join(root, ".trash")).st_mode) == 0o700, \
+                "every level of the side trees is 0700, not just the leaf"
+            # ...and the file is gone from the list, while the side trees are not
+            # listed as memory files (they are directories, and the list is flat)
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert [row["name"] for row in listing["files"]] == [], listing
+            # a delete needs the same precondition a save does
+            second = _seed(root, "note.md", "three\n")
+            status, body = _json(_http(
+                "DELETE", "/api/memory/file?name=note.md&ifMatch=" + "0" * 64))
+            assert status == 409 and body["category"] == "precondition", body
+            assert os.path.isfile(os.path.join(root, "note.md"))
+            status, body = _json(_http("DELETE", "/api/memory/file?name=note.md"))
+            assert status == 412, (status, body)
+            assert os.path.isfile(os.path.join(root, "note.md"))
+            # ...and a MALFORMED one is the same named 412 rather than a dead
+            # connection: on DELETE the carrier is the query string, so a
+            # percent-encoded non-ASCII value reaches the comparison URL-decoded
+            # (`hmac.compare_digest` raises TypeError on such a `str`).
+            for raw in ("%C3%A9" * 64, "Z" * 64, "0" * 63, "%2A"):
+                status, body = _json(_http(
+                    "DELETE", "/api/memory/file?name=note.md&ifMatch=" + raw))
+                assert status == 412 and body["category"] == "no-precondition", \
+                    (raw, status, body)
+                assert open(os.path.join(root, "note.md")).read() == "three\n", raw
+            assert second
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_refusal_names_the_most_specific_reason_the_request_earned():
+    """G7's hazards run VALIDATE -> DECIDE -> COMMIT, and the order is observable.
+
+    The step numbers in `memory_mutate` cannot execute 1...10 (step 4 IS the
+    atomic write), so the grouping is the contract and this arm is what holds it:
+    content hygiene runs AFTER existence and the precondition, so a request that
+    could not have succeeded anyway hears the reason it could not, rather than a
+    body complaint that would send the operator to fix the wrong thing.
+    """
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            os.makedirs(root, mode=0o700, exist_ok=True)
+            # the baseline: with nothing else wrong, the body's problem IS the
+            # answer — so every arm below is about precedence, not about a
+            # hygiene check that stopped working
+            status, body = _json(_http("POST", "/api/memory/file?name=x.md",
+                                       body={"content": "read @/etc/passwd\n"}))
+            assert status == 400 and body["category"] == "import-directive", body
+            # a save of unhygienic content to a file that is NOT there: 404, not
+            # 400 — the file's absence outranks the body's problem
+            status, body = _json(_http("PUT", "/api/memory/file?name=ghost.md",
+                                       body={"content": "read @/etc/passwd\n",
+                                             "ifMatch": "0" * 64}))
+            assert status == 404 and body["category"] == "missing", body
+            # ...a stale precondition outranks it too
+            first = _seed(root, "note.md", "one\n")
+            status, body = _json(_http("PUT", "/api/memory/file?name=note.md",
+                                       body={"content": "read @/etc/passwd\n",
+                                             "ifMatch": "0" * 64}))
+            assert status == 409 and body["category"] == "precondition", body
+            assert open(os.path.join(root, "note.md")).read() == "one\n"
+            assert first
+            # ...and a create into a directory already at its file cap is a 413,
+            # not a 400: the caps (G7 step 6) precede hygiene (step 7)
+            for index in range(ms.MAX_MEMORY_FILES):
+                _seed(root, f"n{index}.md", "x\n")
+            status, body = _json(_http("POST", "/api/memory/file?name=new.md",
+                                       body={"content": "read @/etc/passwd\n"}))
+            assert status == 413 and body["category"] == "too-many-files", body
+            assert not os.path.exists(os.path.join(root, "new.md"))
+            # ...and an existing name outranks both of them, because existence is
+            # the first thing the lock decides
+            status, body = _json(_http("POST", "/api/memory/file?name=n0.md",
+                                       body={"content": "read @/etc/passwd\n"}))
+            assert status == 409 and body["category"] == "exists", body
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_untokened_health_route_does_not_reparse_settings_per_request():
+    """`/health` has no token in front of it and runs inline on the event loop.
+
+    The memory block's only non-`stat` work is the `aligned` answer — up to three
+    settings files opened and JSON-parsed — so it is memoised for
+    `MEMORY_HEALTH_TTL` seconds on THIS route: an unauthenticated poller must not
+    be able to buy that work per request, in front of the live `/ws` stream. The
+    tokened list route is deliberately NOT cached, because an operator who has
+    just corrected `settings.local.json` is entitled to see it in the next refresh.
+    """
+    import time
+    base, root = _memory_tree()
+    real = ms.memory_settings_value
+    calls = []
+    saved_env = {name: os.environ.pop(name, None) for name in ms.MEMORY_ENV_OVERRIDES}
+    try:
+        def counted():
+            calls.append(1)
+            return real()
+
+        ms.memory_settings_value = counted
+        with _memory_root(root):
+            _seed(root, "MEMORY.md", "# index\n")
+            ms._MEMORY_ALIGN_CACHE.clear()
+            for _ in range(5):
+                assert "aligned" in ms.health_payload()["memory"]
+            assert len(calls) == 1, \
+                f"/health parsed the settings layers {len(calls)} times for 5 probes"
+            # ...and it is a CACHE, not a one-shot: past the TTL it reads again
+            ms._MEMORY_ALIGN_CACHE[root] = (
+                time.monotonic() - ms.MEMORY_HEALTH_TTL - 1, (None, "stale"))
+            assert "aligned" in ms.health_payload()["memory"]
+            assert len(calls) == 2, calls
+            # ...and the tokened route answers from the files every single time
+            before = len(calls)
+            for _ in range(3):
+                status, listing = _json(_http("GET", "/api/memory/list"))
+                assert status == 200, status
+                assert "aligned" in listing, listing
+            assert len(calls) == before + 3, (before, len(calls))
+    finally:
+        ms.memory_settings_value = real
+        ms._MEMORY_ALIGN_CACHE.clear()
+        for name, value in saved_env.items():
+            if value is not None:
+                os.environ[name] = value
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_symlinked_root_or_side_directory_is_refused():
+    """G7 step 2's rule where a per-FILE check cannot reach it.
+
+    `safe_memory_path` refuses a symlinked target, and documents that the ROOT is
+    trusted — because `realpath(root)` follows a symlinked root by design and
+    `memory_makedirs` accepts an existing directory at every level. So the two
+    containers are checked where they are resolved instead: the root once, for the
+    whole family, and `.history`/`.trash` at the write that would move bytes
+    through them.
+    """
+    base, root = _memory_tree(prefix="memlink-")
+    try:
+        elsewhere = os.path.join(base, "elsewhere")
+        os.makedirs(elsewhere, mode=0o700)
+        os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
+        os.symlink(elsewhere, root)
+        with _memory_root(root):
+            assert "symlink" in ms.memory_unavailable(), ms.memory_unavailable()
+            status, body = _json(_http("GET", "/api/memory/list"))
+            assert status == 503 and body["category"] == "memory-unavailable", body
+            status, body = _json(_http("POST", "/api/memory/file?name=a.md",
+                                       body={"content": "x\n"}))
+            assert status == 503, (status, body)
+            assert os.listdir(elsewhere) == [], \
+                "nothing may be written through a symlinked root"
+        os.unlink(root)
+        # ...and a symlinked `.trash` is refused at the delete that would follow it
+        os.makedirs(root, mode=0o700)
+        first = _seed(root, "note.md", "one\n")
+        os.symlink(elsewhere, os.path.join(root, ".trash"))
+        with _memory_root(root):
+            status, body = _json(_http(
+                "DELETE", "/api/memory/file?name=note.md&ifMatch=" + first))
+            assert status == 409 and body["category"] == "symlink", body
+            assert open(os.path.join(root, "note.md")).read() == "one\n", \
+                "a refused delete must leave the file exactly where it was"
+            assert os.listdir(elsewhere) == [], elsewhere
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _assert_file_plane_writes_no_stream():
+    """No function of the file plane may touch the plan-card stream (Part D-6).
+
+    An AST walk and not a grep, because the section's own comments and docstrings
+    NAME `events.jsonl` and `touch-status` — they have to, or the next reader
+    cannot know the rule exists — and a prose mention must not read as a write.
+    Docstrings are skipped; every other string constant, name and attribute in
+    every memory function is checked.
+    """
+    import ast
+    tree = ast.parse(open(MODULE_PATH, encoding="utf-8").read())
+    checked = 0
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not (node.name.startswith("memory_") or node.name in (
+                "safe_memory_path", "read_memory_body", "requires_write_auth",
+                "is_memory_route", "resolve_memory_root")):
+            continue
+        checked += 1
+        body = node.body[1:] if (node.body and isinstance(node.body[0], ast.Expr)
+                                 and isinstance(node.body[0].value, ast.Constant)
+                                 ) else node.body
+        for inner in body:
+            for child in ast.walk(inner):
+                if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                    for banned in ("events.jsonl", "touch-status", "status.sh"):
+                        assert banned not in child.value, (node.name, banned)
+                if isinstance(child, ast.Name):
+                    assert child.id not in ("EVENTS", "STATE_DIR", "subprocess"), \
+                        (node.name, child.id)
+    assert checked >= 15, f"only {checked} memory functions were walked"
+
+
+def test_every_mutation_leaves_one_audit_line_and_no_plan_event():
+    """G7 step 10 / PROTOCOL-20 / Part D-5/D-6.
+
+    The audit log is the file plane's own record — beside the memory dir, so the
+    `.gitignore` carve keeps it ignored and the list route never sees it — and it
+    is emphatically NOT the plan-card stream: a memory edit must not write an
+    `events.jsonl` line, and must never fabricate a badge.
+    """
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            sha = _seed(root, "note.md", "one\n")
+            status, saved = _json(_http("PUT", "/api/memory/file?name=note.md",
+                                        body={"content": "two\n", "ifMatch": sha}))
+            assert status == 200
+            status, _ = _json(_http(
+                "DELETE", "/api/memory/file?name=note.md&ifMatch=" + saved["sha256"]))
+            assert status == 200
+            audit = os.path.join(base, ".touch", "memory-audit.jsonl")
+            lines = [json.loads(ln) for ln in open(audit).read().splitlines() if ln]
+            assert [ln["op"] for ln in lines] == ["update", "delete"], lines
+            for line in lines:
+                assert line["w"] == "monitor", line
+                assert set(line) == {"ts", "op", "name", "bytes", "sha256", "w"}, line
+                assert line["name"] == "note.md"
+            import stat as stat_mod
+            assert stat_mod.S_IMODE(os.stat(audit).st_mode) == 0o600
+            # nothing under the memory root looks like a stream, and no event
+            # file was written anywhere in the tree
+            for dirpath, _dirs, files in os.walk(base):
+                for name in files:
+                    assert name != "events.jsonl", os.path.join(dirpath, name)
+            assert not os.path.exists(os.path.join(root, "memory-audit.jsonl")), \
+                "the audit log lives BESIDE the memory dir, not inside it"
+            _assert_file_plane_writes_no_stream()
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_every_growing_collection_on_the_file_plane_is_capped():
+    """G7 step 6 / W9 / W11: the directory, the history folders, the audit log.
+
+    Driven as units rather than through 100 HTTP round trips — the caps are the
+    thing under test, not the transport, and a test that took a hundred sockets
+    to say so would be the first one anybody deleted.
+    """
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            os.makedirs(root, mode=0o700, exist_ok=True)
+            # 1. the file-count cap on create
+            rows = [{"name": f"n{i}.md", "size": 10}
+                    for i in range(ms.MAX_MEMORY_FILES)]
+            try:
+                ms.memory_dir_caps(root, rows, 10)
+                raise AssertionError("the file-count cap did not fire")
+            except ms.MemoryRefusal as exc:
+                assert exc.status == 413 and exc.category == "too-many-files"
+            # 2. the directory byte cap on create
+            fat = [{"name": "big.md", "size": ms.MAX_MEMORY_DIR_BYTES}]
+            try:
+                ms.memory_dir_caps(root, fat, 1)
+                raise AssertionError("the directory byte cap did not fire")
+            except ms.MemoryRefusal as exc:
+                assert exc.status == 413 and exc.category == "dir-too-large"
+            # ...and a directory under both caps is accepted, so the arms mean
+            # something
+            ms.memory_dir_caps(root, rows[:2], 10)
+            # 3. history revisions per file
+            for n in range(ms.MEMORY_HISTORY_KEEP + 6):
+                ms.memory_snapshot(root, ".history", "note.md",
+                                   f"revision {n}\n".encode())
+            kept = os.listdir(os.path.join(root, ".history", "note.md"))
+            assert len(kept) <= ms.MEMORY_HISTORY_KEEP, len(kept)
+            # 4. the audit log, trimmed to whole lines
+            audit = os.path.join(base, ".touch", "memory-audit.jsonl")
+            with open(audit, "w") as handle:
+                handle.write(('{"ts": "x", "op": "update", "name": "n.md", '
+                              '"bytes": 1, "sha256": "0", "w": "monitor"}\n')
+                             * (ms.MEMORY_AUDIT_BYTES // 40))
+            assert os.path.getsize(audit) > ms.MEMORY_AUDIT_BYTES
+            ms.memory_audit(root, "update", "n.md", b"x\n")
+            assert os.path.getsize(audit) <= ms.MEMORY_AUDIT_BYTES, \
+                os.path.getsize(audit)
+            body = open(audit).read()
+            assert body.startswith("{") and body.endswith("}\n"), body[:60]
+            for line in body.splitlines():
+                json.loads(line)          # every survivor is a whole line
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_list_route_reports_the_index_budget_the_way_the_cli_measures_it():
+    """SERVER-13/DOCS-14: caps disclosed, and measured with frontmatter stripped."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            over = ("---\ntitle: x\n---\n" + "<!-- a comment -->\n"
+                    + "line\n" * (ms.MEM_INDEX_LINES + 5))
+            _seed(root, "MEMORY.md", over)
+            _seed(root, "topic.md", "just a note\n")
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert status == 200, status
+            assert listing["limits"] == {
+                "maxBytes": ms.MAX_MEMORY_BYTES, "maxFiles": ms.MAX_MEMORY_FILES,
+                "indexLines": 200, "indexBytes": 25600}, listing["limits"]
+            rows = {row["name"]: row for row in listing["files"]}
+            assert rows["MEMORY.md"]["isIndex"] is True
+            assert rows["MEMORY.md"]["overLoadLimit"] is True, rows["MEMORY.md"]
+            assert rows["MEMORY.md"]["hasFrontmatter"] is True
+            assert rows["topic.md"]["isIndex"] is False
+            assert rows["topic.md"]["overLoadLimit"] is False
+            assert rows["topic.md"]["lines"] == 1, rows["topic.md"]
+            # the index row is FIRST, and every field the page reads is present
+            assert listing["files"][0]["name"] == "MEMORY.md"
+            for row in listing["files"]:
+                for key in ("name", "size", "mtime_ns", "lines", "isIndex",
+                            "overLoadLimit", "hasFrontmatter", "writable", "reason"):
+                    assert key in row, (key, row)
+            # ...and the measurement itself strips what the CLI strips: the same
+            # file measures UNDER the limit once its body is short enough, even
+            # with frontmatter and a block comment adding lines.
+            fits = "---\ntitle: x\n---\n" + "<!-- c -->\n" + "line\n" * 10
+            lines, size = ms.memory_index_budget(fits)
+            assert lines == 10 and size == len(("line\n" * 10).encode()), (lines, size)
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_list_route_publishes_alignment_from_the_documented_layers():
+    """SERVER-4: the CLI's silent rejection is the whole reason this field exists."""
+    base, root = _memory_tree()
+    settings = os.path.join(base, ".claude", "settings.local.json")
+    saved = os.environ.get("CLAUDE_PROJECT_DIR")
+    try:
+        os.makedirs(os.path.dirname(settings), exist_ok=True)
+        os.environ["CLAUDE_PROJECT_DIR"] = base
+        with _memory_root(root):
+            # 1. nothing configured: NOT aligned, and the sentence names the default
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert listing["aligned"] is False, listing
+            assert "default" in listing["effective"], listing
+            # 2. the absolute path this server serves: aligned
+            with open(settings, "w") as handle:
+                json.dump({"autoMemoryDirectory": root}, handle)
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert listing["aligned"] is True, listing
+            assert listing["effective"] == root, listing
+            # 3. the obvious thing to write — a RELATIVE path — which the CLI
+            #    rejects with no error and no warning (DOCS-1). Reported as
+            #    not-aligned, naming the fallback, rather than believed.
+            with open(settings, "w") as handle:
+                json.dump({"autoMemoryDirectory": ".touch/memory"}, handle)
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert listing["aligned"] is False, listing
+            assert "not an absolute path" in listing["effective"], listing
+            # 4. somewhere else entirely: not aligned, and the page can name it
+            other = os.path.join(base, "elsewhere")
+            with open(settings, "w") as handle:
+                json.dump({"autoMemoryDirectory": other}, handle)
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert listing["aligned"] is False and listing["effective"] == other
+            # 5. an UNDOCUMENTED env override outranks every layer, so alignment
+            #    becomes unknowable rather than falsely confident (DOCS-13).
+            os.environ["CLAUDE_MEMORY_STORES"] = "somewhere"
+            try:
+                status, listing = _json(_http("GET", "/api/memory/list"))
+                assert listing["aligned"] is None, listing
+                assert "CLAUDE_MEMORY_STORES" in listing["effective"], listing
+            finally:
+                os.environ.pop("CLAUDE_MEMORY_STORES", None)
+            # ...and the validator itself, on the shapes the CLI checks
+            assert ms.memory_effective_dir("/abs/path") == "/abs/path"
+            assert ms.memory_effective_dir("relative/path") is None
+            assert ms.memory_effective_dir("") is None
+            assert ms.memory_effective_dir("/a") is None       # under 3 chars
+            assert ms.memory_effective_dir("//host/share") is None
+            assert ms.memory_effective_dir("/ok/path\x00") is None
+            assert ms.memory_effective_dir("~/mem") == os.path.expanduser("~/mem")
+    finally:
+        if saved is None:
+            os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            os.environ["CLAUDE_PROJECT_DIR"] = saved
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_health_publishes_the_memory_block_without_a_path_or_a_filename():
+    """SERVER-10: `/health` is the untokened route; a topic name is a disclosure."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            _seed(root, "MEMORY.md", "# index\n")
+            _seed(root, "acme-migration-blockers.md", "secret project\n")
+            payload = ms.health_payload()
+            block = payload["memory"]
+            assert set(block) == {"present", "writable", "aligned", "files",
+                                  "bytes", "indexOverLimit"}, block
+            assert block["files"] == 2 and block["bytes"] > 0, block
+            assert payload["memoryWrite"] in ("on", "off")
+            blob = json.dumps(payload)
+            assert "acme-migration-blockers" not in blob, blob
+            assert "MEMORY.md" not in blob, blob
+            assert root not in blob, blob
+            assert ".touch" not in blob, blob
+            assert "/" not in json.dumps(block), block
+            # ...and an over-budget index is reported as a boolean, from ONE
+            # file read: /health is untokened, so it may not walk the tree the
+            # way the tokened list route does.
+            _seed(root, "MEMORY.md", "line\n" * (ms.MEM_INDEX_LINES + 1))
+            assert ms.health_payload()["memory"]["indexOverLimit"] is True
+            # ...and the tokened list route is where the names DO appear
+            status, listing = _json(_http("GET", "/api/memory/list"))
+            assert "acme-migration-blockers.md" in [r["name"] for r in listing["files"]]
+            assert listing["root"] == root
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_discover_tasks_never_treats_memory_or_sessions_as_a_task():
+    """SERVER-9: a mis-set tasks root must not make the memory dir a "task".
+
+    With `ORCH_TASKS_ROOT` one level off — `.touch/` instead of
+    `.touch/local-orchestrators/` — every sibling would become a selectable
+    task, `/artifacts?task=memory` would list every memory file as a note and
+    `/file?task=memory&path=MEMORY.md` would serve them through the artifact
+    reader: a second read path for the memory tree with none of the memory rules.
+    """
+    base = tempfile.mkdtemp(prefix="discover-", dir=_TMP_BASE)
+    saved = ms.TASKS_ROOT
+    try:
+        touch = os.path.join(base, ".touch")
+        for name in ("memory", "sessions", "runs", "local-orchestrators",
+                     ".history"):
+            os.makedirs(os.path.join(touch, name), exist_ok=True)
+        os.makedirs(os.path.join(touch, "local-orchestrators", "sp-real"),
+                    exist_ok=True)
+        ms.TASKS_ROOT = touch
+        found = set(ms.discover_tasks())
+        assert "memory" not in found, found
+        assert "sessions" not in found, found
+        assert "runs" not in found, found
+        assert ".history" not in found, found
+        assert "local-orchestrators" in found, found
+        # ...and over the CORRECT root, the one real task folder is all there is
+        ms.TASKS_ROOT = os.path.join(touch, "local-orchestrators")
+        assert set(ms.discover_tasks()) - {ms.DEFAULT_TASK} == {"sp-real"}
+    finally:
+        ms.TASKS_ROOT = saved
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_memory_page_is_served_with_no_referrer_and_only_at_its_own_route():
+    """G4/SECURITY-5: one more document, and the token must not leak out of it."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            status, headers, body = _http("GET", "/memory", query_token=True,
+                                          header_token=False, origin=False)
+            assert status == 200, status
+            assert "text/html" in headers["content-type"], headers
+            assert headers.get("referrer-policy") == "no-referrer", headers
+            assert headers.get("cache-control") == "no-store", headers
+            assert b"memory manager" in body or b"<title>" in body, body[:120]
+            # the page is a gated route like any other: no token, no page
+            status, _headers, _body = _http("GET", "/memory", header_token=False)
+            assert status == 401, status
+            # ...and the dashboard itself carries the same policy, because its
+            # URL carries the same token
+            status, headers, _ = _http("GET", "/")
+            assert status == 200 and headers.get("referrer-policy") == "no-referrer"
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_memory_read_route_answers_json_with_the_shape_the_page_reads():
+    """G5's canonical read shape — the page refuses anything that is not JSON."""
+    base, root = _memory_tree()
+    try:
+        with _memory_root(root):
+            text = "---\ntitle: t\n---\n\n# index\n\nbody\n"
+            sha = _seed(root, "MEMORY.md", text)
+            status, body = _json(_http("GET", "/api/memory/file?name=MEMORY.md",
+                                       query_token=True, header_token=False))
+            assert status == 200, status
+            assert set(body) == {"name", "content", "size", "sha256", "mtime_ns",
+                                 "hasFrontmatter"}, body
+            assert body["content"] == text and body["sha256"] == sha
+            assert body["hasFrontmatter"] is True
+            assert body["size"] == len(text.encode())
+            assert isinstance(body["mtime_ns"], int) and body["mtime_ns"] > 0
+            # a name that is not there is a named 404, not an empty 200
+            status, body = _json(_http("GET", "/api/memory/file?name=nope.md",
+                                       query_token=True, header_token=False))
+            assert status == 404 and body["category"] == "missing", body
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def _write_gold() -> int:

@@ -41,7 +41,7 @@ export const meta = {
 // it carries the value to paste into PLUGIN_ROOT.
 const PROJECT_DIR = '/ABS/PATH/TO/PROJECT'      // FILL IN: this run's project root
 const PLUGIN_ROOT = '/ABS/PATH/TO/PLUGIN_ROOT'  // FILL IN: the installed plugin root
-const TASK = PROJECT_DIR + '/.claude/local-orchestrators/TASK_NAME'
+const TASK = PROJECT_DIR + '/.touch/local-orchestrators/TASK_NAME'
 const FINDINGS = TASK + '/findings'
 
 // The event writer is a COMMAND NAME, not a path: the plugin puts its bin/ on

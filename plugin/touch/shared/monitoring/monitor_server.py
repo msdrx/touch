@@ -60,12 +60,20 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import signal
+import stat
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
+
+try:  # POSIX only; the audit append degrades to an unlocked write without it.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -80,43 +88,46 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def resolve_tasks_root() -> str:
-    """The orchestration tasks root: env > project > cwd walk-up > legacy.
+    """The orchestration tasks root: env > project > cwd walk-up (G10).
 
     Order, and why each rung exists:
 
     1. ``$ORCH_TASKS_ROOT`` — the operator's explicit override, always wins.
-    2. ``$CLAUDE_PROJECT_DIR/.claude/local-orchestrators`` — the hook/skill
+    2. ``$CLAUDE_PROJECT_DIR/.touch/local-orchestrators`` — the hook/skill
        environment's first-class project anchor.
-    3. cwd walk-up to the nearest ``.claude/`` marker — a bare shell in a
-       project checkout.
-    4. the legacy module-relative ``../../local-orchestrators`` — kept for the
-       in-repo layout this module grew up in, but **only if it already
-       exists**, so a packaged copy never invents a tasks root beside its own
-       code (or, one level up, globs its sibling plugins).
+    3. cwd walk-up to the nearest ``.claude/`` marker, then
+       ``.touch/local-orchestrators`` under it — a bare shell in a project
+       checkout. The MARKER dir and the STATE dir are deliberately DIFFERENT:
+       ``.claude/`` is what marks a *Claude Code* project (``.touch/`` is
+       created by Touch and is gitignored, so it cannot mark one), and the run
+       history lives under ``.touch/``.
 
-    Returns ``""`` when nothing resolves. There is deliberately no
-    module-directory fallback: the shared module dir is code-only (D6), and in
-    a plugin install it is a version-stamped cache directory that is re-copied
-    on update and swept ~14 days later — state written there is data loss with
-    extra steps. The caller decides what an unresolved root means.
+    Three rungs, and ``""`` when none of them resolves. The former FOURTH rung —
+    a module-relative ``../../local-orchestrators`` sibling lookup — is DELETED:
+    after GD-U1 nothing sits two levels above this directory in the payload, so
+    it had nothing to resolve to, and in an installed copy it would glob
+    whatever sits beside the plugin (LAYOUT-15, PROTOCOL-11). There is
+    deliberately no module-directory fallback either: the shared module dir is
+    code-only (D6), and in a plugin install it is a version-stamped cache
+    directory that is re-copied on update and swept ~14 days later — state
+    written there is data loss with extra steps. The caller decides what an
+    unresolved root means.
     """
     env = os.environ.get("ORCH_TASKS_ROOT")
     if env:
         return os.path.abspath(env)
     project = os.environ.get("CLAUDE_PROJECT_DIR")
     if project:
-        return os.path.abspath(os.path.join(project, ".claude", "local-orchestrators"))
+        return os.path.abspath(os.path.join(project, ".touch", "local-orchestrators"))
     here = os.path.abspath(os.getcwd())
     while True:
         if os.path.isdir(os.path.join(here, ".claude")):
-            return os.path.join(here, ".claude", "local-orchestrators")
+            return os.path.join(here, ".touch", "local-orchestrators")
         parent = os.path.dirname(here)
         if parent == here:
             break
         here = parent
-    legacy = os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "local-orchestrators"))
-    return legacy if os.path.isdir(legacy) else ""
+    return ""
 
 
 def in_plugin_cache(path: str) -> bool:
@@ -161,7 +172,7 @@ def resolve_state_dir() -> str:
         return os.path.dirname(max(candidates, key=os.path.getmtime))
     sys.exit("monitor_server: no task state dir found. Set ORCH_STATE_DIR to the "
              "task folder, or ORCH_TASKS_ROOT / CLAUDE_PROJECT_DIR to the project "
-             f"that owns .claude/local-orchestrators (tasks root: {TASKS_ROOT or 'unresolved'})")
+             f"that owns .touch/local-orchestrators (tasks root: {TASKS_ROOT or 'unresolved'})")
 
 
 STATE_DIR = os.path.abspath(resolve_state_dir())
@@ -257,11 +268,25 @@ MAX_PENDING_EVENTS = 20_000
 SCAN_WINDOW = 4 * 1024 * 1024
 
 
+#: Directory names that are NEVER a task folder, however the tasks root was
+#: resolved (SERVER-9). The tasks root is the dedicated
+#: `.touch/local-orchestrators/`, so these names cannot appear inside a correctly
+#: resolved one — this is the cheap defence against a mis-set `$ORCH_TASKS_ROOT`
+#: (or a `CLAUDE_PROJECT_DIR` one level off) pointing the scan at `.touch/`
+#: itself, where `memory/` would become a selectable "task": `/artifacts` would
+#: then list every memory file as a note and `/file` would serve them through the
+#: artifact reader, a second read path for the memory tree with none of the
+#: memory rules. Dot-directories go the same way (`.history/`, `.trash/`).
+NON_TASK_DIRS = frozenset({"memory", "sessions", "runs", "spool"})
+
+
 def discover_tasks() -> dict:
     """name -> state dir, rescanned per request so tasks started later appear live."""
     tasks = {}
     try:
         for entry in sorted(os.listdir(TASKS_ROOT)):
+            if entry in NON_TASK_DIRS or entry.startswith("."):
+                continue
             d = os.path.join(TASKS_ROOT, entry)
             if os.path.isdir(d):
                 tasks[entry] = d
@@ -860,7 +885,7 @@ def path_digest(path: str) -> str:
     """A stable, non-reversible handle for a filesystem path (AUDIT-15 parity).
 
     `/health` is the ONE unauthenticated route, and an events path spells out
-    `<home>/<user>/<project>/.claude/local-orchestrators/<task>/events.jsonl` —
+    `<home>/<user>/<project>/.touch/local-orchestrators/<task>/events.jsonl` —
     the machine's username, the directory the work lives in, and the run roster,
     to anybody who can reach the port. The aggregator hashes every path on its
     own `/health` for exactly this reason (`Api.target_hash`), and item 05 is
@@ -914,10 +939,17 @@ def health_payload() -> dict:
     # PARSE_FAILURES stays keyed by absolute path IN MEMORY — that is what
     # task_status() can pop when a stream disappears — and is digested only on
     # the way out, where the untokened reader is.
+    # The file plane's own two fields, and they are the whole disclosure: counts
+    # and booleans, no path, no filename (SERVER-10, SECURITY-1). `memoryWrite`
+    # is the string "on"/"off" rather than a bool because it answers an
+    # operational question — "is the port in front of me a viewer or an editor?"
+    # — and a supervisor reads it in a log line.
     return {"status": "ok",
             "parse_failures_total": sum(PARSE_FAILURES.values()),
             "parse_failures": {path_digest(p): n for p, n in PARSE_FAILURES.items()},
             "streams": streams,
+            "memory": memory_health(),
+            "memoryWrite": "on" if MEMORY_WRITE else "off",
             "stats": {"ws_clients": STATS["ws_clients"],
                       "ws_active": STATS["ws_active"],
                       "events_sent": STATS["events_sent"],
@@ -1309,19 +1341,31 @@ HOSTS = allowed_hosts()
 ORIGINS = allowed_origins()
 
 
-def presented_token(headers: dict, query: str):
-    """The token a request carries, from any of the three carriers."""
+def presented_token(headers: dict, query: str, *, header_only: bool = False):
+    """The token a request carries, from any of the three carriers.
+
+    ``header_only`` drops the query-string carrier, and it is set for exactly one
+    family: the memory WRITE verbs (W4). The page's own URL carries the token in
+    its query string — so it is in the address bar, in history, in a screenshot,
+    in a sandboxed document's `location.search` and in any `Referer` that
+    escapes — and a mutation that accepts that carrier is a mutation a bookmark,
+    a prefetch or an `<img src>` can perform. A header cannot be set by any of
+    those.
+    """
     auth = (headers or {}).get("authorization", "")
     if auth[:7].lower() == "bearer ":
         return auth[7:].strip()
     header = (headers or {}).get(AUTH_HEADER)
     if header:
         return header.strip()
+    if header_only:
+        return ""
     values = urllib.parse.parse_qs(query or "").get(AUTH_QUERY) or []
     return values[0] if values else ""
 
 
-def token_ok(route: str, headers: dict, query: str) -> bool:
+def token_ok(route: str, headers: dict, query: str, *,
+             header_only: bool = False) -> bool:
     """True when the request may proceed. Constant-time, always.
 
     The comparison runs even when nothing was presented — against the empty
@@ -1330,7 +1374,7 @@ def token_ok(route: str, headers: dict, query: str) -> bool:
     """
     if route in OPEN_ROUTES:
         return True
-    presented = presented_token(headers, query) or ""
+    presented = presented_token(headers, query, header_only=header_only) or ""
     ok = hmac.compare_digest(presented.encode("utf-8", "replace"),
                              TOKEN.encode("utf-8"))
     if not ok:
@@ -1338,8 +1382,19 @@ def token_ok(route: str, headers: dict, query: str) -> bool:
     return ok
 
 
-def origin_refusal(headers: dict):
-    """None when the WS upgrade may proceed, else a one-line reason (403).
+def origin_refusal(headers: dict, *, allow_missing_origin: bool = True):
+    """None when the request may proceed, else a one-line reason (403).
+
+    Runs on the WS upgrade and — since the file plane exists — on every memory
+    route, reads included: `Api`-style enforcement only at the upgrade left every
+    plain-HTTP route DNS-rebindable, and under rebinding a request is same-origin,
+    so no preflight happens and a required custom header is settable. The Host
+    NAME check below is the only rule that survives that, which is why it now
+    runs on more than one route (SECURITY-3).
+
+    ``allow_missing_origin=False`` is passed by the memory WRITE verbs and by
+    nothing else (W3): rule 3 exists for non-browser READERS, and a mutation that
+    accepts an absent Origin accepts a cross-site form post.
 
     Four rules, in order, and the last is what makes a default install safe
     with zero configuration:
@@ -1369,7 +1424,11 @@ def origin_refusal(headers: dict):
         return (f"Host {host or '(absent)'} is not on the allowlist "
                 f"(--allow-host / $ORCH_ALLOW_HOST extends it)")
     if not origin or origin.lower() == "null":
-        return None
+        if allow_missing_origin:
+            return None
+        AUTH_REJECTIONS["origin"] += 1
+        return ("a write must carry an Origin header that matches the Host it was "
+                "sent to (a missing Origin is accepted on reads only)")
     parsed = urllib.parse.urlsplit(origin)
     authority = parsed.netloc.lower() if parsed.scheme in ("http", "https") else ""
     if authority and authority == host:
@@ -2490,6 +2549,1584 @@ async def _tail_loop_client(writer, stream: Stream, sub: Subscriber,
         stream.unsubscribe(sub)
 
 
+# --------------------------------------------------------------------------
+# THE FILE PLANE (GD-13 as amended: read / control / file) — Claude Code's
+# auto-memory directory, listed and read over HTTP and, behind an explicit
+# flag, WRITTEN.
+#
+# Everything below is new code placed BELOW the byte-pinned resolver region at
+# the top of this file, so the source-text equality test that pins
+# `resolve_tasks_root`/`in_plugin_cache` to decision_watcher.py is untouched.
+#
+# Why this server and not the aggregator (G3): the requirement is an editor
+# reachable *from the monitoring page*, and the monitor page holds only THIS
+# server's per-boot token — the aggregator's lives in `.touch/server.json` and
+# is never served here, and neither server emits CORS, so a cross-origin fetch
+# or a tokenless link could not authenticate. The cost is paid here, honestly:
+# this file had to learn HTTP methods, request bodies, 404-under-prefix, 405 and
+# an Origin gate on plain HTTP routes (I10).
+#
+# Why the rules below are as heavy as they are: these bytes become MODEL
+# INSTRUCTIONS. Anything that reaches this directory is loaded into future
+# sessions in this project — the index at every conversation start, a topic note
+# on demand, and a file carrying `pinned:` frontmatter into every session,
+# unasked (DOCS-6, undocumented in the CLI's own docs). A write plane over that
+# directory is a persistent-instruction-injection primitive, so:
+#
+#   * it is DEFAULT-OFF (G6): `--allow-memory-write` / $TOUCH_ALLOW_MEMORY_WRITE;
+#   * writes take the token from a HEADER only, never `?token=` — the page's own
+#     URL carries the token in its query string, so a query-carried write is a
+#     bookmarkable, prefetchable, `<img src>`-able mutation (W4);
+#   * every memory route runs the Origin/Host gate, reads included, and a write
+#     additionally requires an `X-Touch-Write: 1` header and a PRESENT
+#     same-origin Origin (W2/W3);
+#   * no `Access-Control-Allow-*` header is ever emitted, on any route;
+#   * the write path handles the hazards in G7's order, 1 to 10, and this file
+#     keeps that order because the order is the security property.
+#
+# What it deliberately does NOT do (Part D-6, PROTOCOL-20): emit a `touch-status`
+# event or append to any `events.jsonl`. A memory edit is not a plan card and
+# must never fabricate a badge; its record is the audit log at
+# `.touch/memory-audit.jsonl`, which carries its own `w` attribution.
+# --------------------------------------------------------------------------
+
+#: The page (a second document, G4) and the JSON API under it. `/memory` is a
+#: top-level navigation from `monitor.html`'s one header link, so it carries the
+#: token the way `monitor.html` itself does — in the query string.
+MEMORY_ROUTE = "/memory"
+MEMORY_API_PREFIX = "/api/memory/"
+MEMORY_HTML = os.path.join(ROOT, "memory.html")
+
+#: The auto-memory index, and the CLI's OWN documented load budget for it: the
+#: first 200 lines or 25 KB, whichever comes first, are injected at the start of
+#: every conversation and everything past that is dropped at the next load,
+#: silently (DOCS-14). Since v2.1.211 the measurement strips YAML frontmatter and
+#: block-level HTML comments first, which is why `memory_index_budget` does too.
+#: These two numbers have ONE owner (G5): they are reported to the editor in
+#: `limits` and cross-checked against `tests/test_memory_hygiene.py`'s copy, so
+#: the page cannot disclose a cap the repository gate does not enforce.
+MEM_INDEX_NAME = "MEMORY.md"
+MEM_INDEX_LINES = 200
+MEM_INDEX_BYTES = 25600
+
+#: Caps, in the house style of the budget block above — every growing collection
+#: is capped, and a cap that is not enforced is a lie the editor would repeat
+#: (W9, SERVER-13). `MAX_MEMORY_BYTES` is per FILE and comfortably above the
+#: index budget; the directory caps are what stop a disk-fill through a
+#: single-threaded event loop; `MAX_MEMORY_BODY_BYTES` is checked against
+#: `Content-Length` BEFORE a byte is read.
+MAX_MEMORY_BYTES = 64 * 1024
+MAX_MEMORY_FILES = 100
+MAX_MEMORY_DIR_BYTES = 1024 * 1024
+MAX_MEMORY_BODY_BYTES = 1024 * 1024
+MEMORY_BODY_TIMEOUT = 10.0
+#: Backups kept per file in `.history/<name>/`, and the audit log's ceiling.
+MEMORY_HISTORY_KEEP = 20
+MEMORY_AUDIT_BYTES = 256 * 1024
+#: Per-name write locks are a growing collection too; swept past this many.
+MEMORY_LOCK_CAP = 512
+#: Rows one list answer will build, matching `memory.html`'s own display cap. A
+#: bigger directory is DISCLOSED (`listTruncated`) rather than silently clipped.
+MEMORY_LIST_CAP = 200
+
+#: How long `/health` may reuse an alignment answer. `/health` is the ONE
+#: untokened route and a supervisor may poll it every second, so the one piece of
+#: work in its memory block that is not a `stat` — reading up to three settings
+#: files and parsing them as JSON to answer `aligned` — is memoised for this many
+#: seconds on that route only. The TOKENED list route always re-reads them: an
+#: operator who has just fixed `settings.local.json` is entitled to see it in the
+#: next refresh, and that route is the one the page reads `aligned` from anyway.
+MEMORY_HEALTH_TTL = 2.0
+
+#: G7 step 1 — the whole namespace, as a flat name. No `/`, no `\`, no `..`, no
+#: leading dot, `.md` only. This deletes the traversal class before any
+#: filesystem call, and it also refuses the shapes that would be dangerous even
+#: INSIDE the directory: a `settings.json`, a `hooks.json`, a `*.py`/`*.sh` on an
+#: import path or a `PATH`, a `foo.token` that the `.gitignore` carve would then
+#: have to reason about (W7, LAYOUT-10/19). Byte-for-byte the regex `memory.html`
+#: validates a new name against and the one `tests/test_memory_hygiene.py` calls
+#: `FLAT_MD` — one namespace, three spellings that must not drift.
+MEMORY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.md$")
+
+#: G7 step 5's carrier: an `ifMatch` is the sha256 hex digest of the bytes the
+#: client last read, and its SHAPE is checked before it is compared. Two reasons,
+#: and the first one is a live defect this pattern closes: `hmac.compare_digest`
+#: raises `TypeError` when either `str` argument is not ASCII, `ifMatch` is fully
+#: client-controlled (`?ifMatch=%C3%A9` is enough), and a `TypeError` is neither
+#: `MemoryRefusal` nor `OSError` — so the coroutine would die with the socket
+#: still open and the caller would get ZERO bytes plus a traceback in a
+#: world-readable daemon log. An empty reply is exactly the "this build has no
+#: memory API" misreport G5 spends its whole budget deleting. The second reason is
+#: honesty: a value that is not a digest was never going to match, and a named 412
+#: is a better answer than a 409 that publishes the whole file back.
+MEMORY_SHA_RE = re.compile(r"[0-9a-f]{64}")
+
+#: G7 step 7 — content hygiene. `MEMORY_FRONTMATTER` and `MEMORY_BLOCK_COMMENT`
+#: are `tests/test_memory_hygiene.py`'s two regexes, ported character for
+#: character, because the editor's budget, this server's measurement and the
+#: repository gate must agree about the same file. The comment body is
+#: `(?:(?!-->).)*` and not `.*?` for the reason that file records: with `re.S` a
+#: lazy `.*?` still crosses `-->` when the shorter match fails, which
+#: UNDER-counts, and under-counting is the dangerous direction.
+MEMORY_FRONTMATTER = re.compile(
+    r"\A---[ \t]*\r?\n.*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.S)
+MEMORY_BLOCK_COMMENT = re.compile(
+    r"^[ \t]*<!--(?:(?!-->).)*-->[ \t]*(?:\r?\n|\Z)", re.S | re.M)
+#: A `pinned:` key in LEADING frontmatter — undocumented, and stronger than the
+#: index: such a file is injected into EVERY session, newest-modified first,
+#: unasked (DOCS-6). Refused unless the request says `allowPinned`, which is the
+#: flag the page attaches to a sentence the operator answered in words.
+MEMORY_PINNED_RE = re.compile(r"(?m)^[ \t]*pinned[ \t]*:")
+#: An `@`-import: the CLI expands it transitively at load, so one accepted line
+#: turns this directory into an arbitrary-file read into model context
+#: (SECURITY-6, W10). Scanned over PROSE only — a documented `@path` inside a
+#: code span or fence is not an import.
+MEMORY_IMPORT_RE = re.compile(r"(?:^|[\s(\[])@[A-Za-z0-9._~/-]")
+#: A lone CR (an old-Mac line ending, or a torn CRLF) — rejected rather than
+#: normalised, because rewriting somebody's bytes is its own surprise (W10).
+MEMORY_LONE_CR_RE = re.compile(r"\r(?!\n)")
+#: `tests/test_publish_hygiene.py`'s two secret detectors, reimplemented here
+#: (this module imports nothing but the stdlib): a line that is exactly a
+#: high-entropy URL-safe blob of token length, and a credentialed Mongo URI
+#: whose password is not visibly a documentation stand-in (PROTOCOL-16). The
+#: refusal names the CATEGORY and the line number and NEVER the match — echoing
+#: a token back into a JSON body, a browser and a screenshot is the leak the
+#: check exists to prevent.
+MEMORY_TOKEN_SHAPE_RE = re.compile(r"^[A-Za-z0-9_-]{40,50}$")
+MEMORY_TOKEN_DISTINCT = 12
+MEMORY_MONGO_URI_RE = re.compile(r"mongodb(?:\+srv)?://([^/\s:]+):([^@\s]+)@")
+MEMORY_PLACEHOLDER_WORDS = frozenset({
+    "password", "pass", "passwd", "pwd", "secret", "redacted", "changeme",
+    "yourpassword", "p",
+})
+
+#: The three UNDOCUMENTED environment overrides that outrank every settings
+#: layer (DOCS-13). This server never reads them as a mechanism — it only
+#: reports that one is set, because with one in force the alignment question
+#: cannot be answered from the documented layers at all, and a confident
+#: `aligned: true` over that is exactly the diagnosis trap they are.
+MEMORY_ENV_OVERRIDES = ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
+                        "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+                        "CLAUDE_MEMORY_STORES")
+
+#: `sandbox`, byte-identical with `aggregator/server.py`'s `FILE_CSP` — GD-20's
+#: verbatim twin, machine-checked across the two servers. `allow-scripts` is
+#: deliberately absent: a report opened from the dashboard is served at a URL
+#: that CONTAINS the per-boot token, an opaque origin does not stop a script in
+#: it from reading its own `location.search`, and that token now also authorizes
+#: memory writes — one unaudited agent-authored report would be token-exfil →
+#: memory write → persistent injection (SECURITY-4/5).
+FILE_CSP = "sandbox"
+#: The second header of that pair, named once so a use site cannot set the CSP
+#: and forget this one. Also on the two HTML pages: their URLs carry the token
+#: in the query string, and a `Referer` would hand it to whatever they link to.
+NO_REFERRER = "no-referrer"
+
+
+class MemoryRefusal(Exception):
+    """A named refusal from the file plane: a status, a category, a sentence.
+
+    The category is machine-readable and stable; the reason is what the operator
+    reads. Neither ever carries the offending TEXT — a token-shaped line is
+    refused BY CATEGORY (PROTOCOL-16). `extra` is for the one refusal that must
+    publish state: a 409 precondition failure carries the current
+    `{sha256, mtime_ns, size, content}` so the page can offer reload /
+    show-both / overwrite instead of a bare retry (G5, UI-3).
+    """
+
+    def __init__(self, status: int, category: str, reason: str, extra: dict = None):
+        super().__init__(reason)
+        self.status = int(status)
+        self.category = category
+        self.reason = reason
+        self.extra = dict(extra or {})
+
+    def body(self) -> dict:
+        payload = {"error": self.category, "category": self.category,
+                   "reason": self.reason}
+        payload.update(self.extra)
+        return payload
+
+
+# --------------------------------------------------------------------------
+# Where the files are, and whether this daemon may touch them.
+# --------------------------------------------------------------------------
+
+def resolve_project_root() -> str:
+    """The project this daemon serves: env > env > cwd walk-up, else ``""``.
+
+    `$CLAUDE_PROJECT_DIR` > `$TOUCH_PROJECT_CWD` > the nearest ancestor of the
+    cwd holding a `.claude/` marker. Reimplemented here rather than imported
+    from `aggregator/paths.py` for the same reason `resolve_tasks_root` is: both
+    daemons must stay independently runnable single files with nothing else on
+    PYTHONPATH.
+
+    Two deliberate differences from `paths.project_root`, both about what the
+    answer is USED for:
+
+    * `~` is skipped as a marker (the CLI's own configuration directory is not a
+      project), and
+    * an unresolved project is ``""``, not `os.getcwd()`. The aggregator has a
+      write-ahead log it must place somewhere; this caller would otherwise
+      invent a memory root in whatever directory the daemon happened to be
+      started from, and then serve an editor over it. Refusing loudly is the
+      house rule for a state root nobody asked for.
+    """
+    for name in ("CLAUDE_PROJECT_DIR", "TOUCH_PROJECT_CWD"):
+        configured = (os.environ.get(name) or "").strip()
+        if configured:
+            return os.path.abspath(configured)
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+    except (OSError, RuntimeError, KeyError):
+        home = None
+    here = os.path.abspath(os.getcwd())
+    while True:
+        if (home is None or os.path.realpath(here) != home) and \
+                os.path.isdir(os.path.join(here, ".claude")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            return ""
+        here = parent
+
+
+def resolve_memory_root() -> str:
+    """``<project>/.touch/memory`` — project-anchored, or ``""`` (G1/G10).
+
+    The marker dir and the state dir are deliberately different (`.claude/`
+    marks a Claude Code project; `.touch/` is created by Touch and gitignored),
+    exactly as in the tasks-root ladder above.
+
+    There is deliberately NO environment rung, and the asymmetry with
+    `$ORCH_TASKS_ROOT` is the decision, not an omission: `aggregator/paths.py`
+    declines one for this root because a *new* way to move it is a hole in two
+    controls that are spelled as paths rather than derived — the scope guard's
+    subagent write-deny on `.touch/memory/**` (G14) and the `.gitignore`
+    re-inclusion of `.touch/memory/*.md` (G9). Relocation belongs to
+    `autoMemoryDirectory`, the one key the CLI actually reads, and this server
+    REPORTS the comparison (`aligned`) rather than assuming it.
+    """
+    project = resolve_project_root()
+    return os.path.join(project, ".touch", "memory") if project else ""
+
+
+MEMORY_ROOT = resolve_memory_root()
+
+
+def memory_write_enabled() -> bool:
+    """The write plane is DEFAULT-OFF: an explicit flag or env var turns it on.
+
+    A user who installed a read-only, loopback, token-gated dashboard cannot be
+    talked into a write surface by a leaked token alone (G6, W14, SECURITY-1).
+    The flag starts with `-`, so `positional_args()` already keeps it out of the
+    port scan.
+    """
+    if "--allow-memory-write" in sys.argv[1:]:
+        return True
+    return (os.environ.get("TOUCH_ALLOW_MEMORY_WRITE") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+MEMORY_WRITE = memory_write_enabled()
+
+
+def memory_unavailable() -> str:
+    """``""`` when the memory family may answer at all, else the reason (503).
+
+    Two ways it may not: nothing resolved a project (so there is no directory
+    this server has any business serving), and a root inside an installed plugin
+    cache — a version-stamped directory that is re-copied on update and swept
+    ~14 days later, so a memory file written there is data loss with extra steps
+    and an instruction file that vanishes (SERVER-16, W8, Part D-8).
+    """
+    root = MEMORY_ROOT
+    if not root:
+        return ("no project root resolved, so this server has no memory directory: "
+                "start touch-monitor from the project checkout, or set "
+                "CLAUDE_PROJECT_DIR to it")
+    if os.path.islink(root):
+        # G7 step 2's rule, applied to the ROOT rather than to a target: a link
+        # planted at `.touch/memory` would redirect every save, every backup and
+        # every trash move out of the project, and `realpath` containment cannot
+        # see it because a resolved root IS its own base. Checked here, once,
+        # rather than in `safe_memory_path` (which is per file and documents the
+        # root as trusted for exactly this reason).
+        return (f"the resolved memory root is a symlink ({root}); this server "
+                f"refuses to follow one, because a link at that path redirects "
+                f"every save and every backup out of the project")
+    if in_plugin_cache(root):
+        return (f"the resolved memory root is inside an installed plugin cache "
+                f"({root}); that directory is version-stamped and swept, so the "
+                f"memory family is disabled rather than writing where the files "
+                f"would silently vanish")
+    return ""
+
+
+def safe_memory_path(root: str, name: str) -> str:
+    """Absolute path of one memory file, or raise. G7 steps 1-3 and G8.
+
+    A SEPARATE, separately-named resolver, and not a widening of
+    `safe_artifact_path`: that one is task-scoped, read-only, and whitelists
+    `.html` as well. Here `.md` is the ONLY extension — a memory file has no
+    reason to render as a document, and refusing `.html` deletes the stored-XSS
+    class from a directory a browser can write.
+
+    Order matters and is the security property:
+
+    1. the flat-name regex, before any `os.path.join` — traversal dies here;
+    2. `lstat` (via `os.path.islink`) the target and refuse a symlink outright,
+       without resolving it: a symlink planted in this directory by any local
+       process turns a memory save into an arbitrary-file overwrite (SERVER-5);
+    3. containment with `realpath` on BOTH sides (mixing `abspath` with
+       `realpath` is the classic bypass), plus two explicit ancestor refusals:
+       `~/.claude` — a read-only tap, always, and the refusal is greppable
+       (PROTOCOL-7, Part D-9) — and an installed plugin cache (PROTOCOL-6).
+
+    The ROOT itself is TRUSTED here, deliberately: `base = realpath(root)` follows
+    a symlinked root by design, because a per-file check cannot distinguish an
+    operator who deliberately parked `.touch/` on another volume from an attacker
+    who planted a link — and planting one needs local write access to the project,
+    which is strictly more than this plane grants anyone. The root is checked ONCE
+    instead, where it is resolved: `memory_unavailable()` refuses a symlinked root
+    for the whole family, and `memory_side_dir` refuses a symlinked
+    `.history`/`.trash`. G7 step 2 governs the TARGET, and that check is here.
+    """
+    if not name or not MEMORY_NAME_RE.match(name):
+        raise MemoryRefusal(
+            400, "bad-name",
+            "a memory file name is letters, digits, dot, dash or underscore, "
+            "starts with a letter or digit, ends in .md and is at most 64 "
+            "characters — no directories, no leading dot")
+    base = os.path.realpath(root)
+    target = os.path.join(base, name)
+    if os.path.islink(target):
+        raise MemoryRefusal(
+            409, "symlink",
+            "the target is a symlink; this server refuses to follow one into or "
+            "out of the memory root, and nothing was read or written")
+    full = os.path.realpath(target)
+    if not (full == base or full.startswith(base + os.sep)):
+        raise MemoryRefusal(403, "outside-root",
+                            "the resolved path is outside the memory root")
+    home_claude = os.path.realpath(os.path.expanduser(os.path.join("~", ".claude")))
+    if full == home_claude or full.startswith(home_claude + os.sep):
+        raise MemoryRefusal(
+            403, "home-claude",
+            "~/.claude is a read-only tap: this server never reads or writes "
+            "inside it, whatever the memory root resolves to")
+    if in_plugin_cache(full):
+        raise MemoryRefusal(
+            403, "plugin-cache",
+            "the resolved path is inside an installed plugin cache, which is "
+            "swept on update — nothing may be written there")
+    return full
+
+
+# --------------------------------------------------------------------------
+# Measurement and hygiene (G7 step 7, G8).
+# --------------------------------------------------------------------------
+
+def memory_index_budget(text: str):
+    """``(lines, bytes)`` the CLI would count for the auto-memory index.
+
+    Frontmatter and block-level HTML comments come off FIRST, because the CLI
+    strips them before measuring (v2.1.211+). The text is not newline-normalised
+    first: the count is of the bytes it was given, which is what
+    `tests/test_memory_hygiene.py` and `memory.html`'s live budget also count.
+    """
+    stripped = MEMORY_FRONTMATTER.sub("", text)
+    stripped = MEMORY_BLOCK_COMMENT.sub("", stripped)
+    return len(stripped.splitlines()), len(stripped.encode("utf-8"))
+
+
+def memory_prose(text: str) -> str:
+    """`text` with fenced code blocks and inline code spans removed.
+
+    The `@`-import scan runs over this, so documentation that SHOWS an import
+    inside backticks or a fence is not mistaken for one — the difference between
+    a hygiene rule and a rule people route around.
+
+    An UNTERMINATED fence does not hide its tail. CommonMark says an unclosed
+    fence runs to the end of the document, so a loader and this validator would
+    probably agree — but SECURITY-6's requirement is that they DO agree, and this
+    is the one direction where disagreeing is exploitable (a lenient validator in
+    front of a strict loader). So the tail after an unclosed ``` is re-read as
+    prose rather than skipped: the cost of being wrong is a refusal the author can
+    fix by closing the fence, which is the safe way round.
+    """
+    out, tail, in_fence = [], [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            if in_fence:
+                tail = []            # candidate unterminated tail starts here
+            continue
+        if in_fence:
+            tail.append(line)
+            continue
+        out.append(re.sub(r"`[^`]*`", "", line))
+    if in_fence:
+        out.extend(re.sub(r"`[^`]*`", "", line) for line in tail)
+    return "\n".join(out)
+
+
+def memory_placeholder(password: str) -> bool:
+    """True when a URI's password field is visibly a documentation stand-in."""
+    p = (password or "").strip()
+    if p.startswith("<") and p.endswith(">"):
+        return True
+    if p.startswith("$") or p.startswith("{") or p.startswith("%"):
+        return True
+    if p and set(p) <= set("*.x"):
+        return True
+    return p.lower() in MEMORY_PLACEHOLDER_WORDS
+
+
+def memory_decode(raw: bytes) -> str:
+    """Strict UTF-8, or a named 400 — never ``errors="replace"``.
+
+    A replacement character written into a file the model reads as instructions
+    is a silent corruption in the one file class where silent corruption is
+    least acceptable (SERVER-14).
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise MemoryRefusal(
+            400, "not-utf8",
+            "the content is not valid UTF-8; nothing was written (this server "
+            "never substitutes replacement characters into a file the model "
+            "reads as instructions)")
+
+
+def memory_hygiene(text: str, *, allow_pinned: bool) -> None:
+    """Raise `MemoryRefusal` for content that must not become an instruction.
+
+    Every rule here is about the bytes' SECOND life — they are read back by a
+    model, not by a browser — which is why the refusals are content-shaped
+    rather than encoding-shaped, and why each one names a category the page can
+    print without quoting the offending text (G7 step 7, W10, PROTOCOL-16).
+    """
+    if "\x00" in text:
+        raise MemoryRefusal(400, "nul-byte",
+                            "the content contains a NUL byte")
+    if MEMORY_LONE_CR_RE.search(text):
+        raise MemoryRefusal(
+            400, "lone-cr",
+            "the content contains a bare carriage return; send LF or CRLF line "
+            "endings (this server preserves your bytes rather than rewriting "
+            "them, so it refuses instead of normalising)")
+    if MEMORY_IMPORT_RE.search(memory_prose(text)):
+        raise MemoryRefusal(
+            400, "import-directive",
+            "the content carries an @-import outside a code span or fence; the "
+            "CLI expands those transitively at load, which would turn this "
+            "directory into an arbitrary-file read into model context")
+    if MEMORY_BLOCK_COMMENT.search(text):
+        raise MemoryRefusal(
+            400, "html-comment",
+            "the content carries a block-level HTML comment; the CLI strips "
+            "those before the model sees the file, so a comment is a place to "
+            "hide text from the model that a human editing it still reads")
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if (MEMORY_TOKEN_SHAPE_RE.match(stripped)
+                and len(set(stripped)) >= MEMORY_TOKEN_DISTINCT):
+            raise MemoryRefusal(
+                400, "token-shape",
+                f"line {number} is a high-entropy URL-safe blob of token "
+                f"length; a secret in a file that loads into every session is "
+                f"a secret in every transcript (the line itself is not echoed "
+                f"back)")
+        found = MEMORY_MONGO_URI_RE.search(line)
+        if found and not memory_placeholder(found.group(2)):
+            raise MemoryRefusal(
+                400, "credentialed-uri",
+                f"line {number} carries a database URI with a real password; "
+                f"write the password as <password> if the shape is what you "
+                f"meant to record (the line itself is not echoed back)")
+    front = MEMORY_FRONTMATTER.match(text)
+    if front and MEMORY_PINNED_RE.search(front.group(0)) and not allow_pinned:
+        raise MemoryRefusal(
+            422, "pinned",
+            "the content carries a `pinned:` key in its frontmatter, which "
+            "loads this file into EVERY session unasked; re-send with "
+            "allowPinned:true to confirm that in words")
+
+
+def memory_normalize(text: str) -> str:
+    """Exactly one trailing newline, and nothing else touched (UI-3).
+
+    Only newlines are stripped, so trailing spaces inside a line survive: this
+    is the one normalisation the server performs, and it performs it server-side
+    so a `<textarea>` round trip cannot quietly delete the final newline off
+    every file it touches.
+    """
+    return text.rstrip("\n") + "\n"
+
+
+def memory_stamp(text: str) -> str:
+    """Refresh `modified:` inside EXISTING leading frontmatter. Never invent it.
+
+    The CLI stamps `modified` (UTC ISO-8601) whenever Claude writes a file that
+    already HAS frontmatter, and reads it back to judge how current a fact is —
+    so a browser save that left the field alone would make the timestamp lie
+    (SERVER-14, DOCS-16). Adding frontmatter to a file that has none is the
+    opposite error: it would opt the file into `modified` stamping AND into the
+    `pinned` scan, which is a behaviour change nobody asked for.
+    """
+    match = MEMORY_FRONTMATTER.match(text)
+    if not match:
+        return text
+    block = match.group(0)
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    line = f"modified: {stamp}"
+    if re.search(r"(?m)^[ \t]*modified[ \t]*:.*$", block):
+        block = re.sub(r"(?m)^[ \t]*modified[ \t]*:.*$", line, block, count=1)
+    else:
+        lines = block.split("\n")
+        for index in range(len(lines) - 1, -1, -1):
+            if lines[index].strip() in ("---", "..."):
+                lines.insert(index, line)
+                break
+        block = "\n".join(lines)
+    return block + text[match.end():]
+
+
+# --------------------------------------------------------------------------
+# Alignment: is this the directory the CLI itself reads? (SERVER-4)
+# --------------------------------------------------------------------------
+
+def memory_settings_value():
+    """`autoMemoryDirectory` from the DOCUMENTED settings layers, nearest first.
+
+    Returns `(value, layer_path)` or `(None, None)`. Only the three documented
+    layers are consulted — project-local, project, user — in the CLI's own
+    precedence order. The undocumented environment overrides are deliberately
+    not read as a mechanism (see `MEMORY_ENV_OVERRIDES`), and a `--settings`
+    file or a managed policy file cannot be discovered from here at all, which
+    is why `aligned` is reported as UNKNOWN rather than guessed whenever an
+    override is in force.
+    """
+    project = resolve_project_root()
+    candidates = []
+    if project:
+        candidates.append(os.path.join(project, ".claude", "settings.local.json"))
+        candidates.append(os.path.join(project, ".claude", "settings.json"))
+    candidates.append(os.path.expanduser(os.path.join("~", ".claude", "settings.json")))
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            value = data.get("autoMemoryDirectory")
+            if isinstance(value, str) and value:
+                return value, path
+    return None, None
+
+
+def memory_effective_dir(value: str):
+    """The directory the CLI would USE for `value`, or None if it rejects it.
+
+    The CLI's validator, reproduced: an absolute path (or a `~/` one it expands
+    first), at least three characters, no NUL, not a UNC/`//` form. A value that
+    fails it — `".touch/memory"`, the obvious thing to write — returns
+    `undefined` there and the CLI falls back to its default with **no error and
+    no warning** (DOCS-1, verified against 2.1.220). That silence is the whole
+    reason this function exists: the page can then say "Claude Code reads
+    somewhere else" instead of the operator hunting a memory that is being
+    ignored.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    raw = os.path.expanduser(value) if value == "~" or value.startswith("~/") else value
+    if "\x00" in raw or len(raw) < 3 or raw.startswith("//") or raw.startswith("\\\\"):
+        return None
+    if not os.path.isabs(raw):
+        return None
+    return os.path.normpath(raw)
+
+
+def memory_alignment(root: str):
+    """`(aligned, effective)` — a tri-state and a sentence, never a guess.
+
+    `aligned` is True/False when the documented layers answer, and None when
+    they cannot (an undocumented env override outranks them). `effective` is
+    always a string, because the page prints it into a sentence.
+    """
+    live = [name for name in MEMORY_ENV_OVERRIDES
+            if (os.environ.get(name) or "").strip()]
+    if live:
+        return None, (f"unknown — {live[0]} is set in this daemon's environment "
+                      f"and it outranks every settings layer, so where a session "
+                      f"reads memory cannot be answered from settings alone")
+    value, _layer = memory_settings_value()
+    if value is None:
+        return False, ("Claude Code's default (~/.claude/projects/<project "
+                       "key>/memory) — no autoMemoryDirectory is set in any "
+                       "documented settings layer")
+    effective = memory_effective_dir(value)
+    if effective is None:
+        return False, ("Claude Code's default: the configured autoMemoryDirectory "
+                       "is not an absolute path, so the CLI rejects it silently "
+                       "and falls back")
+    if not root:
+        return False, effective
+    return os.path.realpath(effective) == os.path.realpath(root), effective
+
+
+#: `(monotonic, answer)` per root, for `/health` ONLY (see `MEMORY_HEALTH_TTL`).
+_MEMORY_ALIGN_CACHE: dict = {}
+
+
+def memory_alignment_cached(root: str):
+    """`memory_alignment`, memoised for `MEMORY_HEALTH_TTL` seconds, for `/health`.
+
+    `/health` is the one route with no token in front of it, and answering
+    `aligned` costs up to three `open()` + `json.load()` calls on the event loop
+    (`health_payload` is called inline, in front of the live `/ws` stream). An
+    unauthenticated poller must not be able to buy that work per request, and a
+    supervisor polling every second cannot tell a two-second-old alignment answer
+    from a fresh one: the value changes only when somebody edits a settings file.
+
+    Deliberately NOT used by the tokened list route — that is where the page reads
+    `aligned`, and an operator who has just corrected `settings.local.json`
+    is entitled to see it in the very next refresh. Keyed by root and swept
+    wholesale (a handful of keys at most; a growing dict is a growing collection
+    like any other).
+    """
+    now = time.monotonic()
+    cached = _MEMORY_ALIGN_CACHE.get(root)
+    if cached is not None and (now - cached[0]) < MEMORY_HEALTH_TTL:
+        return cached[1]
+    answer = memory_alignment(root)
+    if len(_MEMORY_ALIGN_CACHE) > 32:
+        _MEMORY_ALIGN_CACHE.clear()
+    _MEMORY_ALIGN_CACHE[root] = (now, answer)
+    return answer
+
+
+# --------------------------------------------------------------------------
+# Reading: the list and one file.
+# --------------------------------------------------------------------------
+
+def memory_root_writable(root: str) -> bool:
+    """True when this process could write the root — creating it if need be.
+
+    An ABSENT root with a writable parent counts as writable, and that is not a
+    convenience: a fresh checkout has no `.touch/memory/` yet, and a `writable:
+    false` there would disable the create affordance that would bring the
+    directory into existence — a control the server would then refuse to honour
+    for a reason that is not true (D13's honest-affordance rule, read the other
+    way round). `/health` reports the directory's EXISTENCE separately
+    (`present`), so the two questions stay two questions.
+    """
+    if not root:
+        return False
+    here = os.path.abspath(root)
+    while not os.path.isdir(here):
+        # The write path creates the root with `memory_makedirs`, which creates
+        # `.touch/` too, so the question is whether the nearest EXISTING ancestor
+        # is writable — not whether the leaf happens to be there yet.
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+    return os.access(here, os.W_OK)
+
+
+def memory_sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def memory_read_file(full: str):
+    """`(bytes, stat)` for an existing memory file, or raise a named 404."""
+    try:
+        with open(full, "rb") as handle:
+            data = handle.read(MAX_MEMORY_BYTES + 1)
+        st = os.stat(full)
+    except FileNotFoundError:
+        raise MemoryRefusal(404, "missing", "no such file in the memory root")
+    except IsADirectoryError:
+        raise MemoryRefusal(404, "missing", "that name is a directory")
+    if len(data) > MAX_MEMORY_BYTES:
+        raise MemoryRefusal(
+            413, "too-large",
+            f"the file on disk is larger than this editor's {MAX_MEMORY_BYTES}-byte "
+            f"per-file cap, so it is not served for editing")
+    return data, st
+
+
+def memory_entry(root: str, name: str, writable_root: bool) -> dict:
+    """One `files[]` row: what the editor needs to be honest about the file.
+
+    `lines` is Python's `splitlines()` count — the unit the page and the
+    repository gate both count in — and `overLoadLimit` is only ever about the
+    INDEX, because it is the only file with a documented load budget.
+    """
+    full = os.path.join(root, name)
+    row = {"name": name, "size": 0, "mtime_ns": 0, "lines": None,
+           "isIndex": name == MEM_INDEX_NAME, "overLoadLimit": False,
+           "hasFrontmatter": False, "writable": writable_root, "reason": ""}
+    if not MEMORY_NAME_RE.match(name):
+        # Listed, and honestly unwritable: a name this API cannot address (a
+        # space, a leading dot, 70 characters) is still a file the model loads,
+        # so hiding it would understate what is in the directory.
+        row["writable"] = False
+        row["reason"] = ("this name is outside the flat namespace this editor "
+                         "can address, so it can be seen here but not saved")
+        try:
+            st = os.stat(full)
+            row["size"] = st.st_size
+            row["mtime_ns"] = st.st_mtime_ns
+        except OSError:
+            pass
+        return row
+    try:
+        st = os.lstat(full)
+    except OSError:
+        row["writable"] = False
+        row["reason"] = "this entry could not be stat'ed"
+        return row
+    if stat.S_ISLNK(st.st_mode):
+        # `lstat`, and the row stops HERE: reporting the size and mtime of a
+        # symlink's target would publish a fact about a file outside the memory
+        # root through a row the operator reads as being about a memory file.
+        row["writable"] = False
+        row["reason"] = ("this entry is a symlink and the write path refuses to "
+                         "follow one")
+        return row
+    row["size"] = st.st_size
+    row["mtime_ns"] = st.st_mtime_ns
+    if st.st_size > MAX_MEMORY_BYTES:
+        row["writable"] = False
+        row["reason"] = (f"this file is over the {MAX_MEMORY_BYTES}-byte per-file "
+                         f"cap, so this editor will not load or save it")
+        return row
+    try:
+        with open(full, "rb") as handle:
+            raw = handle.read(MAX_MEMORY_BYTES + 1)
+    except OSError:
+        row["writable"] = False
+        row["reason"] = "this file could not be read"
+        return row
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        row["writable"] = False
+        row["reason"] = ("this file is not valid UTF-8, so this editor will not "
+                         "rewrite it")
+        return row
+    row["lines"] = len(text.splitlines())
+    row["hasFrontmatter"] = MEMORY_FRONTMATTER.match(text) is not None
+    if row["isIndex"]:
+        lines, size = memory_index_budget(text)
+        row["overLoadLimit"] = lines > MEM_INDEX_LINES or size > MEM_INDEX_BYTES
+    return row
+
+
+def memory_scan(root: str):
+    """The flat `.md` listing: `(rows, name_count, bytes, truncated)`.
+
+    A flat non-recursive `os.scandir`, never `os.walk`: this is one directory
+    with a handful of small files, and the artifact walker's depth-4/300-file
+    crawl is the wrong tool (SERVER-13). `.history/` and `.trash/` are
+    directories and drop out for free.
+    """
+    writable_root = memory_root_writable(root) and MEMORY_WRITE
+    names = []
+    total = 0
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.name.lower().endswith(".md"):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    continue
+                names.append(entry.name)
+    except OSError:
+        return [], 0, 0, False
+    rows, truncated = [], False
+    for name in sorted(names, key=lambda n: (n != MEM_INDEX_NAME, n.lower())):
+        if len(rows) >= MEMORY_LIST_CAP:
+            truncated = True
+            break
+        row = memory_entry(root, name, writable_root)
+        total += int(row.get("size") or 0)
+        rows.append(row)
+    return rows, len(names), total, truncated
+
+
+def memory_list_payload() -> dict:
+    """`GET /api/memory/list` — G5's canonical shape, no field invented.
+
+    `root` and the per-file names are published HERE and not on `/health`: this
+    route needs the token, and a memory filename is a topic name — a disclosure
+    in its own right (SERVER-10). The page reads `aligned` from this route for
+    exactly that reason, never from `/health`.
+    """
+    root = MEMORY_ROOT
+    rows, count, _total, truncated = memory_scan(root)
+    aligned, effective = memory_alignment(root)
+    return {
+        "root": root,
+        "aligned": aligned,
+        "effective": effective,
+        # Two SEPARATE booleans, never folded into one: the page words its
+        # disabled affordance from whichever is false ("the write plane is off"
+        # vs "the memory root is not writable"), and a conflated field would
+        # print the wrong reason for a true refusal (G6/UI-6).
+        "writable": memory_root_writable(root),
+        "memoryWrite": bool(MEMORY_WRITE),
+        "limits": {"maxBytes": MAX_MEMORY_BYTES, "maxFiles": MAX_MEMORY_FILES,
+                   "indexLines": MEM_INDEX_LINES, "indexBytes": MEM_INDEX_BYTES},
+        "files": rows,
+        # Additive, in the house style of the snapshot's `logTruncated`: a cap
+        # that is not disclosed is a cap that lies about the directory.
+        "count": count,
+        "listTruncated": truncated,
+    }
+
+
+def memory_read_payload(name: str) -> dict:
+    """`GET /api/memory/file?name=` — G5's shape, JSON and not `text/plain`.
+
+    G8 describes serving a memory file as a DOCUMENT as `text/plain`; this route
+    is the API, and G5's table is canonical for it: the `sha256` a client must
+    echo back as `ifMatch` cannot travel in a bare text body at all, and
+    `memory.html` refuses any answer that is not `application/json` rather than
+    mis-parsing one. There is deliberately no document route for these files —
+    `.md`-only plus no HTML serving is what keeps the stored-XSS class absent
+    from a directory a browser can write (G8).
+    """
+    full = safe_memory_path(MEMORY_ROOT, name)
+    data, st = memory_read_file(full)
+    text = memory_decode(data)
+    return {"name": name, "content": text, "size": st.st_size,
+            "sha256": memory_sha(data), "mtime_ns": st.st_mtime_ns,
+            "hasFrontmatter": MEMORY_FRONTMATTER.match(text) is not None}
+
+
+# --------------------------------------------------------------------------
+# Writing: G7's hazard order, 1 to 10.
+# --------------------------------------------------------------------------
+
+_MEMORY_LOCKS: dict = {}
+_MEMORY_LOCKS_GUARD = threading.Lock()
+
+
+def memory_lock(name: str) -> threading.Lock:
+    """The per-name write lock (G7 step 5).
+
+    The realistic racer is not two tabs: it is Claude writing the same file from
+    the session this dashboard is watching. `ifMatch` is what protects against
+    THAT; this lock is what keeps two of this server's own requests from
+    interleaving a read-modify-write on one name. Swept at a cap, because a dict
+    keyed by attacker-supplied names is a growing collection like any other.
+    """
+    with _MEMORY_LOCKS_GUARD:
+        lock = _MEMORY_LOCKS.get(name)
+        if lock is None:
+            if len(_MEMORY_LOCKS) >= MEMORY_LOCK_CAP:
+                for key, value in list(_MEMORY_LOCKS.items()):
+                    if not value.locked():
+                        _MEMORY_LOCKS.pop(key, None)
+            lock = _MEMORY_LOCKS[name] = threading.Lock()
+        return lock
+
+
+def memory_atomic_write(full: str, data: bytes) -> None:
+    """G7 step 4: `O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW` 0600 temp, fsync, replace.
+
+    Never `open(target, "w")`: that truncates before it writes, so a process
+    that dies mid-request leaves a ZERO-BYTE instruction file that the next
+    session loads. The temp file is created in the same directory (so
+    `os.replace` is a rename, not a copy), `O_EXCL` kills the
+    check-then-open TOCTOU, `O_NOFOLLOW` refuses a planted symlink at the temp
+    name, and the directory fd is fsync'ed so the rename itself survives a
+    crash.
+    """
+    directory = os.path.dirname(full)
+    tmp = os.path.join(directory,
+                       f"{os.path.basename(full)}.tmp-{secrets.token_hex(6)}")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, full)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dir_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def memory_makedirs(path: str) -> None:
+    """`os.makedirs`, except EVERY level is created 0700 (SECURITY-15).
+
+    `os.makedirs(path, mode=0o700)` applies the mode to the FINAL component only;
+    every intermediate directory it creates gets the default `0777 & ~umask`,
+    which is 0755 on a normal box. That is how a `.touch/` or a `.trash/` ends up
+    world-readable underneath a 0700 leaf — one directory below files that hold
+    model instructions and, one level up from the memory root, the per-boot token
+    and the Mongo credentials.
+    """
+    parts = os.path.abspath(path).split(os.sep)
+    here = os.sep
+    for part in parts[1:]:
+        here = os.path.join(here, part)
+        try:
+            os.mkdir(here, 0o700)
+        except FileExistsError:
+            continue
+
+
+def memory_side_dir(root: str, kind: str, name: str) -> str:
+    """`<root>/.history/<name>/` or `<root>/.trash/<name>/`, created 0700.
+
+    Both live INSIDE the memory root and both are invisible to git: the `.md`
+    allowlist carve re-includes only top-level `*.md`, so a dot-directory under
+    it stays ignored (G9, verified). They are also invisible to the list route,
+    which lists files and not directories — the trash is surfaced by the page
+    from the path each DELETE returns, not by a second listing.
+
+    Neither `<root>/<kind>` nor the per-name folder under it may be a symlink:
+    `memory_makedirs` swallows `FileExistsError` at every level (it has to — the
+    normal case is that the tree already exists), so without this check a planted
+    `.trash -> /elsewhere` would silently redirect every backup and every deleted
+    file out of the project. Same refusal category as a symlinked target, because
+    it is the same hazard one directory up (G7 step 2).
+    """
+    parent = os.path.join(root, kind)
+    path = os.path.join(parent, name)
+    for candidate in (parent, path):
+        if os.path.islink(candidate):
+            raise MemoryRefusal(
+                409, "symlink",
+                "the memory root's history/trash directory is a symlink; this "
+                "server refuses to follow one, and nothing was written")
+    memory_makedirs(path)
+    return path
+
+
+def memory_keep_newest(directory: str, keep: int) -> None:
+    """Cap one history/trash folder: newest `keep` survive (W11's "capped")."""
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return
+    for stale in names[:-keep] if keep < len(names) else []:
+        try:
+            os.unlink(os.path.join(directory, stale))
+        except OSError:
+            pass
+
+
+def memory_snapshot(root: str, kind: str, name: str, data: bytes) -> str:
+    """Copy `data` into the history/trash folder 0600; return the relative path."""
+    directory = memory_side_dir(root, kind, name)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    leaf = f"{stamp}-{memory_sha(data)[:12]}.md"
+    memory_atomic_write(os.path.join(directory, leaf), data)
+    memory_keep_newest(directory, MEMORY_HISTORY_KEEP)
+    return os.path.join(kind, name, leaf)
+
+
+def memory_audit(root: str, op: str, name: str, data: bytes) -> None:
+    """G7 step 10: one JSON line per mutation, beside the memory dir.
+
+    `.touch/memory-audit.jsonl` — OUTSIDE `.touch/memory/`, because a `.jsonl`
+    inside it would be listed by the list route and reasoned about by the git
+    carve; out here `/.touch/*` ignores it (G9). `status.sh`'s discipline: one
+    `LOCK_EX`'d append per line, a `w` attribution on every line (Part D-5), and
+    a cap on the file.
+
+    This is NOT the plan-card stream: no `touch-status` runs, no `events.jsonl`
+    line is appended, and no badge — fabricated or otherwise — can come out of a
+    memory edit (PROTOCOL-20, R-58, Part D-6). An audit failure never fails the
+    write that already landed; it warns on stderr, because a monitoring record
+    must not break the thing it records.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(root)), "memory-audit.jsonl")
+    line = json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "op": op, "name": name, "bytes": len(data),
+        "sha256": memory_sha(data), "w": "monitor",
+    }) + "\n"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.write(line)
+                handle.flush()
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        if os.path.getsize(path) > MEMORY_AUDIT_BYTES:
+            with open(path, "rb") as handle:
+                tail = handle.read()[-(MEMORY_AUDIT_BYTES // 2):]
+            tail = tail.partition(b"\n")[2]      # never keep half a line
+            memory_atomic_write(path, tail)
+    except OSError as exc:
+        print(f"monitor_server: memory audit line not written ({exc})",
+              file=sys.stderr, flush=True)
+
+
+def memory_current(full: str):
+    """`(bytes, stat)` of what is on disk now, for a precondition check.
+
+    Bounded like every other read on this plane: the file on disk was not
+    necessarily written here (Claude writes these files too), so a 200 MB
+    `MEMORY.md` must be a named 413 rather than 200 MB in the event loop's
+    memory — and, since a 409 body carries the current content, in a JSON
+    response as well.
+    """
+    with open(full, "rb") as handle:
+        data = handle.read(MAX_MEMORY_BYTES + 1)
+    if len(data) > MAX_MEMORY_BYTES:
+        raise MemoryRefusal(
+            413, "too-large",
+            f"the file on disk is larger than the {MAX_MEMORY_BYTES}-byte "
+            f"per-file cap, so this editor will not rewrite it")
+    return data, os.stat(full)
+
+
+def memory_precondition(full: str, if_match: str, op: str):
+    """G7 step 5: `ifMatch` is REQUIRED, `"*"` is refused, a mismatch is a 409.
+
+    Two different statuses on purpose, because they are two different operator
+    situations: a request with NO precondition is a client that has not read the
+    file (412 — there is no legitimate blind overwrite of a file that is
+    injected into future sessions, which is also why `"*"` is not a carrier this
+    API accepts), and a request whose precondition FAILED is a real concurrent
+    write (409, carrying the current state so the page can offer reload /
+    show-both / overwrite instead of a bare retry).
+
+    The shape check (`MEMORY_SHA_RE`) runs FIRST, before the file is even read:
+    it is what keeps a client-supplied non-ASCII string out of
+    `hmac.compare_digest`, and it costs nothing on the path that succeeds.
+
+    One deliberate divergence from G5's canonical error table, recorded rather
+    than left to be discovered: the table lists `412` on the `PUT` row only, and
+    this function raises the same `412 no-precondition` for a DELETE with no (or
+    a malformed) `ifMatch`. A delete of an instruction file is not a lesser
+    operation than a save, so it gets the same precondition and the same honest
+    status; the DELETE row's error set is therefore `400 401 403 404 405 409 412`
+    and I16's route table must say so.
+    """
+    if not isinstance(if_match, str) or not MEMORY_SHA_RE.fullmatch(if_match):
+        raise MemoryRefusal(
+            412, "no-precondition",
+            f"this {op} needs the ifMatch sha256 of the bytes you last read — 64 "
+            f"lowercase hex characters; \"*\" is not accepted for a file that "
+            f"loads into future sessions")
+    data, st = memory_current(full)
+    current = memory_sha(data)
+    # Both sides are now known to be 64 ASCII hex characters, which is what makes
+    # `compare_digest` (whose `str` form refuses non-ASCII) safe to call here.
+    if not hmac.compare_digest(if_match, current):
+        state = {"sha256": current, "mtime_ns": st.st_mtime_ns,
+                 "size": st.st_size}
+        try:
+            # Strict, like every other read on this plane: a `replace` here would
+            # publish U+FFFD as "what is on disk now", and the page's own
+            # reload-then-save exit would then write those replacement characters
+            # back over bytes it never actually read.
+            state["content"] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise MemoryRefusal(
+                409, "precondition",
+                "the file changed on disk since you read it, and what is there "
+                "now is not valid UTF-8 — its bytes are not published here "
+                "because this editor will not rewrite them", state)
+        raise MemoryRefusal(
+            409, "precondition", "the file changed on disk since you read it",
+            state)
+    return data, st
+
+
+def memory_file_cap(size: int) -> None:
+    """G7 step 6's per-FILE half.
+
+    Called twice per write: once on the content as it was sent, and again after
+    `memory_stamp`, because refreshing a `modified:` line changes the length and a
+    cap enforced only before the last transformation is a cap with a gap.
+    """
+    if size > MAX_MEMORY_BYTES:
+        raise MemoryRefusal(
+            413, "too-large",
+            f"the content is {size} bytes; the per-file cap is "
+            f"{MAX_MEMORY_BYTES}")
+
+
+def memory_dir_caps(root: str, rows: list, incoming: int) -> None:
+    """G7 step 6's directory half, enforced on CREATE only."""
+    if len(rows) >= MAX_MEMORY_FILES:
+        raise MemoryRefusal(
+            413, "too-many-files",
+            f"the memory root already holds {len(rows)} files, the cap is "
+            f"{MAX_MEMORY_FILES}")
+    total = sum(int(row.get("size") or 0) for row in rows)
+    if total + incoming > MAX_MEMORY_DIR_BYTES:
+        raise MemoryRefusal(
+            413, "dir-too-large",
+            f"the memory root would exceed its {MAX_MEMORY_DIR_BYTES}-byte "
+            f"total cap")
+
+
+def memory_mutate(op: str, name: str, payload: dict, if_match: str):
+    """One mutation. G7's ten hazards, grouped VALIDATE -> DECIDE -> COMMIT.
+
+    Returns `(status, body)`. Every step below keeps its G7 number in a comment,
+    and this paragraph is here because those numbers do NOT execute 1...10 and
+    cannot: step 4 IS the atomic write, so 5 (the precondition), 6 (the caps) and
+    7 (hygiene) necessarily precede it, and 9 (the backup of the bytes being
+    replaced) has to happen in the same breath as it. So the phases are explicit
+    and the numbering is monotone WITHIN each phase:
+
+    * **VALIDATE** — no filesystem effect at all: G7 1 (the flat name), 2 (the
+      `lstat` symlink refusal), 3 (containment plus the `~/.claude` and
+      plugin-cache ancestor refusals). The memory root is created only AFTER this
+      passes, so a refused name leaves nothing behind.
+    * **DECIDE** — inside the per-name lock, so existence and the precondition are
+      one atomic story: existence (409 `exists` / 404 `missing`), G7 5, the strict
+      decode, G7 6 (both caps), G7 7 (content hygiene).
+    * **COMMIT** — G7 9 (the backup), 4 (the atomic write), 8 (for a delete, the
+      move to trash instead of an `unlink`), 10 (the audit line).
+
+    Hygiene runs after existence and the precondition deliberately: a PUT of
+    unhygienic content to a file that is not there must answer `404 missing`, and
+    a POST into a full directory must answer `413`, rather than reporting a body
+    problem for a request that could not have succeeded either way. The one check
+    that still runs before the lock is "is this a write request at all" — the
+    `content` type check — because that is a malformed request rather than a
+    decision about a file, and it belongs with the JSON parse it follows.
+
+    Runs on a worker thread (it is all blocking file I/O), which is also why the
+    per-name lock is a `threading.Lock` and not an asyncio one.
+    """
+    root = MEMORY_ROOT
+    raw, allow_pinned = None, False
+    if op != "delete":
+        raw = payload.get("content")
+        if not isinstance(raw, str):
+            raise MemoryRefusal(400, "no-content",
+                                "the request body needs a string `content`")
+        allow_pinned = payload.get("allowPinned") is True
+    full = safe_memory_path(root, name)                      # G7 steps 1-3
+    if op != "delete" and not os.path.isdir(root):
+        # First write into a fresh checkout, and created only AFTER the name has
+        # been validated: G7 step 1 is explicitly "flat name validation, not path
+        # handling ... before any filesystem call", so a refused name must not
+        # leave a new directory behind as its only visible effect. 0700 from the
+        # start, like the rest of `.touch/` — never created loose and chmod'ed
+        # after (SECURITY-15).
+        try:
+            memory_makedirs(root)
+        except OSError as exc:
+            raise MemoryRefusal(500, "no-root",
+                                f"the memory root could not be created: {exc}")
+    with memory_lock(name):
+        exists = os.path.isfile(full)
+        if op == "create" and exists:
+            raise MemoryRefusal(
+                409, "exists",
+                "a file with that name is already in the memory root, and a "
+                "create never overwrites one")
+        if op in ("update", "delete") and not exists:
+            raise MemoryRefusal(404, "missing", "no such file in the memory root")
+        if op == "delete":
+            previous, _st = memory_precondition(full, if_match, "delete")  # step 5
+            trash = memory_snapshot(root, ".trash", name, previous)   # G7 step 8
+            os.unlink(full)
+            memory_audit(root, "delete", name, previous)              # G7 step 10
+            return 200, {"name": name, "deleted": True, "trash": trash}
+        if op == "update":
+            previous, _st = memory_precondition(full, if_match, "save")   # step 5
+        else:
+            previous = None
+        # JSON hands us a `str`, and a `\udXXX` escape in it is a lone surrogate
+        # that no valid UTF-8 file can hold. The round trip through
+        # `surrogatepass` is what turns that into the same named 400 a bad byte
+        # sequence gets, instead of a UnicodeEncodeError at write time.
+        content = memory_normalize(memory_decode(
+            raw.encode("utf-8", "surrogatepass")))
+        incoming = len(content.encode("utf-8"))
+        memory_file_cap(incoming)                                     # G7 step 6
+        if op == "create":                                            # G7 step 6
+            rows, _count, _total, _trunc = memory_scan(root)
+            memory_dir_caps(root, rows, incoming)
+        memory_hygiene(content, allow_pinned=allow_pinned)            # G7 step 7
+        # `memory_stamp` is a no-op unless the content ALREADY carries leading
+        # frontmatter, so it is called unconditionally: the rule is "never invent
+        # frontmatter", not "never stamp".
+        final = memory_stamp(content)
+        data = final.encode("utf-8")
+        memory_file_cap(len(data))                                    # G7 step 6
+        if previous is not None and previous != data:
+            memory_snapshot(root, ".history", name, previous)          # G7 step 9
+        memory_atomic_write(full, data)                               # G7 step 4
+        st = os.stat(full)
+        memory_audit(root, op, name, data)                            # G7 step 10
+        return (201 if op == "create" else 200), {
+            "name": name, "size": st.st_size, "sha256": memory_sha(data),
+            "mtime_ns": st.st_mtime_ns,
+        }
+
+
+def memory_health() -> dict:
+    """The `/health` block: counts and booleans ONLY (SERVER-10).
+
+    `/health` is the one untokened route, which is why every path it would
+    otherwise publish is hashed. A memory filename is a topic name, so there are
+    no names here and no root either — not even a digest, because the digest
+    would answer nothing a supervisor needs. Whether the plane is on, whether it
+    is aligned, how much is there: that is the whole disclosure.
+    """
+    root = MEMORY_ROOT
+    if memory_unavailable():
+        return {"present": False, "writable": False, "aligned": None,
+                "files": 0, "bytes": 0, "indexOverLimit": False}
+    # A LIGHTER scan than the list route's, on purpose: this route answers
+    # without a token and a supervisor may poll it every second. The work per
+    # request is, exactly: one `scandir` with N `stat`s (no file contents), at
+    # most ONE bounded file read — the index, the only file with a documented
+    # load budget to be over — and an `aligned` answer that comes from
+    # `memory_alignment_cached`, so the up-to-three settings-file parses behind it
+    # happen at most once every `MEMORY_HEALTH_TTL` seconds however hard this
+    # route is polled. `memory_scan` reads every file to count lines, which is
+    # right for the tokened editor and wrong here.
+    files, total, over = 0, 0, False
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.name.lower().endswith(".md"):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                files += 1
+                total += st.st_size
+    except OSError:
+        pass
+    index = os.path.join(root, MEM_INDEX_NAME)
+    try:
+        if os.path.isfile(index) and os.path.getsize(index) <= MAX_MEMORY_BYTES:
+            with open(index, "rb") as handle:
+                # `replace` is correct HERE and nowhere else on this plane: this
+                # is a measurement, not a write, and an index that is not valid
+                # UTF-8 still has a line count the operator should hear about.
+                text = handle.read().decode("utf-8", "replace")
+            lines, size = memory_index_budget(text)
+            over = lines > MEM_INDEX_LINES or size > MEM_INDEX_BYTES
+    except OSError:
+        pass
+    aligned, _effective = memory_alignment_cached(root)
+    return {"present": os.path.isdir(root), "writable": memory_root_writable(root),
+            "aligned": aligned, "files": files, "bytes": total,
+            "indexOverLimit": over}
+
+
+# --------------------------------------------------------------------------
+# The HTTP half (I10): a (method, route) table, a response builder, a bounded
+# body reader, and the positive write-auth predicate.
+# --------------------------------------------------------------------------
+
+#: Every memory route, keyed the way the aggregator keys its own table: by
+#: (METHOD, route). A known route reached by the wrong method is a 405 with an
+#: `Allow:` header, and an unknown route under the prefix is a JSON 404 — never
+#: the HTML page, which is what turns a client typo into an invisible failure
+#: (SERVER-1, SERVER-7, UI-1). The read routes of the REST of this server stay
+#: method-blind on purpose (SERVER-1b): tightening them is a real behaviour
+#: change with its own test pass, and mixing it in here would risk an unrelated
+#: regression in the same commit.
+MEMORY_ROUTES = {
+    ("GET", MEMORY_ROUTE): "page",
+    ("GET", MEMORY_API_PREFIX + "list"): "list",
+    ("GET", MEMORY_API_PREFIX + "file"): "read",
+    ("POST", MEMORY_API_PREFIX + "file"): "create",
+    ("PUT", MEMORY_API_PREFIX + "file"): "update",
+    ("DELETE", MEMORY_API_PREFIX + "file"): "delete",
+}
+MEMORY_KNOWN_ROUTES = frozenset(route for _method, route in MEMORY_ROUTES)
+MEMORY_WRITE_OPS = frozenset({"create", "update", "delete"})
+
+STATUS_TEXT = {
+    200: "OK", 201: "Created", 204: "No Content",
+    400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+    404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+    411: "Length Required", 412: "Precondition Failed",
+    413: "Payload Too Large", 415: "Unsupported Media Type",
+    422: "Unprocessable Content", 500: "Internal Server Error",
+    503: "Service Unavailable",
+}
+_STATUS_CLASS = {1: "Informational", 2: "Success", 3: "Redirection",
+                 4: "Client Error", 5: "Server Error"}
+
+
+def status_text(status: int) -> str:
+    """The reason phrase for `status`, and NEVER `"OK"` for one we do not name.
+
+    The aggregator carried this bug until SERVER-8 named it (fixed there in the
+    same pass, and its table is the one this mirrors): a
+    `STATUS_TEXT.get(status, "OK")` fallback sends `HTTP/1.1 409 OK`, a conflict
+    wearing a success phrase. A reason phrase is advisory to every parser and
+    read by exactly one audience — the human looking at a capture — so an
+    unnamed status falls back to its CLASS, which is derived from the code and
+    therefore cannot contradict it (SERVER-8).
+    """
+    status = int(status)
+    named = STATUS_TEXT.get(status)
+    if named:
+        return named
+    return _STATUS_CLASS.get(status // 100, "Unknown Status")
+
+
+def header_value(value) -> str:
+    """A header value with CR/LF and other control bytes removed.
+
+    Every value this file emits is server-generated today, so this is belt and
+    braces — but a header is a line in a protocol, and the one place a caller's
+    string could ever reach one is worth making structurally safe rather than
+    remembering to check.
+    """
+    return re.sub(r"[^\t\x20-\x7e]", "", str(value))
+
+
+def http_response(status: int, body: bytes, content_type: str,
+                  headers: dict = None) -> bytes:
+    """One response, built once. `Cache-Control: no-store` on every one of them.
+
+    The memory group answers over the same connection style the rest of this
+    server uses (`Connection: close`), and never caches: a stale editor list or
+    a cached file body is an operator editing bytes that are no longer there.
+    """
+    lines = [f"HTTP/1.1 {status} {status_text(status)}",
+             f"Content-Type: {content_type}",
+             "X-Content-Type-Options: nosniff",
+             "Cache-Control: no-store",
+             f"Content-Length: {len(body)}",
+             "Connection: close"]
+    for key, value in (headers or {}).items():
+        lines.append(f"{header_value(key)}: {header_value(value)}")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin1") + body
+
+
+def json_response(status: int, payload: dict, headers: dict = None) -> bytes:
+    """A JSON answer — the shape every route under `/api/memory/` speaks.
+
+    Including the failures: `memory.html` checks the content type BEFORE it
+    parses, so an HTML fallback or a text/plain error would be NAMED on screen
+    instead of silently mis-parsed (UI-1/UI-4).
+    """
+    body = json.dumps(payload).encode("utf-8")
+    return http_response(status, body, "application/json", headers)
+
+
+def requires_write_auth(method: str, route: str) -> bool:
+    """POSITIVE: does this (method, route) mutate the file plane? (W4/SECURITY-16)
+
+    Derived from the route table itself, not from a hand-maintained open list.
+    The negative shape — `route not in OPEN_ROUTES` — is how a route added by
+    analogy ends up unauthenticated with no second gate behind it; here a new
+    write entry in the table is covered the moment it exists. The method is part
+    of the question because one route (`/api/memory/file`) is read by `GET` and
+    written by three other verbs.
+    """
+    return MEMORY_ROUTES.get(((method or "").upper(), route)) in MEMORY_WRITE_OPS
+
+
+def is_memory_route(route: str) -> bool:
+    """True for the page and for everything under the API prefix.
+
+    Prefix membership and not table membership: an unknown route under
+    `/api/memory/` must be answered by THIS group (with a JSON 404), never by
+    the HTML fallback at the bottom of `handle()`.
+    """
+    return (route == MEMORY_ROUTE or route == MEMORY_API_PREFIX.rstrip("/")
+            or route.startswith(MEMORY_API_PREFIX))
+
+
+def memory_allowed_methods(route: str) -> list:
+    return sorted(method for method, known in MEMORY_ROUTES if known == route)
+
+
+async def read_memory_body(reader, headers: dict):
+    """A bounded body read, for this group ONLY. `(raw, None)` or `(None, refusal)`.
+
+    Nothing else on this server has ever read a body, so every rule is written
+    here rather than assumed (SERVER-2, SECURITY-14, W9):
+
+    * `Transfer-Encoding: chunked` is refused outright — this server does not
+      implement the framing, and accepting the header while ignoring it is a
+      request-smuggling shape;
+    * `Content-Length` is REQUIRED (411): a write with no length would otherwise
+      become an empty save that reports success;
+    * the length is checked against the cap BEFORE a byte is read (413);
+    * `readexactly` under a timeout, and a short read is a 400 — never a
+      silently truncated instruction file.
+    """
+    if "chunked" in (headers.get("transfer-encoding") or "").lower():
+        return None, MemoryRefusal(
+            400, "chunked", "chunked request bodies are not accepted; send a "
+                            "Content-Length")
+    raw_length = (headers.get("content-length") or "").strip()
+    try:
+        length = int(raw_length)
+    except ValueError:
+        return None, MemoryRefusal(
+            411, "no-length",
+            "a write needs an explicit Content-Length; nothing was written")
+    if length < 0:
+        return None, MemoryRefusal(411, "no-length",
+                                   "Content-Length must not be negative")
+    if length > MAX_MEMORY_BODY_BYTES:
+        return None, MemoryRefusal(
+            413, "body-too-large",
+            f"the body is {length} bytes; the cap is {MAX_MEMORY_BODY_BYTES} "
+            f"(checked before reading)")
+    if length == 0:
+        return b"", None
+    try:
+        data = await asyncio.wait_for(reader.readexactly(length),
+                                      MEMORY_BODY_TIMEOUT)
+    except asyncio.IncompleteReadError:
+        return None, MemoryRefusal(
+            400, "short-body",
+            "the connection ended before Content-Length bytes arrived; nothing "
+            "was written (a short read is never treated as a truncation)")
+    except (asyncio.TimeoutError, OSError):
+        return None, MemoryRefusal(
+            400, "body-timeout",
+            "the body did not arrive within the read timeout; nothing was written")
+    return data, None
+
+
+async def memory_http(method: str, route: str, query: str, headers: dict,
+                      reader) -> bytes:
+    """The whole `/memory` + `/api/memory/` group, in G5's order.
+
+    Auth already ran in `handle()` (token first, before any route does work, and
+    header-only on the write verbs). What is left, in order: the route table,
+    the Origin/Host gate on EVERY route including the reads, the write marker,
+    the availability of the family, the write plane's own flag, the content
+    type, the bounded body, and only then the handler.
+    """
+    op = MEMORY_ROUTES.get((method, route))
+    if op is None:
+        if route not in MEMORY_KNOWN_ROUTES:
+            return json_response(404, {
+                "error": "unknown-route", "category": "unknown-route",
+                "reason": f"no memory route answers {route}"})
+        allow = memory_allowed_methods(route)
+        return json_response(
+            405, {"error": "method-not-allowed", "category": "method-not-allowed",
+                  "reason": f"{method} is not allowed on {route}",
+                  "allow": allow},
+            {"Allow": ", ".join(allow)})
+    write = op in MEMORY_WRITE_OPS
+    # The Origin/Host gate on a PLAIN HTTP route, not only on the /ws upgrade
+    # (SECURITY-3, W3). `allow_missing_origin` is right for a read — a
+    # non-browser client that already presented the token — and wrong for a
+    # write: under DNS rebinding the request is same-origin, no preflight
+    # happens, and the Host NAME check is the only wall left standing.
+    refusal = origin_refusal(headers, allow_missing_origin=not write)
+    if refusal:
+        return json_response(403, {"error": "origin", "category": "origin",
+                                   "reason": refusal})
+    if write and (headers.get("x-touch-write") or "").strip() != "1":
+        # A simple cross-origin request cannot set this header, and the preflight
+        # it forces has nothing to succeed against because this server emits no
+        # Access-Control-Allow-* header, ever (W2).
+        return json_response(403, {
+            "error": "write-marker", "category": "write-marker",
+            "reason": "a write must carry the X-Touch-Write: 1 header"})
+    if op == "page":
+        try:
+            with open(MEMORY_HTML, "rb") as handle:
+                body = handle.read()
+        except OSError:
+            return json_response(503, {
+                "error": "page-missing", "category": "page-missing",
+                "reason": "memory.html is missing from this installation"})
+        STATS["page_hits"] += 1
+        return http_response(200, body, "text/html; charset=utf-8",
+                             {"Referrer-Policy": NO_REFERRER})
+    unavailable = memory_unavailable()
+    if unavailable:
+        # 503 and not 404: the directory is not missing, this SERVER is not in a
+        # position to serve one. The page prints the reason as its banner.
+        return json_response(503, {"error": "memory-unavailable",
+                                   "category": "memory-unavailable",
+                                   "reason": unavailable})
+    if write and not MEMORY_WRITE:
+        return json_response(403, {
+            "error": "write-plane-off", "category": "write-plane-off",
+            "reason": "the write plane is off (the default): restart "
+                      "touch-monitor with --allow-memory-write, or "
+                      "TOUCH_ALLOW_MEMORY_WRITE=1, to enable saves"})
+    params = urllib.parse.parse_qs(query or "")
+    name = (params.get("name") or [""])[0]
+    if_match = (params.get("ifMatch") or [""])[0]
+    payload = {}
+    if op in ("create", "update"):
+        ctype = (headers.get("content-type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return json_response(415, {
+                "error": "content-type", "category": "content-type",
+                "reason": "a write body must be application/json"})
+        raw, body_refusal = await read_memory_body(reader, headers)
+        if body_refusal is not None:
+            return json_response(body_refusal.status, body_refusal.body())
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return json_response(400, {
+                "error": "bad-json", "category": "bad-json",
+                "reason": "the request body is not readable JSON"})
+        if not isinstance(payload, dict):
+            return json_response(400, {
+                "error": "bad-json", "category": "bad-json",
+                "reason": "the request body must be a JSON object"})
+        if op == "update":
+            supplied = payload.get("ifMatch")
+            if isinstance(supplied, str):
+                if_match = supplied
+    try:
+        if op == "list":
+            return json_response(200, await asyncio.to_thread(memory_list_payload))
+        if op == "read":
+            return json_response(200, await asyncio.to_thread(
+                memory_read_payload, name))
+        status, body = await asyncio.to_thread(memory_mutate, op, name, payload,
+                                              if_match)
+        return json_response(status, body)
+    except MemoryRefusal as exc:
+        return json_response(exc.status, exc.body())
+    except OSError as exc:
+        # The filesystem said no (permissions, a full disk, a race with another
+        # writer). Named, not swallowed: the page renders the sentence.
+        return json_response(500, {
+            "error": "io", "category": "io",
+            "reason": f"the memory root could not be served: {exc.strerror or exc}"})
+
+
 CONNECTIONS: set = set()  # live handler tasks, cancelled on shutdown
 
 
@@ -2504,6 +4141,13 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         return
     head = raw.decode("latin1")
     request_line = head.split("\r\n", 1)[0].split(" ")
+    # The METHOD, at last (SERVER-1/SECURITY-2). It used to be parsed and thrown
+    # away, so `POST /tasks` and `DELETE /` both answered as GETs — harmless while
+    # nothing on this server accepted input, and unacceptable the moment one route
+    # group mutates files. Only the memory group dispatches on it: the read routes
+    # stay method-blind deliberately (SERVER-1b), because tightening them is an
+    # unrelated behaviour change with its own test pass.
+    method = (request_line[0] if request_line else "GET").upper()
     path = request_line[1] if len(request_line) > 1 else "/"
     route, _, query = path.partition("?")
     headers = {}
@@ -2518,7 +4162,22 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         # wrong. The page itself ("/") is open — it is the static HTML that
         # carries the token in its own query string — and so is /health, so a
         # supervisor can probe a server it has no token for.
-        if route not in ("/", "") and not token_ok(route, headers, query):
+        if route not in ("/", "") and not token_ok(
+                route, headers, query,
+                header_only=requires_write_auth(method, route)):
+            if route.startswith(MEMORY_API_PREFIX):
+                # The JSON API answers JSON even when it refuses: `memory.html`
+                # checks the content type BEFORE it parses, so a text/plain 401
+                # would be reported as "this build has no memory API" instead of
+                # raising the auth banner the operator can act on (UI-1/UI-4).
+                writer.write(json_response(
+                    401, {"error": "unauthorized", "category": "unauthorized",
+                          "reason": "a per-boot token is required on this route, "
+                                    "and a write must carry it in the "
+                                    "X-Orch-Token header"},
+                    {"WWW-Authenticate": 'Bearer realm="monitor"'}))
+                await writer.drain()
+                return
             body = b"a per-boot token is required on this route"
             writer.write(
                 b"HTTP/1.1 401 Unauthorized\r\n"
@@ -2526,6 +4185,14 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 b"Content-Type: text/plain\r\nContent-Length: " +
                 str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
             )
+            await writer.drain()
+            return
+        if is_memory_route(route):
+            # The file plane owns its own dispatch, its own 404 and its own 405:
+            # an unknown route under the prefix must never fall through to the
+            # HTML page below, which is how a client typo becomes an invisible
+            # failure (SERVER-7, UI-1).
+            writer.write(await memory_http(method, route, query, headers, reader))
             await writer.drain()
             return
         if route == "/ws":
@@ -2643,9 +4310,9 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                     # thing being kept. `Referrer-Policy` closes the same leak
                     # through the other door (an outbound subresource carrying
                     # the tokened URL as its Referer).
-                    extra = (b"Content-Type: text/html; charset=utf-8\r\n"
-                             b"Content-Security-Policy: sandbox\r\n"
-                             b"Referrer-Policy: no-referrer\r\n")
+                    extra = (b"Content-Type: text/html; charset=utf-8\r\n" +
+                             f"Content-Security-Policy: {FILE_CSP}\r\n"
+                             f"Referrer-Policy: {NO_REFERRER}\r\n".encode("latin1"))
                 writer.write(
                     b"HTTP/1.1 200 OK\r\n" + extra +
                     b"X-Content-Type-Options: nosniff\r\n"
@@ -2659,8 +4326,16 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                     body = f.read()
             except OSError:
                 body = b"monitor.html missing"
+            # The page's own URL carries the per-boot token in its query string,
+            # and that token now also authorizes memory writes: a `Referer`
+            # header leaving this document would hand it to whatever the page
+            # links to (SECURITY-5). The page ALSO carries a `<meta
+            # name="referrer">`, because the two cover different fetches — the
+            # meta reaches a subresource a browser starts before it has parsed a
+            # header, and this reaches a client that ignores meta tags entirely.
             writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
+                f"Referrer-Policy: {NO_REFERRER}\r\n".encode("latin1") +
                 b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
             )
             await writer.drain()
@@ -2700,6 +4375,24 @@ async def main() -> None:
               f"{hashlib.sha256(TOKEN.encode()).hexdigest()[:8]})", flush=True)
     print(f"state dir: {STATE_DIR}", flush=True)
     print(f"events:    {EVENTS}", flush=True)
+    # The file plane says what it is, out loud, at every boot: which directory
+    # (or why none), and whether this process can write it. An operator must not
+    # have to probe /health to learn that the port in front of them is an editor
+    # (SECURITY-16's "refuse loudly", W14's disclosure).
+    unavailable = memory_unavailable()
+    if unavailable:
+        print(f"memory:    unavailable — {unavailable}", flush=True)
+    else:
+        aligned, effective = memory_alignment(MEMORY_ROOT)
+        print(f"memory:    {MEMORY_ROOT}", flush=True)
+        if aligned is not True:
+            print(f"           NOT aligned — Claude Code reads {effective}",
+                  flush=True)
+    print("memory writes: "
+          + ("ON (--allow-memory-write / $TOUCH_ALLOW_MEMORY_WRITE)"
+             if MEMORY_WRITE else
+             "off (the default; --allow-memory-write enables the write plane)"),
+          flush=True)
     if token_path:
         print(f"token written to {token_path} (0600)", flush=True)
     else:

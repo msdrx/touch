@@ -16,7 +16,7 @@ So this test **relocates the package** — copies `aggregator/` into a fake
 a fake project — and asserts each root's provenance **independently**:
 
     state  -> project      legacy -> project      tasks -> project
-    db digest -> project-derived AND update-invariant
+    memory -> project      db digest -> project-derived AND update-invariant
     assets -> package
 
 A single "it works in the repo" assertion cannot distinguish those, which is
@@ -35,7 +35,7 @@ REPO = Path(__file__).resolve().parents[1]
 # The canonical trees are named through `tests/_roots.py`, never by a
 # literal under REPO: GD-U1 moves them and this is the single flip point.
 sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
-from _roots import SRC                # noqa: E402  (path juggling first)
+from _roots import ORCH_REL, SRC      # noqa: E402  (path juggling first)
 sys.path.insert(0, str(SRC))
 
 from aggregator import paths                                   # noqa: E402
@@ -55,6 +55,7 @@ print(json.dumps({
     "state":     store.state_root(),
     "legacy":    legacy.orchestrator_root(),
     "tasks":     server.default_tasks_root(),
+    "memory":    paths.memory_root(),
     "assets":    server.default_assets(),
     "db":        mirror.database_name(),
 }))
@@ -104,9 +105,17 @@ def probe(package_root, cwd, **env):
 
 
 def make_world(tmp):
-    """A fake project, a foreign cwd and a fake home — none of them the repo."""
+    """A fake project, a foreign cwd and a fake home — none of them the repo.
+
+    The project carries BOTH directories the layout now distinguishes: the
+    `.claude/` **marker** (what makes this a Claude Code project) and the
+    `.touch/local-orchestrators/` **state** directory. They are deliberately
+    different (G10/PROTOCOL-23), so a fixture that conflated them could not tell
+    a marker bug from a join bug.
+    """
     project = Path(tmp) / "project"
-    (project / ".claude" / "local-orchestrators").mkdir(parents=True)
+    (project / ".claude").mkdir(parents=True)
+    (project / ORCH_REL).mkdir(parents=True)
     foreign = Path(tmp) / "elsewhere" / "deep"
     foreign.mkdir(parents=True)
     (Path(tmp) / "fake-home").mkdir()
@@ -171,6 +180,104 @@ def test_home_is_not_a_project():
                 os.environ["HOME"] = saved
 
 
+def test_the_two_touch_roots_are_project_anchored_not_state_derived():
+    print("test_the_two_touch_roots_are_project_anchored_not_state_derived")
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp) / "project"
+        (project / ".claude").mkdir(parents=True)
+        elsewhere = Path(tmp) / "elsewhere"
+        elsewhere.mkdir()
+        env = {"CLAUDE_PROJECT_DIR": str(project)}
+
+        check(paths.tasks_root(env=env) == str(project / ORCH_REL),
+              "tasks_root() is <project>/.touch/local-orchestrators")
+        check(paths.memory_root(env=env) == str(project / ".touch" / "memory"),
+              "memory_root() is <project>/.touch/memory")
+
+        # The trap PROTOCOL-8 names: `.touch/` is now the PARENT of the tasks
+        # root, so the one-line definition `state_root() + "/local-orchestrators"`
+        # looks right. It would let `TOUCH_STATE_DIR` relocate ACTIVE and HALT to
+        # a directory the scope-guard hook never reads — a silent disarm of the
+        # guard AND the run brake — and desync memory from where the model looks.
+        moved = dict(env, TOUCH_STATE_DIR=str(elsewhere / ".touch-dev"))
+        check(paths.tasks_root(env=moved) == str(project / ORCH_REL),
+              "$TOUCH_STATE_DIR does NOT move the tasks root (ACTIVE/HALT stay "
+              "where the hook looks — it reads neither TOUCH_STATE_DIR nor "
+              "TOUCH_LEGACY_ROOT)")
+        check(paths.memory_root(env=moved) == str(project / ".touch" / "memory"),
+              "…nor the memory root: the CLI's autoMemoryDirectory never reads "
+              "that variable, so anything it moved would desync in silence")
+
+        check(paths.tasks_root(str(elsewhere), env=env) == str(elsewhere),
+              "an explicit argument wins (--tasks-root, every test fixture)")
+        check(paths.tasks_root(env=dict(env, ORCH_TASKS_ROOT=str(elsewhere)))
+              == str(elsewhere),
+              "$ORCH_TASKS_ROOT — the variable the hook, both daemons and "
+              "status.sh already agree on — wins over the default")
+        check(paths.tasks_root(env=dict(env, TOUCH_LEGACY_ROOT=str(elsewhere)))
+              == str(elsewhere),
+              "$TOUCH_LEGACY_ROOT is still honoured (it was legacy.py's only "
+              "override) — as a documented alias, not a second truth")
+        check(paths.tasks_root(env=dict(env, ORCH_TASKS_ROOT=str(elsewhere),
+                                        TOUCH_LEGACY_ROOT=str(project / "x")))
+              == str(elsewhere),
+              "…and when both are set the precedence is stated, not accidental: "
+              "ORCH_TASKS_ROOT first")
+        check(paths.tasks_root(env=dict(env, ORCH_TASKS_ROOT="",
+                                        TOUCH_LEGACY_ROOT=""))
+              == str(project / ORCH_REL),
+              "an exported-but-empty override is not a root (it would be /)")
+        # The memory root has NO environment rung, and the asymmetry with the
+        # tasks root is the decision (G1/G10): `ORCH_TASKS_ROOT` had to stay
+        # because the hook, both daemons and `status.sh` already read it, while a
+        # memory-relocation variable would be new — and a new way to move this
+        # root is a hole in two controls spelled as literal paths rather than
+        # derived from this function: the subagent write-deny on
+        # `.touch/memory/**` (G14) and the `.gitignore` re-inclusion of
+        # `.touch/memory/*.md` (G9). Relocation is `autoMemoryDirectory`'s job.
+        for name in ("TOUCH_MEMORY_DIR", "CLAUDE_MEMORY_DIR", "MEMORY_DIR",
+                     "TOUCH_LEGACY_ROOT", "ORCH_TASKS_ROOT"):
+            check(paths.memory_root(env=dict(env, **{name: str(elsewhere)}))
+                  == str(project / ".touch" / "memory"),
+                  f"${name} does not move the memory root — no variable does, "
+                  "or the write-deny and the .gitignore allowlist stop covering "
+                  "it")
+        check(paths.memory_root(str(elsewhere), env=env) == str(elsewhere),
+              "…while an explicit argument still wins, which is what a test and "
+              "an operator tool use instead of a variable")
+
+
+def test_the_marker_stays_dot_claude_after_the_state_moved_to_dot_touch():
+    print("test_the_marker_stays_dot_claude_after_the_state_moved_to_dot_touch")
+    check(paths.PROJECT_MARKER == ".claude",
+          "PROJECT_MARKER is `.claude` (G10/PROTOCOL-23): `.touch/` is created "
+          "BY Touch, so it cannot be what defines a project")
+    with tempfile.TemporaryDirectory() as tmp:
+        # A checkout that has been used: the marker plus the ONE tracked subtree
+        # of `.touch/`, and no `.touch/local-orchestrators/` yet.
+        project = Path(tmp) / "project"
+        (project / ".claude").mkdir(parents=True)
+        (project / ".touch" / "memory").mkdir(parents=True)
+        deep = project / "a" / "b"
+        deep.mkdir(parents=True)
+        check(paths.memory_root(env={}, cwd=str(deep))
+              == str(project / ".touch" / "memory"),
+              "a clone holding only `.touch/memory/` still resolves both roots — "
+              "the walk-up keys on the marker, not on the state directory")
+        check(paths.tasks_root(env={}, cwd=str(deep)) == str(project / ORCH_REL),
+              "…including the tasks root, which need not exist to be named")
+
+        # The inverse, which is the actual hazard: a stale `.touch/` left in some
+        # unrelated directory must not make it a project root.
+        stale = Path(tmp) / "stale"
+        (stale / ".touch" / "memory").mkdir(parents=True)
+        inner = stale / "sub"
+        inner.mkdir()
+        check(paths.project_root(env={}, cwd=str(inner)) == str(inner),
+              "a directory holding `.touch/` and no `.claude/` is NOT a project "
+              "root: a daemon started in a stale one would otherwise adopt it")
+
+
 def test_only_paths_mentions_dunder_file():
     print("test_only_paths_mentions_dunder_file")
     offenders = []
@@ -199,16 +306,22 @@ def test_relocated_roots_are_project_anchored():
               "project_root() is the fake project, not the cwd and not the cache")
         check(got["state"] == str(project / ".touch"),
               "state -> project: the WAL never lands in the version-stamped cache")
-        check(got["legacy"] == str(project / ".claude" / "local-orchestrators"),
+        check(got["legacy"] == str(project / ORCH_REL),
               "legacy tasks root -> project")
-        check(got["tasks"] == str(project / ".claude" / "local-orchestrators"),
+        check(got["tasks"] == str(project / ORCH_REL),
               "server tasks root -> project")
+        check(got["legacy"] == got["tasks"],
+              "…and they are the SAME string: one resolver, not two spellings "
+              "that a half-landed move can separate (LAYOUT-8)")
+        check(got["memory"] == str(project / ".touch" / "memory"),
+              "memory root -> project: the model reads these files from the "
+              "checkout, so the plugin cache would be a desync with no symptom")
         check(got["assets"] == str(cache / "touch-visual"),
               "assets -> package: the one root that genuinely ships with the code")
         check(got["plugin"] == str(cache),
               "plugin_root() is the package's parent, wherever the package is")
 
-        inside_cache = [k for k in ("state", "legacy", "tasks")
+        inside_cache = [k for k in ("state", "legacy", "tasks", "memory")
                         if got[k].startswith(str(cache))]
         check(not inside_cache,
               f"nothing mutable is written under the plugin cache: {inside_cache or 'none'}")
@@ -230,7 +343,8 @@ def test_relocated_roots_follow_touch_project_cwd_and_the_walk_up():
         inner.mkdir(parents=True)
         walked = probe(cache, inner)
         check(walked["state"] == str(project / ".touch")
-              and walked["legacy"] == str(project / ".claude" / "local-orchestrators"),
+              and walked["legacy"] == str(project / ORCH_REL)
+              and walked["memory"] == str(project / ".touch" / "memory"),
               "with no variables at all, the cwd walk-up finds the same project")
         check(walked["assets"] == str(cache / "touch-visual"),
               "…and assets still resolve against the package, not the walk-up")
@@ -266,6 +380,8 @@ def main():
         test_project_root_resolution_order,
         test_project_root_walk_up_and_fallback,
         test_home_is_not_a_project,
+        test_the_two_touch_roots_are_project_anchored_not_state_derived,
+        test_the_marker_stays_dot_claude_after_the_state_moved_to_dot_touch,
         test_only_paths_mentions_dunder_file,
         test_relocated_roots_are_project_anchored,
         test_relocated_roots_follow_touch_project_cwd_and_the_walk_up,

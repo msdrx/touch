@@ -9,11 +9,11 @@
 # Appends one JSON event line to $ORCH_STATE_DIR/events.jsonl. ORCH_STATE_DIR
 # MUST point at the task's state folder. When it is unset this resolves the
 # project's tasks root ($ORCH_TASKS_ROOT > $CLAUDE_PROJECT_DIR > cwd walk-up to
-# a .claude/ marker > the legacy module-relative path if it exists — the same
-# order both daemons use) and writes to the newest task folder there, warning
-# loudly. When THAT fails too it exits 2 rather than spooling into the shared
-# module directory: a spool nobody reads is data loss with extra steps, and in
-# a packaged copy the module dir is a version-stamped cache that gets swept.
+# a .claude/ marker — three rungs, the same order both daemons use) and writes
+# to the newest task folder there, warning loudly. When THAT fails too it exits
+# 2 rather than spooling into the shared module directory: a spool nobody reads
+# is data loss with extra steps, and in a packaged copy the module dir is a
+# version-stamped cache that gets swept.
 # Write integrity (R-10): the append is flock'd (events.jsonl has several
 # writers — every agent plus decision_watcher.py) and `detail` is capped at 1 KB
 # at the writer (GD-11). Every line carries "w":"agent" so a reader never has to
@@ -21,7 +21,6 @@
 # This is a BEST-EFFORT writer: an unknown state warns on stderr but still
 # appends, because a monitoring call must never break an agent.
 set -u
-DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Both walk-up loops below take the parent with `p="${d%/*}"; [ -z "$p" ] && p=/`
 # rather than `p="$(dirname "$d")"`. This is the hottest script in the module —
@@ -31,28 +30,33 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 # path ($PWD, and a $1 normalised to absolute), so the empty result can only
 # mean "d was /x", whose parent is "/".
 
-# The tasks-root resolver, in bash: the same four rungs as the daemons'
-# resolve_tasks_root(). Prints the root on stdout, or returns 1.
+# The tasks-root resolver, in bash: the same THREE rungs as the daemons'
+# resolve_tasks_root(), which this must stay in step with (G10). Rungs 2 and 3
+# join `.touch/local-orchestrators`, Touch's own gitignored state tree. Rung 3's
+# MARKER dir and the STATE dir are deliberately DIFFERENT: `.claude/` is what
+# marks a Claude Code project (`.touch/` is created by Touch and ignored, so it
+# cannot mark one), and the run history then lives under `.touch/`. The former
+# FOURTH rung — a module-relative `$DIR/../../local-orchestrators` sibling
+# lookup — is DELETED: after GD-U1 it had nothing to resolve to, and in a
+# packaged copy it would glob sibling plugins. Prints the root on stdout, or
+# returns 1 (the caller then refuses rather than guessing).
 resolve_tasks_root() {
     if [ -n "${ORCH_TASKS_ROOT:-}" ]; then
         printf '%s\n' "$ORCH_TASKS_ROOT"; return 0
     fi
     if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-        printf '%s\n' "$CLAUDE_PROJECT_DIR/.claude/local-orchestrators"; return 0
+        printf '%s\n' "$CLAUDE_PROJECT_DIR/.touch/local-orchestrators"; return 0
     fi
     local d p
     d="$PWD"
     while :; do
         if [ -d "$d/.claude" ]; then
-            printf '%s\n' "$d/.claude/local-orchestrators"; return 0
+            printf '%s\n' "$d/.touch/local-orchestrators"; return 0
         fi
         p="${d%/*}"; [ -z "$p" ] && p=/
         [ "$p" = "$d" ] && break
         d="$p"
     done
-    if [ -d "$DIR/../../local-orchestrators" ]; then
-        printf '%s\n' "$DIR/../../local-orchestrators"; return 0
-    fi
     return 1
 }
 

@@ -11,6 +11,83 @@ development record of what existed before it; no marketplace ever served it and
 no one could install it, so there is no upgrade path from it to document and
 nothing to migrate. If you installed Touch at all, you installed 0.2.0 or later.
 
+## 0.3.0
+
+Still no session verb — nothing starts, stops, restarts or terminates anything —
+but this release adds Touch's first **write** surface, and it is deliberately a
+narrow one: the Markdown files Claude Code loads as *memory* in the project you
+run it in. It also moves every run folder out of `.claude/` and into `.touch/`,
+so all of Touch's project state now lives under one directory.
+
+**Added**
+
+- **Auto memory, kept in your project.** `touch-selfcheck --init` maps this
+  project's Claude Code memory to `<project>/.touch/memory` by merging one
+  documented key, `autoMemoryDirectory`, into the project's
+  `.claude/settings.local.json` — then *verifies* that the CLI resolved it,
+  because a value the CLI rejects (a relative path, a `$VAR`) is dropped
+  silently with no error and no warning. It also reports the three undocumented
+  environment overrides that would outrank the key. It moves no memory content
+  and refuses rather than guesses when the answer would be a mapping it cannot
+  stand behind. Auto memory only: project and user instruction files, and
+  subagent memory, have no relocation mechanism and do not move.
+- **A memory editor on the run dashboard.** `touch-monitor` serves a second
+  page at `/memory` — same port, same per-boot token — that lists and reads
+  those files, shows the resolved directory, says whether the CLI agrees with
+  it, and discloses the size caps and the 200-line / 25 KB budget the index is
+  loaded under. Saving is **off by default**: pass `--allow-memory-write` (or
+  set `TOUCH_ALLOW_MEMORY_WRITE=1`) to enable it, and rows render disabled with
+  the reason until you do. Reads are `text/plain`, previews are escape-first,
+  and the page has no `innerHTML` in it.
+- **A write path built around the ways this could go wrong.** With writes
+  enabled, a save takes the token from a request *header* only (never the URL,
+  so a mutation cannot be bookmarked, prefetched or embedded in an `<img>`),
+  requires an `X-Touch-Write: 1` header and a present same-origin `Origin`,
+  emits no CORS header ever, and answers `405` with `Allow:` for a wrong method
+  and a JSON `404` — never a page — for an unknown route under its prefix. Names
+  are flat `<name>.md`; a symlink is refused rather than followed; containment is
+  checked on the resolved path both sides; a target under `~/.claude` or inside
+  an installed plugin cache is refused by name; the file is written through an
+  `O_EXCL|O_NOFOLLOW` temp file, `fsync`, `os.replace` and a directory `fsync`;
+  and an `ifMatch` checksum is required, so two editors cannot silently overwrite
+  each other. Previous bytes go to `.touch/memory/.history/`, a delete is a move
+  into `.touch/memory/.trash/`, directories are `0700` and files `0600`, and
+  every change appends one line to `.touch/memory-audit.jsonl`. No dashboard
+  event is emitted for a memory edit — it is not a plan card and must not
+  fabricate one.
+- **Content hygiene, because these bytes become model instructions.** A save is
+  refused, with a named reason and never a quote of the offending text, when it
+  carries an `@`-import outside a code span (the CLI expands those
+  transitively), a block-level HTML comment, a credential-shaped line or a
+  `pinned:` front-matter key without an explicit confirmation — `pinned` files
+  are loaded into *every* session, not just the ones that ask.
+
+**Changed**
+
+- **Run state moved: `<project>/.claude/local-orchestrators/` is now
+  `<project>/.touch/local-orchestrators/`.** One directory for everything Touch
+  keeps in a project. The folder name is unchanged, so nothing inside a run
+  folder is rewritten, and the state-dir ladder every writer shares
+  (`$ORCH_TASKS_ROOT`, then `$CLAUDE_PROJECT_DIR`, then a walk up to the
+  project marker) now joins the new path. The old fourth rung — a path relative
+  to the module's own directory — is gone; it could only ever have written into
+  the plugin cache. Existing projects: move the directory yourself, or start
+  fresh; the scope-guard hook reads both locations during the transition, so its
+  `ACTIVE` and `HALT` sentinels keep working either way.
+- **`.gitignore` guidance for the one tracked subtree.** Everything under
+  `.touch/` stays ignored except `.touch/memory/*.md`, which is meant to be
+  committed — so stage it by name (`git add .touch/memory`) and never `git add
+  .touch/`, which would sweep up tokens, transcripts and the history/trash
+  copies.
+- **The scope-guard hook additionally refuses subagent writes to
+  `.touch/memory/`.** Co-locating memory with run state would otherwise have
+  handed a loop agent a larger capability than the guard exists to withhold.
+- **`touch-selfcheck` reports nine checks**, up from eight: the new one asks
+  whether auto memory actually resolves to the directory the memory page serves,
+  and names the mismatch when it does not.
+- The pre-install description no longer says "read-only" without qualification;
+  it names the memory write plane and the fact that it ships disabled.
+
 ## 0.2.0
 
 Still read-only — no start / stop / restart / terminate verb ships — but the

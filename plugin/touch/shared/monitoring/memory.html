@@ -1,0 +1,1629 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The dashboard URL carries the per-boot token in its query string, and this
+     page renders agent-authored text. `rel="noopener"` blocks window.opener and
+     NOT the Referer header, so the policy is pinned here rather than left to a
+     browser default that happens to strip the query today (SECURITY-5). -->
+<meta name="referrer" content="no-referrer">
+<title>project memory — orchestrator monitor</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --panel2: #1d2130; --text: #e6e8ee;
+    --muted: #8b90a0; --line: #2a2f40;
+    --queued: #8b90a0; --running: #e8b23c; --done: #4cc38a; --failed: #e5534b; --info: #6ea8fe;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --panel:#ffffff; --panel2:#f0f1f5; --text:#1c1e26; --muted:#6a6f80; --line:#e2e4ea; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:16px 24px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  /* Same shape as monitor.html's #statsLink: an ordinary tokened anchor. */
+  #backLink { color:var(--info); font-size:12px; font-weight:500; text-decoration:none; white-space:nowrap; margin-left:auto; cursor:pointer; }
+  #backLink:hover, #backLink:focus-visible { text-decoration:underline; text-underline-offset:3px; }
+  /* The auth banner renders outside every panel: a 401 makes the whole page
+     equally empty, so the reason may not hide inside one of them. */
+  #authBanner[hidden] { display:none; }
+  #authBanner { margin:10px 14px; padding:10px 12px; font-size:12px; line-height:1.5;
+    border:1px solid var(--failed); border-radius:6px; color:var(--text);
+    background:rgba(180,65,60,.10); }
+  #authBanner code { font-family:ui-monospace,Menlo,Consolas,monospace; }
+  main { padding:20px 24px; display:grid; gap:16px; max-width:1100px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .panel[hidden] { display:none; }
+  .chdr { display:flex; align-items:baseline; gap:10px; padding:10px 14px; color:var(--muted); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; border-bottom:1px solid var(--line); }
+  .chdr .n { font-weight:500; text-transform:none; letter-spacing:0; }
+  .chdr .fname { color:var(--text); font-size:13px; font-weight:600; text-transform:none; letter-spacing:0; font-family:ui-monospace, monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chdr .st { margin-left:auto; text-transform:none; letter-spacing:0; font-size:12px; font-weight:500; }
+  .chdr .st.dirty { color:var(--running); }
+  .chdr .st.saving { color:var(--info); }
+  .chdr .st.saved { color:var(--done); }
+  .chdr .st.conflict, .chdr .st.error { color:var(--failed); }
+  .pad { padding:12px 14px; }
+  .rootline { padding:12px 14px 2px; font-family:ui-monospace, monospace; font-size:13px; overflow-wrap:anywhere; }
+  .proj { padding:0 14px 8px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+  .banner { margin:0 14px 10px; padding:8px 10px; border-radius:6px; font-size:12px; line-height:1.5; border:1px solid var(--line); background:var(--panel2); }
+  .banner.ok { border-color:var(--done); }
+  .banner.bad { border-color:var(--failed); background:rgba(180,65,60,.10); }
+  .banner[hidden] { display:none; }
+  .posture { margin:0; padding:0 14px 8px; font-size:12px; line-height:1.6; color:var(--text); }
+  .tiers { margin:0; padding:0 14px 10px 30px; color:var(--muted); font-size:12px; }
+  .wstate { padding:0 14px 10px; font-size:12px; line-height:1.5; color:var(--muted); }
+  .wstate.off { color:var(--running); }
+  .caps { padding:0 14px 12px; color:var(--muted); font-size:11px; line-height:1.5; }
+  .note { padding:8px 14px; color:var(--muted); font-size:11px; line-height:1.5; border-bottom:1px solid var(--line); }
+  .empty { color:var(--muted); padding:14px; font-size:12px; }
+  .empty[hidden] { display:none; }
+  .trim { padding:8px 14px; color:var(--muted); font-size:11px; border-top:1px solid var(--line); }
+  .trim[hidden] { display:none; }
+  .reason { color:var(--muted); font-size:11px; }
+  .reason.bad { color:var(--failed); }
+  .reason[hidden] { display:none; }
+  /* One file row — monitor.html's .arow, same class names, same shape. */
+  .arow { display:flex; align-items:baseline; gap:8px; width:100%; padding:7px 14px; background:none; border:none; border-top:1px solid var(--line); color:var(--text); text-align:left; text-decoration:none; cursor:pointer; font-family:inherit; font-size:12px; min-width:0; }
+  .arow:hover, .arow:focus-visible { background:var(--panel2); }
+  .arow:first-child { border-top:none; }
+  .arow .aicon { flex:none; }
+  .arow.idx .aicon, .arow.idx .aname { color:var(--info); }
+  .arow.open { background:var(--panel2); }
+  .arow .apath { display:flex; flex:1 1 auto; min-width:0; font-family:ui-monospace, monospace; }
+  .arow .aname { font-weight:600; flex:0 1 auto; min-width:8ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .arow .atag { flex:none; color:var(--muted); font-size:11px; }
+  .arow .atag.ro { color:var(--running); }
+  .arow .ameta { flex:none; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+  .rowline { display:flex; align-items:baseline; gap:8px; border-top:1px solid var(--line); }
+  .rowline .arow { border-top:none; }
+  /* Whatever ends the line carries the trailing padding — a row may end in one
+     restore button, two of them, or a disabled button plus its reason. */
+  .rowline > :last-child { margin-right:14px; }
+  /* A reason that shares a row with the file name yields, and keeps its full text
+     in `title`: the row's name and size are what the eye scans for. */
+  .arow .reason { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  button.mini { font-family:inherit; font-size:11px; font-weight:600; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:99px; padding:3px 11px; cursor:pointer; flex:none; }
+  button.mini:hover:enabled, button.mini:focus-visible:enabled { border-color:var(--info); color:var(--info); }
+  button.mini:disabled { opacity:.55; cursor:not-allowed; }
+  button.mini.danger:hover:enabled { border-color:var(--failed); color:var(--failed); }
+  .edbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 14px; border-top:1px solid var(--line); }
+  .edbar label { color:var(--muted); font-size:11px; display:inline-flex; align-items:center; gap:5px; }
+  .edbar label[hidden] { display:none; }
+  .tier { padding:2px 14px; color:var(--muted); font-size:11px; line-height:1.5; }
+  .tier[hidden] { display:none; }
+  .tier.over { color:var(--failed); }
+  textarea { display:block; width:100%; min-height:340px; margin:0; padding:12px 14px; border:none; border-top:1px solid var(--line); background:var(--panel2); color:var(--text); font:12px/1.6 ui-monospace, Menlo, Consolas, monospace; resize:vertical; }
+  textarea:disabled { opacity:.7; }
+  textarea.nowrap { white-space:pre; overflow-x:auto; }
+  .conflict { padding:10px 14px; border-top:1px solid var(--line); background:rgba(180,65,60,.10); font-size:12px; line-height:1.6; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .conflict[hidden] { display:none; }
+  .conflict > div { flex:1 1 100%; }
+  .conflict input { flex:0 0 auto; font:12px/1.4 ui-monospace, monospace; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 8px; }
+  .createrow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 14px; border-top:1px solid var(--line); }
+  .createrow[hidden] { display:none; }
+  .createrow input { font:12px/1.4 ui-monospace, monospace; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 9px; min-width:220px; }
+  .other, .preview { border-top:1px solid var(--line); }
+  .other[hidden], .preview[hidden] { display:none; }
+  .olabel { padding:8px 14px; color:var(--muted); font-size:11px; font-weight:600; letter-spacing:.04em; }
+  #edOtherText { margin:0; padding:0 14px 12px; font:12px/1.6 ui-monospace, monospace; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); max-height:320px; overflow:auto; }
+  #edPreviewBody { padding:0 18px 14px; font-size:13px; }
+  #edPreviewBody h1, #edPreviewBody h2, #edPreviewBody h3, #edPreviewBody h4 { margin:14px 0 6px; line-height:1.3; }
+  #edPreviewBody h1 { font-size:17px; } #edPreviewBody h2 { font-size:15px; } #edPreviewBody h3, #edPreviewBody h4 { font-size:13px; }
+  #edPreviewBody p, #edPreviewBody ul, #edPreviewBody ol, #edPreviewBody blockquote { margin:6px 0; }
+  #edPreviewBody pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:10px 12px; overflow-x:auto; font-size:12px; }
+  #edPreviewBody code { font-family:ui-monospace, monospace; background:var(--panel2); padding:1px 4px; border-radius:4px; font-size:12px; }
+  #edPreviewBody pre code { background:none; padding:0; }
+  #edPreviewBody blockquote { border-left:3px solid var(--line); padding:2px 12px; color:var(--muted); }
+  #edPreviewBody a { color:var(--info); }
+</style>
+</head>
+<body>
+<header>
+  <h1>project memory</h1>
+  <!-- No href in the markup: only the TOKENED URL is worth navigating to, and
+       memBoot writes it. A bare "/" here would be a live link to the dashboard's
+       own auth banner whenever the script did not run. -->
+  <a id="backLink">← orchestrator monitor</a>
+</header>
+<!-- role="alert" like monitor.html's twin: a tokenless visitor sees an equally
+     empty page either way, so the one sentence that explains it must be spoken. -->
+<div id="authBanner" hidden role="alert"></div>
+<main>
+  <section class="panel" id="rootCard">
+    <div class="chdr">memory root</div>
+    <div class="rootline" id="memRoot">resolving…</div>
+    <div class="proj" id="memProject"></div>
+    <div class="banner" id="memAligned" hidden></div>
+    <p class="posture" id="memPosture">These files are loaded into every future Claude Code session in this project. Editing them changes how agents behave; there is no undo beyond git and the trash.</p>
+    <ul class="tiers" id="memTiers"></ul>
+    <div class="wstate" id="memWrite"></div>
+    <div class="caps" id="memCaps"></div>
+  </section>
+
+  <section class="panel" id="listCard">
+    <div class="chdr">files<span class="n" id="memCount"></span></div>
+    <div id="memRows"></div>
+    <div class="empty" id="memEmpty" hidden></div>
+    <div class="trim" id="memTrim" hidden></div>
+    <div class="createrow" id="createRow" hidden>
+      <input id="newName" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="new-note.md">
+      <button class="mini" id="newBtn" type="button">create</button>
+      <span class="reason" id="newErr" hidden></span>
+    </div>
+  </section>
+
+  <section class="panel" id="trashCard" hidden>
+    <div class="chdr">trash<span class="n" id="trashCount"></span></div>
+    <div class="note" id="trashNote"></div>
+    <div id="trashRows"></div>
+  </section>
+
+  <section class="panel" id="edCard" hidden>
+    <div class="chdr"><span class="fname" id="edName"></span><span class="st" id="edState"></span></div>
+    <div class="tier" id="edTier"></div>
+    <div class="tier" id="edEffect"></div>
+    <div class="tier" id="edFront"></div>
+    <div class="tier" id="edBudget" hidden></div>
+    <div class="reason" id="edReason" hidden></div>
+    <textarea id="edText" spellcheck="false"></textarea>
+    <div class="edbar">
+      <button class="mini" id="edSave" type="button" disabled>save</button>
+      <button class="mini danger" id="edDelete" type="button" disabled>delete…</button>
+      <button class="mini" id="edPreviewBtn" type="button">preview saved file</button>
+      <button class="mini" id="edClose" type="button">close</button>
+      <label id="edWrapWrap"><input id="edWrap" type="checkbox"> wrap long lines</label>
+      <label id="edPinWrap" hidden><input id="edPin" type="checkbox"> allow <code>pinned</code>: this file would be loaded into EVERY session, unasked</label>
+    </div>
+    <div class="conflict" id="edConflict" hidden>
+      <div id="cfText"></div>
+      <button class="mini" id="cfReload" type="button">reload (discard mine)</button>
+      <button class="mini" id="cfBoth" type="button">show both</button>
+      <button class="mini danger" id="cfOverwrite" type="button">overwrite with mine</button>
+    </div>
+    <div class="conflict" id="edDelConfirm" hidden>
+      <div id="delText"></div>
+      <input id="delName" type="text" autocomplete="off" spellcheck="false" placeholder="type the file name">
+      <button class="mini danger" id="delGo" type="button">delete</button>
+      <button class="mini" id="delCancel" type="button">cancel</button>
+    </div>
+    <div class="other" id="edOther" hidden>
+      <div class="olabel" id="edOtherLabel"></div>
+      <pre id="edOtherText"></pre>
+    </div>
+    <div class="preview" id="edPreview" hidden>
+      <div class="olabel" id="edPreviewLabel"></div>
+      <article id="edPreviewBody"></article>
+    </div>
+  </section>
+</main>
+<script>
+// ---- memory manager ----
+// The one writable surface Touch ships. It is a SEPARATE document from
+// monitor.html on purpose (G4): no websocket, no fold, no task — a page whose
+// whole surface is the editor, small enough to drive under node + `vm`, and
+// whose every insertion point is outside monitor.html's marker-scoped test
+// slices.
+//
+// Three rules shape everything below, and each one is a defect that already
+// happened somewhere:
+//   1. The operator's buffer is the only copy of their edit. Nothing — not a
+//      poll, not a 409, not an out-of-order load — writes over `#edText`
+//      unless the operator asked for it (UI-3, UI-9).
+//   2. A confirmation is an OBSERVATION. "saved" renders from the server's
+//      returned mtime, never from the click (D13 rule 1, UI-18).
+//   3. NO markup sink, anywhere in this file — the HTML-string setters and
+//      insertion methods are banned file-wide, comments included, so the test
+//      that pins this is a plain absence check (monitor.html's RENDER-2 uses the
+//      same discipline for its forced-reflow idiom). Rows are createElement +
+//      textContent, the editor is `.value`, and the markdown preview is a NODE
+//      builder rather than monitor.html's escape-first STRING renderer: a string
+//      renderer needs a markup sink to install its output, and getting the
+//      escape right is then load-bearing forever. Building nodes has no escaping
+//      step to get wrong — the same guarantee, one step stronger, over text an
+//      agent wrote and the operator pasted (UI-11, G8, PROTOCOL-22).
+
+// ---- per-boot token (GD-T8) ----
+// Identical carrier to monitor.html's: monitor_server.py prints
+// http://127.0.0.1:<port>/?token=… at startup and the /memory page is reached
+// through that same query carrier, so a link from the dashboard just works.
+// READS may use it (a query token is all a top-level navigation can carry).
+// WRITES may NOT: the token goes in `x-orch-token` only, so a cross-origin
+// <form> POST or a no-cors fetch is structurally unable to carry credentials
+// (G5, UI-5, W4).
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const tokenParam = (sep) => TOKEN ? sep + "token=" + encodeURIComponent(TOKEN) : "";
+/** Same-origin URL with the token appended, whatever the path already carries. */
+const withToken = (url) => url + tokenParam(url.includes("?") ? "&" : "?");
+
+const TOKEN_HINT = "this page needs the per-boot token — open the URL "
+  + "monitor_server.py printed at startup, or copy the token out of "
+  + "<task-dir>/monitor.json and append ?token=… to this URL";
+function showAuthBanner(reason) {
+  const el = document.getElementById("authBanner");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = (reason ? reason + " — " : "") + TOKEN_HINT;
+}
+
+// Every growing collection is capped and every cap is disclosed on screen —
+// monitor.html's LOG_CAP house rule, applied to a directory listing (UI-14).
+const MEM_LIST_CAP = 200;
+// The trash group is the OTHER growing collection on this page: one entry per
+// delete this browser session made, each holding the deleted bytes. It is capped
+// by the same house rule and the cap is stated on the trash card, because
+// dropping an entry drops this page's copy of those bytes — the server's own
+// trash directory still holds the file either way, which is what makes the drop
+// survivable and is said in the same sentence (n1, UI-14).
+const MEM_TRASH_CAP = 50;
+// The list is an expensive route that describes history, so it polls on its own
+// slow cadence — NOT the dashboard's 5 s live cadence (UI-9, app.js's TASKS_MS
+// reasoning). It replaces the list; it never touches the editor.
+const MEM_POLL_MS = 12000;
+// The server's own flat-name rule, mirrored so a bad name never becomes a
+// request (G7 step 1). The server re-checks it — this copy is courtesy, not
+// security.
+const MEM_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.md$/;
+// What the CLI strips before it measures an index: leading YAML frontmatter and
+// block-level HTML comments. These two are a CHARACTER-FAITHFUL port of
+// `tests/test_memory_hygiene.py`'s `FRONTMATTER` / `BLOCK_COMMENT`, and the
+// driven test compares this function's output tuple-for-tuple with that file's
+// own cases — parity is checked, not asserted in prose (DOCS-14).
+//
+// Two details are load-bearing and were both wrong once:
+//   * the comment body is `(?:(?!-->)[\s\S])*`, never a lazy `[\s\S]*?`, and the
+//     match MUST end at a line end (`\r?\n` or end of input). A body that may
+//     cross `-->`, or a trailing newline made optional, swallows a line that
+//     merely STARTS with a comment and continues into prose — that UNDER-counts,
+//     the dangerous direction: the page would show a file as fitting while the
+//     CLI counts the prose and drops the tail at load, silently.
+//   * frontmatter accepts `---` with trailing spaces and BOTH terminators
+//     (`---` and YAML's `...`), or a file the repo gate measures as one line is
+//     reported here as four and the page shouts about a budget it fits.
+// `^`/`$` without `m` are Python's `\A`/`\Z`; the block form needs `m` for its
+// per-line `^`, so its end-of-input alternative is spelled `$(?![\s\S])` to stay
+// `\Z` rather than becoming "before any newline".
+const MEM_FRONTMATTER_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/;
+const MEM_BLOCK_COMMENT_RE = /^[ \t]*<!--(?:(?!-->)[\s\S])*-->[ \t]*(?:\r?\n|$(?![\s\S]))/gm;
+// Fallbacks only: the real numbers arrive in the list's `limits` block. The two
+// index numbers are the CLI's OWN documented constants, so printing them without
+// the server is honest; the two directory caps are the server's policy and have
+// no honest default — `null` makes the caps line say the server did not report
+// them instead of publishing a false guarantee of "0 files, 0 B".
+const MEM_LIMIT_FALLBACK = { maxBytes: null, maxFiles: null, indexLines: 200, indexBytes: 25600 };
+
+const FMT_CLOCK = new Intl.DateTimeFormat([], {
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+
+const mem = {
+  // from the tokened list route — NEVER from /health, which digests every path
+  // it publishes precisely because it answers without a token (UI-4, UI-16).
+  root: "", effective: "", aligned: null, writable: false, memoryWrite: false,
+  limits: MEM_LIMIT_FALLBACK, files: [], listReason: null, listOk: false,
+  // The list has its OWN captured id, for the same reason the editor has one: a
+  // poll, a post-save refresh and a delete's refresh overlap, and a slow answer
+  // landing last would replace the rows with a stale directory — which
+  // noteDiskDrift then reads as "this file is gone from the memory root".
+  listSeq: 0,
+  // the editor, which is separate state from the list (UI-9)
+  name: null, seq: 0, base: null, conflict: null, state: "idle", reason: "",
+  dirty: false, pinAsked: false,
+  // Two standing lines that are NOT the state machine's `reason`, so a poll can
+  // raise them without erasing a `saved` badge the operator is still reading:
+  // `drift` = the open file moved on disk; `note` = the last write landed but the
+  // buffer has moved on since. Both are cleared whenever the base is re-synced.
+  drift: "", note: "", noteBad: false,
+  // name -> {text, bad}: the FATE of a write whose answer came back after the
+  // operator had already opened another file (or closed the editor). The state
+  // machine belongs to the file that is open, so such an answer has nowhere to
+  // render and used to be dropped — the operator was never told whether the save
+  // they launched landed, was refused, or failed. It is parked here instead,
+  // printed on that file's own row, and restated when the file is reopened (m3).
+  // Keyed by NAME and consumed on reopen, so unlike `trash` it is not a log and
+  // cannot grow with time: at most one entry per file in the root, which the
+  // server's own maxFiles cap bounds. That is why it carries no cap of its own.
+  outcomes: {},
+  // Set once the operator has answered the dirty gate FOR a navigation, so
+  // `beforeunload` does not ask the same question a second time (m4).
+  leaving: false,
+  // files this browser session deleted; the server returned the trash path
+  trash: [],
+};
+
+const byId = (id) => document.getElementById(id);
+const rootEl = byId("memRoot"), projEl = byId("memProject"), alignEl = byId("memAligned"),
+      tiersEl = byId("memTiers"), writeEl = byId("memWrite"), capsEl = byId("memCaps"),
+      rowsEl = byId("memRows"), countEl = byId("memCount"), emptyEl = byId("memEmpty"),
+      trimEl = byId("memTrim"), createRow = byId("createRow"), newName = byId("newName"),
+      newErr = byId("newErr"), trashCard = byId("trashCard"), trashRows = byId("trashRows"),
+      trashCount = byId("trashCount"), trashNote = byId("trashNote"), edCard = byId("edCard"),
+      edName = byId("edName"), edState = byId("edState"), edTier = byId("edTier"),
+      edEffect = byId("edEffect"), edFront = byId("edFront"), edBudget = byId("edBudget"),
+      edReason = byId("edReason"), edText = byId("edText"), edSave = byId("edSave"),
+      edDelete = byId("edDelete"), edPin = byId("edPin"), edPinWrap = byId("edPinWrap"),
+      edConflict = byId("edConflict"), cfText = byId("cfText"),
+      cfOverwrite = byId("cfOverwrite"), edOther = byId("edOther"),
+      edOtherText = byId("edOtherText"), edOtherLabel = byId("edOtherLabel"),
+      edPreview = byId("edPreview"), edPreviewBody = byId("edPreviewBody"),
+      edPreviewLabel = byId("edPreviewLabel"), edDelConfirm = byId("edDelConfirm"),
+      delText = byId("delText"), delName = byId("delName"), edWrap = byId("edWrap");
+
+// ---- formatting (monitor.html's, verbatim in shape) ----
+function fmtSize(b) {
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
+  return b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B";
+}
+function fmtAgo(mt) {
+  const s = Math.max(0, Date.now() / 1000 - mt);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+/** mtime_ns (the server's unit) -> seconds, or 0 when it is not a number. */
+function nsSec(ns) {
+  const n = Number(ns);
+  return Number.isFinite(n) && n > 0 ? n / 1e9 : 0;
+}
+function fmtStampNs(ns) {
+  const s = nsSec(ns);
+  return s > 0 ? FMT_CLOCK.format(new Date(s * 1000)) : "an unknown time";
+}
+/** `fmtAgo` over the server's unit, with fmtStampNs's honest fallback: a missing
+ *  or zero mtime_ns is "unknown", never the 20,000-day age of the epoch. */
+function fmtAgoNs(ns) {
+  const s = nsSec(ns);
+  return s > 0 ? fmtAgo(s) : "modified at an unknown time";
+}
+/** UTF-8 length, computed here so the byte budget matches the server's count. */
+function byteLen(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.codePointAt(i);
+    if (c > 0xffff) { i += 1; n += 4; } else if (c > 0x7ff) { n += 3; }
+    else if (c > 0x7f) { n += 2; } else { n += 1; }
+  }
+  return n;
+}
+/** Exactly one trailing newline — the server's rule (UI-3), applied to the
+ *  bytes we SEND and to the copy we keep, so the sha we adopt describes the
+ *  bytes we hold. A <textarea> yields none; an unnormalized round trip would
+ *  strip the final newline off every tracked file it touched. */
+function oneTrailingNewline(s) { return String(s).replace(/\n+$/, "") + "\n"; }
+
+// ---- the fetch layer: every answer is checked for JSON before it is parsed ----
+// An older monitor_server.py answers GET /memory with monitor.html, 200,
+// 151 KB — verified. An EMPTY catch over that renders a blank file list that
+// is indistinguishable from "this project has no memory", which is the exact
+// failure class the auth banner exists to kill (UI-4).
+//
+// Every route this page calls answers JSON, `/api/memory/file` GET included:
+// G5's endpoint table is the canonical shape for it ({name, content, sha256,
+// mtime_ns, size, hasFrontmatter}), and a sha the client must echo back as
+// `ifMatch` cannot travel in a bare text/plain body at all. G8's
+// "text/plain; charset=utf-8" describes serving a memory file as a DOCUMENT,
+// not this API — a server that answered the JSON route as text/plain would be
+// named out loud by the check below rather than silently mis-parsed.
+function memFail(status, message) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+function memReason(body, dflt) {
+  if (body && typeof body === "object") {
+    for (const k of ["reason", "error", "message", "detail"]) {
+      if (typeof body[k] === "string" && body[k]) return body[k];
+    }
+  }
+  return dflt;
+}
+async function memReq(url, init, allow) {
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (e) {
+    throw memFail(0, "the monitor server is unreachable — is touch-monitor still running?");
+  }
+  const ct = res.headers && res.headers.get
+    ? String(res.headers.get("content-type") || "") : "";
+  if (ct.indexOf("application/json") === -1) {
+    throw memFail(res.status, "this monitor build has no memory API (it started "
+      + "before the API shipped) — restart touch-monitor");
+  }
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (e) {
+    throw memFail(res.status, "the server's answer was not readable JSON");
+  }
+  if (res.status === 401) {
+    showAuthBanner("memory: " + memReason(body, "not authorized"));
+    throw memFail(401, memReason(body, "not authorized"));
+  }
+  if (!res.ok && (allow || []).indexOf(res.status) === -1) {
+    throw memFail(res.status, memReason(body, "HTTP " + res.status));
+  }
+  return { status: res.status, body: body || {} };
+}
+/** Write init: header-carried token, the write marker, JSON content type. The
+ *  URL of a write NEVER carries ?token= (G5) — `withToken` is read-only here. */
+function memWriteInit(method, payload) {
+  const headers = { "content-type": "application/json", "x-touch-write": "1" };
+  if (TOKEN) headers["x-orch-token"] = TOKEN;
+  const init = { method: method, headers: headers };
+  if (payload !== null && payload !== undefined) init.body = JSON.stringify(payload);
+  return init;
+}
+const fileUrl = (name) => "/api/memory/file?name=" + encodeURIComponent(name);
+
+// ---- the dirty gate: one predicate, consulted by every exit ----
+// This page has exactly ONE route, so there is no history event to cancel and no
+// task dropdown to guard: the two ways out are the header link and the tab
+// itself, and both are gated below (UI-8).
+function isDirty() { return mem.dirty === true; }
+function guardDirty(what) {
+  if (!isDirty()) return true;
+  const q = "unsaved changes in " + String(mem.name) + " — discard them and " + what + "?";
+  return typeof confirm === "function" ? confirm(q) === true : false;
+}
+
+// ---- the per-file state machine ----
+// idle -> loading -> clean -> dirty -> saving -> saved(sha) | conflict | error
+const MEM_STATES = {
+  idle: "", loading: "loading…", clean: "clean", dirty: "unsaved changes",
+  saving: "saving…", saved: "saved", conflict: "conflict — changed on disk",
+  error: "error",
+};
+/** The standing note beside the badge, with the one bit that says whether it is
+ *  good news ("the bytes that were in flight are on disk") or bad ("the save you
+ *  launched was REFUSED") — a refusal rendered in the calm colour is a refusal
+ *  the operator scrolls past. */
+function setNote(text, bad) {
+  mem.note = text ? String(text) : "";
+  mem.noteBad = !!mem.note && bad === true;
+}
+function setState(state, detail) {
+  mem.state = Object.prototype.hasOwnProperty.call(MEM_STATES, state) ? state : "error";
+  mem.reason = detail ? String(detail) : "";
+  // Never optimistic: `saved` is only ever reached from a server response and
+  // spells the server's own mtime beside it (UI-18).
+  let text = MEM_STATES[mem.state];
+  if (mem.state === "saved" && mem.reason) text = "saved · " + mem.reason;
+  if (mem.state === "error" && mem.reason) text = "error — " + mem.reason;
+  edState.className = "st " + mem.state;
+  edState.textContent = text;
+  renderReason();
+}
+
+/** ONE place decides what the reason line says, because four writers want it and
+ *  the urgent one must win: a live error or conflict, then the file having moved
+ *  on disk, then a landed write the buffer has already moved past, and only then
+ *  the standing read-only explanation (m4 — a poll used to overwrite the more
+ *  urgent sentence with the least urgent one). */
+function renderReason() {
+  const show = (text, bad) => {
+    edReason.hidden = false;
+    edReason.className = bad ? "reason bad" : "reason";
+    edReason.textContent = text;
+  };
+  if ((mem.state === "error" || mem.state === "conflict") && mem.reason) {
+    show(mem.reason, true);
+    return;
+  }
+  if (mem.drift) { show(mem.drift, true); return; }
+  if (mem.note) { show(mem.note, mem.noteBad === true); return; }
+  if (mem.name) {
+    const why = entryReason(fileEntry(mem.name));
+    if (!entryWritable(fileEntry(mem.name)) && why) { show("read-only: " + why, false); return; }
+  }
+  edReason.hidden = true;
+  edReason.textContent = "";
+}
+
+// ---- the list ----
+function fileEntry(name) {
+  return mem.files.filter((f) => f && f.name === name)[0] || null;
+}
+/** Writable means: the server said so, IN THE ANSWER WE STILL HAVE. `listOk` is
+ *  part of the predicate because every other field here is a memory of the last
+ *  successful list — after a 401 (the per-boot token changed under a restarted
+ *  monitor) or an unreachable server, keeping save/delete live over a directory
+ *  the page can no longer read is the dishonest affordance G6/UI-6/D13 forbid,
+ *  and the row's own reason is then the read failure (m2). */
+function rootWritable() {
+  return mem.listOk === true && mem.memoryWrite === true && mem.writable === true;
+}
+function entryWritable(entry) {
+  return rootWritable() && !!entry && entry.writable === true;
+}
+function entryReason(entry) {
+  if (mem.listOk !== true) {
+    return "the file list could not be read"
+      + (mem.listReason ? " — " + mem.listReason : "")
+      + " — so nothing here can be saved or deleted until it can";
+  }
+  if (mem.memoryWrite !== true) {
+    return "the write plane is off — this dashboard was started without "
+      + "--allow-memory-write, so nothing here can be saved or deleted";
+  }
+  if (mem.writable !== true) return "the memory root is not writable";
+  if (entry && typeof entry.reason === "string" && entry.reason) return entry.reason;
+  if (entry && entry.writable !== true) return "the server reports this file read-only";
+  return "";
+}
+
+async function memRefreshList() {
+  // The list's captured id: the 12 s poll, a save's trailing refresh, a delete
+  // and a restore all call this, so a slow answer landing LAST must not replace
+  // the rows it was overtaken by (m3 — the same discipline memOpen uses).
+  const seq = mem.listSeq + 1;
+  mem.listSeq = seq;
+  let r;
+  try {
+    r = await memReq(withToken("/api/memory/list"), undefined, []);
+  } catch (e) {
+    if (seq !== mem.listSeq) return false;
+    mem.listOk = false;
+    mem.listReason = e.message;
+    renderHead();
+    renderRows();
+    // ...and the EDITOR too: `mem.files`/`writable`/`memoryWrite` are now a
+    // memory of a directory this page can no longer read, so save and delete must
+    // go dead with that as their reason rather than staying live for the next
+    // 12 s over a server that just answered 401 (m2).
+    renderEditorChrome();
+    return false;
+  }
+  if (seq !== mem.listSeq) return false;   // a newer list owns the rows
+  const b = r.body;
+  mem.listOk = true;
+  mem.listReason = null;
+  mem.root = typeof b.root === "string" ? b.root : "";
+  mem.effective = typeof b.effective === "string" ? b.effective : "";
+  mem.aligned = typeof b.aligned === "boolean" ? b.aligned : null;
+  mem.writable = b.writable === true;
+  mem.memoryWrite = b.memoryWrite === true;
+  mem.limits = (b.limits && typeof b.limits === "object") ? b.limits : MEM_LIMIT_FALLBACK;
+  mem.files = Array.isArray(b.files) ? b.files.filter((f) => f && typeof f.name === "string") : [];
+  renderHead();
+  renderRows();
+  // The poll may replace the LIST and may raise "changed on disk". It may never
+  // write the textarea — that is the whole of UI-9's first race.
+  noteDiskDrift();
+  renderEditorChrome();
+  return true;
+}
+
+/** The open file moved on disk since we loaded it: say so BEFORE the operator
+ *  presses save, which is when a conflict is cheapest to resolve (UI-3). */
+function noteDiskDrift() {
+  if (!mem.name || !mem.base) return;
+  // Rows the page could not read say nothing about what is on disk: after a
+  // failed list, "this file is gone from the memory root" would be a false
+  // observation drawn from an answer that never arrived (m2).
+  if (mem.listOk !== true) return;
+  const entry = fileEntry(mem.name);
+  if (!entry) {
+    // `saving` is excluded for the same reason the drift branch below excludes
+    // it: a write is out, the badge and the buffer lock belong to that request,
+    // and a poll that stole them would unlock the textarea mid-flight — the
+    // clobber the lock exists to prevent, opened by an event the page itself
+    // schedules (m1). The response decides what comes next.
+    if (mem.state !== "conflict" && mem.state !== "saving") {
+      setState("error", "this file is gone from the memory root — another writer "
+        + "deleted it; your buffer is still here, save it to re-create the file");
+    }
+    return;
+  }
+  const moved = Number(entry.mtime_ns) !== Number(mem.base.mtime_ns);
+  if (!moved || mem.state === "conflict" || mem.state === "saving") return;
+  // `saved · <mtime>` and a live error are the operator's own last answer from
+  // the server: the drift line renders BESIDE them, and only clean/dirty — which
+  // carry no information the drift line does not — are re-stated (m4).
+  if (mem.state !== "saved" && mem.state !== "error") {
+    setState(mem.dirty ? "dirty" : "clean", "");
+  }
+  mem.drift = "changed on disk at " + fmtStampNs(entry.mtime_ns)
+    + " — Claude or an editor wrote it after you loaded it; saving now will "
+    + "be refused until you reload or overwrite deliberately";
+  renderReason();
+}
+
+function renderHead() {
+  rootEl.textContent = mem.root || (mem.listReason
+    ? "no memory root resolved" : "resolving…");
+  rootEl.title = mem.root;
+  // No project field exists on the wire and none is invented: the label is
+  // derived from the absolute root the server DID publish (UI-16) — and ONLY
+  // when the root really is <project>/.touch/memory. A custom
+  // autoMemoryDirectory (the case the NOT-aligned banner exists for) would
+  // otherwise be labelled "project: memory", which is a guess, not a fact.
+  const projMatch = mem.root.match(/^(.*)\/\.touch\/memory\/?$/);
+  const proj = projMatch ? projMatch[1] : "";
+  const leaf = proj.split("/").filter(Boolean).pop() || "";
+  projEl.textContent = !mem.root ? ""
+    : (proj ? "project: " + (leaf || proj) + "  (" + proj + ")"
+      : "this root is not a <project>/.touch/memory path, so no project is "
+        + "derivable from it — it is wherever autoMemoryDirectory points.");
+  if (mem.listReason) {
+    // UI-16: when the root does not resolve, that line IS the error state and
+    // no create affordance renders.
+    alignEl.hidden = false;
+    alignEl.className = "banner bad";
+    alignEl.textContent = mem.listReason;
+  } else if (mem.aligned === true) {
+    alignEl.hidden = false;
+    alignEl.className = "banner ok";
+    alignEl.textContent = "aligned — this is the directory Claude Code itself "
+      + "reads for auto memory in this project, so an edit here reaches a session.";
+  } else if (mem.aligned === false) {
+    alignEl.hidden = false;
+    alignEl.className = "banner bad";
+    alignEl.textContent = "NOT aligned — Claude Code reads "
+      + (mem.effective || "a different directory")
+      + " for auto memory, so nothing edited here reaches a session yet. Point "
+      + "autoMemoryDirectory at this root (touch-selfcheck writes it) and start "
+      + "a new session.";
+  } else {
+    alignEl.hidden = false;
+    alignEl.className = "banner";
+    alignEl.textContent = "alignment unknown — the server did not report whether "
+      + "Claude Code reads this directory.";
+  }
+  tiersEl.textContent = "";
+  for (const line of [
+    "MEMORY.md — the auto-memory index: its first " + limitNum("indexLines", 200)
+      + " lines or " + fmtSize(limitNum("indexBytes", 25600))
+      + " (whichever comes first) are loaded at the start of every conversation. "
+      + "An edit to it takes effect in the NEXT session.",
+    "every other .md here — a topic note: Claude reads it on demand when the "
+      + "index points at it, so an edit is picked up the next time it is read.",
+    "frontmatter `pinned: true` — undocumented, and stronger than either: such a "
+      + "file is injected into EVERY session unasked. This editor refuses to "
+      + "write it unless you tick the box that says so in words.",
+  ]) {
+    const li = document.createElement("li");
+    li.textContent = line;
+    tiersEl.appendChild(li);
+  }
+  writeEl.className = "wstate" + (mem.memoryWrite ? "" : " off");
+  writeEl.textContent = mem.memoryWrite
+    ? "write plane: ON — save, create and delete act on the files above. Deletes "
+      + "move the file into the memory root's trash directory; there is no undo "
+      + "beyond that and git."
+    : "write plane: OFF (the default) — reads only. Restart touch-monitor with "
+      + "--allow-memory-write (or TOUCH_ALLOW_MEMORY_WRITE=1) to enable saves; "
+      + "every write affordance below is disabled with its reason until then.";
+  capsEl.textContent = !mem.listOk
+    ? "caps: the server reports them with the file list."
+    : "caps, all enforced by the server: "
+    + capText("maxFiles", (n) => "at most " + n + " files in the root")
+    + ", " + capText("maxBytes", (n) => fmtSize(n) + " per file")
+    + "; this view lists at most " + MEM_LIST_CAP + " rows; the list is re-read "
+    + "every " + Math.round(MEM_POLL_MS / 1000) + " s.";
+}
+function limitNum(key, dflt) {
+  const v = mem.limits && mem.limits[key];
+  return Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : dflt;
+}
+/** A cap the server did not report is SAID to be unreported. Printing the
+ *  fallback would publish a server guarantee nobody made — and with a zeroed
+ *  fallback it would read as "at most 0 files", which is worse than silence. */
+function capText(key, fmt) {
+  const v = mem.limits && Number(mem.limits[key]);
+  return Number.isFinite(v) && v > 0 ? fmt(v)
+    : "this build of the server did not report the " + key + " cap";
+}
+
+function renderRows() {
+  rowsEl.textContent = "";
+  const shown = mem.files.slice(0, MEM_LIST_CAP);
+  countEl.textContent = mem.files.length
+    ? String(mem.files.length) + (mem.files.length === 1 ? " file" : " files") : "";
+  emptyEl.hidden = mem.files.length !== 0 || !mem.listOk;
+  emptyEl.textContent = "no .md files in this memory root yet"
+    + (mem.memoryWrite ? " — create one below." : ".");
+  for (const f of shown) {
+    const writable = entryWritable(f);
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "arow" + (f.isIndex ? " idx" : "") + (f.name === mem.name ? " open" : "");
+    const icon = document.createElement("span");
+    icon.className = "aicon";
+    icon.textContent = f.isIndex ? "◆" : "•";
+    row.appendChild(icon);
+    const path = document.createElement("span");
+    path.className = "apath";
+    const nm = document.createElement("span");
+    nm.className = "aname";
+    nm.textContent = f.name;
+    path.appendChild(nm);
+    row.appendChild(path);
+    if (f.isIndex) row.appendChild(tag("index", ""));
+    if (f.hasFrontmatter) row.appendChild(tag("frontmatter", ""));
+    if (f.overLoadLimit) row.appendChild(tag("over the load budget", "ro"));
+    // D13's honest disabled affordance (G6, UI-6): a row is always openable —
+    // reads are legal whenever the root resolves — but a file the server will
+    // not accept a write for says so ON THE ROW, and its save/delete buttons
+    // render disabled with the same reason.
+    if (!writable) row.appendChild(tag("read-only: " + entryReason(f), "ro"));
+    // The fate of a write the operator launched and then navigated away from:
+    // it renders on the row of the file it is ABOUT, and survives every
+    // re-render until that file is opened again (m3).
+    const parked = Object.prototype.hasOwnProperty.call(mem.outcomes, f.name)
+      ? mem.outcomes[f.name] : null;
+    if (parked) {
+      const out = document.createElement("span");
+      out.className = parked.bad ? "reason bad" : "reason";
+      out.textContent = parked.text;
+      out.title = parked.text;   // the row truncates; the sentence must survive
+      row.appendChild(out);
+    }
+    const meta = document.createElement("span");
+    meta.className = "ameta";
+    meta.textContent = fmtSize(Number(f.size) || 0)
+      + (Number.isFinite(Number(f.lines)) ? " · " + Number(f.lines) + " lines" : "")
+      + " · " + fmtAgoNs(f.mtime_ns);
+    row.appendChild(meta);
+    row.addEventListener("click", () => { memOpen(f.name); });
+    rowsEl.appendChild(row);
+  }
+  const hidden = mem.files.length - shown.length;
+  trimEl.hidden = hidden <= 0;
+  trimEl.textContent = hidden > 0
+    ? hidden + " more file" + (hidden === 1 ? "" : "s") + " — " + mem.root
+      + " holds more than this view lists (cap " + MEM_LIST_CAP + ")"
+    : "";
+  createRow.hidden = !rootWritable();
+  renderTrash();
+}
+function tag(text, extra) {
+  const s = document.createElement("span");
+  s.className = "atag" + (extra ? " " + extra : "");
+  s.textContent = text;
+  return s;
+}
+
+function renderTrash() {
+  trashCard.hidden = mem.trash.length === 0;
+  trashCount.textContent = mem.trash.length ? String(mem.trash.length) : "";
+  trashNote.textContent = "deleted from this browser session. The server moved "
+    + "each file into the memory root's trash directory and returned the path; "
+    + "restore re-CREATES the file from the bytes the server confirmed it removed "
+    + "— it is a create, not an undelete, so a name that came back cannot be "
+    + "restored over. This group keeps the most recent " + MEM_TRASH_CAP
+    + " deletions; past that the oldest entry is dropped and its bytes live only "
+    + "in the server's trash directory (the path is printed on each row).";
+  trashRows.textContent = "";
+  for (const t of mem.trash) {
+    const line = document.createElement("div");
+    line.className = "rowline";
+    const row = document.createElement("span");
+    row.className = "arow";
+    const path = document.createElement("span");
+    path.className = "apath";
+    const nm = document.createElement("span");
+    nm.className = "aname";
+    nm.textContent = t.name;
+    path.appendChild(nm);
+    row.appendChild(path);
+    const meta = document.createElement("span");
+    meta.className = "ameta";
+    meta.textContent = t.trash ? "moved to " + t.trash : "moved to the trash";
+    row.appendChild(meta);
+    // The row NAMES both byte-sets whenever they differ, because only one of them
+    // is what `restore` writes and the operator cannot see either. Saying merely
+    // "kept your unsaved buffer" left them to guess how far apart the two were,
+    // and which one a click would put back (UI-18).
+    if (t.unsaved) {
+      const un = document.createElement("span");
+      un.className = "reason";
+      un.textContent = "restore writes the " + fmtSize(t.deletedBytes)
+        + " that were deleted; the " + fmtSize(t.bufferBytes)
+        + " you had unsaved in the editor are the second button";
+      un.title = un.textContent;
+      row.appendChild(un);
+    }
+    // A failed restore renders on ITS row and survives every re-render — a
+    // transient banner would be erased by the next poll, 12 s later (UI-18).
+    if (t.error) {
+      const bad = document.createElement("span");
+      bad.className = "reason bad";
+      bad.textContent = t.error;
+      row.appendChild(bad);
+    }
+    line.appendChild(row);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mini";
+    btn.textContent = "restore";
+    btn.title = "re-create " + t.name + " from the " + fmtSize(t.deletedBytes)
+      + " the server removed";
+    btn.disabled = !rootWritable();
+    btn.addEventListener("click", () => { memRestore(t.name); });
+    line.appendChild(btn);
+    // The discarded edit gets its own button rather than silently becoming what
+    // "restore" means: two byte-sets, two named choices, no substitution.
+    if (t.buffer) {
+      const alt = document.createElement("button");
+      alt.type = "button";
+      alt.className = "mini";
+      alt.textContent = "restore my unsaved edit instead";
+      alt.title = "re-create " + t.name + " from the " + fmtSize(t.bufferBytes)
+        + " that were in the editor when it was deleted";
+      alt.disabled = !rootWritable();
+      alt.addEventListener("click", () => { memRestore(t.name, "buffer"); });
+      line.appendChild(alt);
+    }
+    if (btn.disabled) {
+      const why = document.createElement("span");
+      why.className = "reason";
+      why.textContent = entryReason(null);
+      line.appendChild(why);
+    }
+    trashRows.appendChild(line);
+  }
+}
+
+// ---- the editor ----
+/** Open a file. Every response is matched against the open request BEFORE it
+ *  touches the textarea: click A, click B, A lands second — B's editor must not
+ *  fill with A's bytes (UI-9's second race). */
+async function memOpen(name) {
+  if (mem.name === name && mem.base && !mem.dirty && mem.state !== "error") {
+    return true;   // already open and clean: a re-click is not a reload
+  }
+  if (!guardDirty("open " + name)) return false;
+  const seq = mem.seq + 1;
+  mem.seq = seq;
+  mem.name = name;
+  mem.base = null;
+  mem.conflict = null;
+  mem.dirty = false;
+  mem.drift = "";
+  setNote("");
+  mem.pinAsked = false;
+  edPin.checked = false;   // the pinned confirmation is per FILE, never sticky
+  edCard.hidden = false;
+  edName.textContent = name;
+  edName.title = name;
+  edText.value = "";
+  hideExtras();
+  setState("loading", "");
+  renderEditorChrome();
+  let r;
+  try {
+    r = await memReq(withToken(fileUrl(name)), undefined, []);
+  } catch (e) {
+    if (seq !== mem.seq) return false;
+    setState("error", e.message);
+    renderEditorChrome();
+    return false;
+  }
+  if (seq !== mem.seq || mem.name !== name) return false;   // a newer open owns the editor
+  const b = r.body;
+  mem.base = {
+    sha256: String(b.sha256 || ""), mtime_ns: b.mtime_ns, size: b.size,
+    content: typeof b.content === "string" ? b.content : "",
+    hasFrontmatter: b.hasFrontmatter === true,
+  };
+  edText.value = mem.base.content;
+  mem.dirty = false;
+  mem.drift = "";
+  // The fate of a write this file's editor was abandoned mid-flight for is told
+  // HERE, on reopening, and then forgotten: it is the answer to a question the
+  // operator asked and never got (m3).
+  const parked = Object.prototype.hasOwnProperty.call(mem.outcomes, name)
+    ? mem.outcomes[name] : null;
+  if (parked) delete mem.outcomes[name];
+  setNote(parked ? parked.text : "", parked ? parked.bad : false);
+  setState("clean", "");
+  renderEditorChrome();
+  renderRows();
+  return true;
+}
+
+/** Park the outcome of a write whose editor moved on before the answer arrived.
+ *  It renders on that file's row (and again when the file is reopened) because
+ *  the state machine describes the OPEN file and this answer is about another
+ *  one — dropping it left the operator with no way to learn whether the bytes
+ *  they launched are on disk (m3). */
+function noteOutcome(name, text, bad) {
+  // Re-opening the SAME file also abandons the write (a fresh load owns the
+  // buffer), and then the answer belongs on screen right now rather than in the
+  // parking lot it would never be read out of.
+  if (mem.name === name) {
+    setNote(text, bad);
+    renderReason();
+    return;
+  }
+  mem.outcomes[name] = { text: String(text), bad: bad === true };
+  renderRows();
+}
+
+function hideExtras() {
+  edConflict.hidden = true;
+  edDelConfirm.hidden = true;
+  edOther.hidden = true;
+  edOtherText.textContent = "";
+  edPreview.hidden = true;
+  edPreviewBody.textContent = "";
+}
+
+/** Everything around the textarea that depends on list state or file state.
+ *  Called from the poll too, which is why it may not touch `.value`. */
+function renderEditorChrome() {
+  if (!mem.name) { edCard.hidden = true; return; }
+  const entry = fileEntry(mem.name);
+  const writable = entryWritable(entry);
+  const isIndex = !!(entry && entry.isIndex);
+  edTier.textContent = isIndex
+    ? "loaded as: the auto-memory INDEX — its first " + limitNum("indexLines", 200)
+      + " lines / " + fmtSize(limitNum("indexBytes", 25600))
+      + " are injected at the start of every conversation in this project."
+    : "loaded as: an auto-memory topic note — read on demand, when the index "
+      + "points Claude at it.";
+  edEffect.textContent = isIndex
+    ? "an edit here takes effect in the NEXT session (the index is read at "
+      + "conversation start, and nothing re-reads it mid-session)."
+    : "an edit here is picked up the next time Claude reads this file.";
+  const front = mem.base ? mem.base.hasFrontmatter : !!(entry && entry.hasFrontmatter);
+  edFront.textContent = front
+    ? "this file has YAML frontmatter: the CLI stamps `modified` on it when "
+      + "Claude writes it. This editor never writes that field and never adds "
+      + "frontmatter to a file that has none — both would change how the CLI "
+      + "treats the file."
+    : "this file has no frontmatter, and this editor will not add any: adding a "
+      + "block opts the file into `modified` stamping and into the `pinned` scan.";
+  edBudget.hidden = !(isIndex && mem.base);
+  if (isIndex && mem.base) {
+    const bud = indexBudget(edText.value);
+    const overL = bud.lines > limitNum("indexLines", 200);
+    const overB = bud.bytes > limitNum("indexBytes", 25600);
+    edBudget.className = "tier" + (overL || overB ? " over" : "");
+    edBudget.textContent = "load budget: " + bud.lines + "/"
+      + limitNum("indexLines", 200) + " lines, " + bud.bytes + "/"
+      + limitNum("indexBytes", 25600) + " bytes (frontmatter and block HTML "
+      + "comments excluded, the way the CLI counts)"
+      + (overL || overB ? " — everything past the limit is DROPPED at the next "
+        + "load, silently; the write itself still succeeds." : "");
+  }
+  const inFlight = mem.state === "saving";
+  const canSave = writable && !!mem.base && !inFlight;
+  edSave.disabled = !canSave;
+  edDelete.disabled = !canSave;
+  // The buffer is LOCKED while a write is out. Without this, keystrokes that
+  // land mid-flight are bytes the server never saw, and the response's "saved"
+  // would be rendered over them — an optimistic confirmation with extra steps
+  // (D13 rule 1, UI-18). The response re-enables it.
+  edText.disabled = !mem.base || inFlight;
+  edPinWrap.hidden = !writable;
+  const why = writable ? "" : entryReason(entry);
+  edSave.title = why;
+  edDelete.title = why;
+  renderReason();
+}
+
+/** Python's `len(text.splitlines())` — the unit `tests/test_memory_hygiene.py`
+ *  counts in, so the two agree about `\r\n` and a lone `\r` as well as `\n`, and
+ *  about a file that does not end in a newline. */
+function countLines(s) {
+  if (String(s) === "") return 0;
+  const parts = String(s).split(/\r\n|\r|\n/);
+  if (parts[parts.length - 1] === "") parts.pop();
+  return parts.length;
+}
+/** The CLI's own measurement of the index budget: YAML frontmatter and
+ *  block-level HTML comments are stripped BEFORE lines and bytes are counted
+ *  (DOCS-14, since v2.1.211).
+ *
+ *  Byte-for-byte the same measurement as `tests/test_memory_hygiene.py`'s
+ *  `index_budget` — the two regexes above are that file's, ported character for
+ *  character, and the driven test asserts this function's exact `{lines, bytes}`
+ *  over that file's own cases (including the two it wrote comments about). The
+ *  text is NOT newline-normalized first, because the repo rule counts the bytes
+ *  it was given and a normalizing page would report fewer bytes than the gate
+ *  for the same file. */
+function indexBudget(text) {
+  let s = String(text).replace(MEM_FRONTMATTER_RE, "");
+  s = s.replace(MEM_BLOCK_COMMENT_RE, "");
+  return { lines: countLines(s), bytes: byteLen(s) };
+}
+/** Does this text carry a `pinned:` key in LEADING frontmatter? Asked before a
+ *  restore re-arms such a file, so the confirmation the server requires is a
+ *  sentence the operator answered rather than a 4xx they cannot act on (DOCS-6,
+ *  G7 step 7, n2). The server re-decides; this only knows when to ask. */
+function memHasPinned(text) {
+  const m = String(text).match(MEM_FRONTMATTER_RE);
+  return !!m && /^[ \t]*pinned[ \t]*:/m.test(m[0]);
+}
+
+edText.addEventListener("input", () => {
+  if (!mem.base) return;
+  mem.dirty = oneTrailingNewline(edText.value) !== oneTrailingNewline(mem.base.content);
+  // A fresh edit re-arms the unload warning: if a navigation the operator already
+  // confirmed never actually happened, these bytes are unguarded again (m4).
+  if (mem.dirty) mem.leaving = false;
+  // While a write is out the badge belongs to that request: typing may not knock
+  // `saving…` off it (the label the operator stares at is the only evidence the
+  // page is honest about what has left the browser), and the response decides
+  // what comes next from the buffer as it is THEN.
+  if (mem.state !== "conflict" && mem.state !== "saving") {
+    setNote("");
+    setState(mem.dirty ? "dirty" : "clean", "");
+  }
+  renderEditorChrome();
+});
+
+/** PUT. `ifMatch` is the sha of the bytes we loaded — never "*", which the
+ *  server refuses: there is no legitimate blind overwrite of a file that is
+ *  injected into future sessions (G5, UI-3). */
+async function memSave() {
+  if (!mem.name || !mem.base) return false;
+  const entry = fileEntry(mem.name);
+  if (!entryWritable(entry)) {
+    setState("error", entryReason(entry));
+    return false;
+  }
+  const name = mem.name, seq = mem.seq;
+  const content = oneTrailingNewline(edText.value);
+  const payload = { content: content, ifMatch: mem.base.sha256 };
+  // G7 step 7: `pinned` is refused unless the request says so explicitly, and
+  // the flag is named `allowPinned` — the confirmation the server requires and
+  // the words the checkbox spells are the same decision. G5's canonical body is
+  // `{content, ifMatch}`, so this key is the ONE addition this page makes to it:
+  // monitor_server.py's write path must accept exactly `allowPinned`, a boolean
+  // in the PUT/POST body, defaulting to false. A name mismatch there turns the
+  // ticked checkbox into a permanent 4xx that no test on either side would see.
+  if (mem.pinAsked) payload.allowPinned = true;
+  setState("saving", "");
+  renderEditorChrome();
+  let r;
+  try {
+    r = await memReq(fileUrl(name), memWriteInit("PUT", payload), [409]);
+  } catch (e) {
+    // Abandoned mid-flight (the operator opened another file, or closed the
+    // editor): the answer is about a file that is no longer on screen, so it is
+    // parked on that file rather than dropped — silence here is the page failing
+    // to say whether the bytes the operator launched are on disk (m3).
+    if (seq !== mem.seq || mem.name !== name) {
+      noteOutcome(name, "the save you launched from here FAILED — " + e.message
+        + "; nothing was written and this page no longer holds those bytes", true);
+      return false;
+    }
+    setState("error", e.message);
+    renderEditorChrome();
+    return false;
+  }
+  if (seq !== mem.seq || mem.name !== name) {
+    if (r.status === 409) {
+      noteOutcome(name, "the save you launched from here was REFUSED — the file "
+        + "had changed on disk at " + fmtStampNs(r.body.mtime_ns) + "; nothing "
+        + "was written and this page no longer holds the bytes you typed", true);
+    } else {
+      noteOutcome(name, "the save you launched from here landed at "
+        + fmtStampNs(r.body.mtime_ns), false);
+      memRefreshList();
+    }
+    return false;
+  }
+  if (r.status === 409) {
+    enterConflict(r.body, "save");
+    return false;
+  }
+  adoptSaved(r.body, content);
+  memRefreshList();
+  return true;
+}
+
+/** The response's sha is ADOPTED, so save-then-save does not 409 against the
+ *  operator's own previous write (UI-3 — the failure that trains people to
+ *  click "overwrite").
+ *
+ *  `content` is what was SENT. The buffer is recomputed against it rather than
+ *  assumed clean: a locked textarea does not cover a paste that lands in the
+ *  same tick, and "saved" over bytes the server never received is exactly the
+ *  optimistic confirmation D13 rule 1 forbids — worse, it clears the dirty gate
+ *  and `beforeunload` stops warning about the only copy of that edit. */
+function adoptSaved(b, content) {
+  mem.base = {
+    sha256: String(b.sha256 || ""), mtime_ns: b.mtime_ns, size: b.size,
+    content: content, hasFrontmatter: mem.base ? mem.base.hasFrontmatter : false,
+  };
+  mem.conflict = null;
+  mem.drift = "";
+  mem.dirty = oneTrailingNewline(edText.value) !== oneTrailingNewline(content);
+  hideExtras();
+  if (mem.dirty) {
+    setNote("the bytes that were in flight are on disk, saved at "
+      + fmtStampNs(b.mtime_ns) + " — what is in the box now is newer than that "
+      + "and is NOT saved yet.", false);
+    setState("dirty", "");
+  } else {
+    setNote("");
+    setState("saved", fmtStampNs(b.mtime_ns));
+  }
+  renderEditorChrome();
+}
+
+/** A 409 writes NOTHING into the textarea: the operator's buffer is the only
+ *  copy of their edit. Three named exits, never a bare retry (UI-3).
+ *
+ *  The refused OPERATION is recorded, because a save and a delete are not
+ *  interchangeable mutations: a refused delete described as a refused save, whose
+ *  deliberate exit then SAVES the file, is a different write than the one the
+ *  operator asked for. Every sentence and the third button's label are worded
+ *  from `op`. */
+function enterConflict(cur, op) {
+  const isDel = op === "delete";
+  mem.conflict = {
+    sha256: String(cur.sha256 || ""), mtime_ns: cur.mtime_ns, size: cur.size,
+    content: typeof cur.content === "string" ? cur.content : "",
+    op: isDel ? "delete" : "save",
+  };
+  setState("conflict", "another writer changed " + mem.name + " at "
+    + fmtStampNs(cur.mtime_ns) + (isDel
+      ? " — your DELETE was refused, nothing was deleted, and your buffer is "
+        + "still in the box above; pick one of the three exits below."
+      : " — your edit was NOT saved and is still in the box above; pick one of "
+        + "the three exits below."));
+  cfText.textContent = "on disk now: " + fmtSize(Number(cur.size) || 0)
+    + ", written at " + fmtStampNs(cur.mtime_ns) + ". Reload discards your edit "
+    + "and loads that copy; show both prints the disk copy read-only below so "
+    + "nothing is lost; " + (isDel
+      ? "delete it anyway deletes the copy that is there NOW — the bytes show "
+        + "both prints — and saves nothing."
+      : "overwrite saves your buffer over it.");
+  cfOverwrite.textContent = isDel ? "delete it anyway" : "overwrite with mine";
+  cfOverwrite.title = isDel
+    ? "delete the file as it stands on disk now" : "save your buffer over it";
+  edConflict.hidden = false;
+  renderEditorChrome();
+}
+function conflictReload() {
+  if (!mem.conflict) return;
+  mem.base = {
+    sha256: mem.conflict.sha256, mtime_ns: mem.conflict.mtime_ns,
+    size: mem.conflict.size, content: mem.conflict.content,
+    hasFrontmatter: mem.base ? mem.base.hasFrontmatter : false,
+  };
+  mem.conflict = null;
+  edText.value = mem.base.content;      // the operator asked for this one
+  mem.dirty = false;
+  // Re-read, for a refused save AND for a refused delete: the buffer now matches
+  // the disk copy, so a second delete (or save) is a decision made against what
+  // is actually there.
+  mem.drift = "";
+  setNote("");
+  hideExtras();
+  setState("clean", "");
+  renderEditorChrome();
+}
+function conflictShowBoth() {
+  if (!mem.conflict) return;
+  edOtherLabel.textContent = "on disk now — read-only. Your own edit is "
+    + "untouched in the editor above.";
+  edOtherText.textContent = mem.conflict.content;
+  edOther.hidden = false;
+}
+function conflictOverwrite() {
+  if (!mem.conflict || !mem.base) return;
+  // Deliberate overwrite is still an ifMatch write — against the sha the server
+  // just told us it has. "*" is not a carrier this API accepts.
+  //
+  // The WHOLE disk copy is adopted, not just its sha and mtime: `mem.base` is
+  // also what the rest of the page believes is on disk, and for the delete exit
+  // that belief is load-bearing. `memDelete` keeps `mem.base.content` as the
+  // trash entry's restorable bytes, so adopting only the sha made "delete it
+  // anyway" remove the other writer's newer revision and then offer a one-click
+  // restore of the OLDER one, unlabelled — the wrong-bytes class one layer below
+  // the refused-mutation one, and reachable only through this exit (a plain
+  // delete carries the loaded sha and 409s on a drifted file). Adopting the
+  // bytes also makes the row's "restore would write your unsaved buffer" caveat
+  // true by itself, because `unsaved` is then computed against what was really
+  // deleted. For the save exit it is harmless-to-better: `mem.base.content` only
+  // feeds the dirty computation, and `adoptSaved` replaces it on success.
+  const op = mem.conflict.op;
+  mem.base.sha256 = mem.conflict.sha256;
+  mem.base.mtime_ns = mem.conflict.mtime_ns;
+  mem.base.content = mem.conflict.content;
+  mem.base.size = mem.conflict.size;
+  // ...and the buffer is re-measured against it: bytes the operator has not sent
+  // are unsaved by definition once the base is what is really on disk, and both
+  // the dirty gate and `beforeunload` read that flag.
+  mem.dirty = oneTrailingNewline(edText.value)
+    !== oneTrailingNewline(mem.base.content);
+  mem.conflict = null;
+  mem.drift = "";
+  edConflict.hidden = true;
+  // The exit performs the operation that was REFUSED, not the other one: this
+  // button is "delete it anyway" on a delete conflict and it deletes.
+  if (op === "delete") { memDelete(); return; }
+  memSave();
+}
+
+/** DELETE is a move (the server puts the file in the trash dir) and carries the
+ *  same ifMatch guard as a save: you cannot delete what changed since you
+ *  looked. A non-empty file needs its name typed, not a bare confirm (UI-7). */
+function askDelete() {
+  if (!mem.name || !mem.base) return;
+  const entry = fileEntry(mem.name);
+  if (!entryWritable(entry)) { setState("error", entryReason(entry)); return; }
+  // An unsaved edit is the only copy of those bytes: deleting the file under it
+  // is a discard, so it goes through the same gate every other discard does.
+  if (!guardDirty("delete " + mem.name)) return;
+  const empty = String(mem.base.content).trim() === "";
+  if (empty) {
+    const q = "delete " + mem.name + "? It is empty; the server still moves it to "
+      + "the trash.";
+    if (typeof confirm === "function" && confirm(q) !== true) return;
+    memDelete();
+    return;
+  }
+  delText.textContent = mem.name + " holds " + fmtSize(Number(mem.base.size) || 0)
+    + " of model instructions. Type its name to delete it; the server moves it "
+    + "to the memory root's trash directory and this page keeps the bytes so "
+    + "you can restore it as a new file.";
+  delName.value = "";
+  edDelConfirm.hidden = false;
+}
+async function memDelete() {
+  if (!mem.name || !mem.base) return false;
+  const name = mem.name, seq = mem.seq, loaded = mem.base.content;
+  setState("saving", "");
+  // A DELETE is a write like any other: the buffer is locked while it is out and
+  // both buttons go dead, or keystrokes land in a textarea that is about to be
+  // thrown away (this call is what the save path had and the delete path lacked).
+  renderEditorChrome();
+  let r;
+  try {
+    r = await memReq(fileUrl(name) + "&ifMatch=" + encodeURIComponent(mem.base.sha256),
+                     memWriteInit("DELETE", null), [409]);
+  } catch (e) {
+    if (seq !== mem.seq) {
+      noteOutcome(name, "the delete you launched from here FAILED — " + e.message
+        + "; the file was not removed", true);
+      return false;
+    }
+    setState("error", e.message);
+    renderEditorChrome();
+    return false;
+  }
+  if (seq !== mem.seq) {
+    // The editor moved on while the DELETE was out. The answer still decides
+    // whether a file exists, so it is parked on that name — and on success the
+    // trash entry is still recorded, from the bytes this call captured at its
+    // start, because they are now the only copy this page has (m3).
+    if (r.status === 409) {
+      noteOutcome(name, "the delete you launched from here was REFUSED — the file "
+        + "had changed on disk at " + fmtStampNs(r.body.mtime_ns) + " and is still "
+        + "there, unchanged", true);
+      return false;
+    }
+    pushTrash(name, r.body.trash, loaded, loaded);
+    noteOutcome(name, "the delete you launched from here landed — the file is in "
+      + "the trash group below, holding the bytes it had when you opened it", false);
+    await memRefreshList();
+    return true;
+  }
+  if (r.status === 409) {
+    enterConflict(r.body, "delete");
+    return false;
+  }
+  // The trash entry records BOTH byte-sets: `loaded` is what the server just
+  // removed (the DELETE carried its sha, so the removal proves the disk matched
+  // it) and the buffer is an unsaved edit that went with it. Restore writes the
+  // first; the second is its own button, never a silent substitution.
+  pushTrash(name, r.body.trash, loaded, edText.value);
+  mem.name = null;
+  mem.base = null;
+  mem.dirty = false;
+  mem.drift = "";
+  setNote("");
+  mem.seq += 1;
+  edCard.hidden = true;
+  hideExtras();
+  await memRefreshList();
+  return true;
+}
+
+/** One trash entry, holding BOTH byte-sets a delete can be about.
+ *
+ *  `content` — what `restore` writes — is the bytes that were DELETED, and on a
+ *  successful DELETE those are known exactly: the request carried
+ *  `ifMatch = mem.base.sha256`, so the server removed the file only because the
+ *  disk still matched `mem.base.content`. That is also why `conflictOverwrite`
+ *  adopts the whole disk copy before re-issuing: on the "delete it anyway" path
+ *  the bytes that go are the ones the 409 published, and a trash entry built from
+ *  the stale load would offer a one-click restore of a revision the other writer
+ *  had already replaced — silently, and older (the wrong-bytes class).
+ *
+ *  `buffer` is an unsaved edit that was open when the file went. Discarding it was
+ *  confirmed (`askDelete` runs the dirty gate first), but it is still the only
+ *  copy of those bytes, so it is kept and offered as its OWN restore rather than
+ *  quietly substituted for what was deleted — the operator picks which of the two
+ *  they meant, with both sizes on the row (UI-18).
+ *
+ *  Capped, and the cap is stated on the card (n1/UI-14): the oldest entry's bytes
+ *  are dropped from this page, never from the server's trash directory. */
+function pushTrash(name, trash, deleted, buffer) {
+  const gone = oneTrailingNewline(deleted);
+  const held = oneTrailingNewline(buffer);
+  mem.trash.push({
+    name: name, trash: String(trash || ""),
+    content: gone, buffer: held !== gone ? held : "", unsaved: held !== gone,
+    deletedBytes: byteLen(gone), bufferBytes: byteLen(held),
+  });
+  if (mem.trash.length > MEM_TRASH_CAP) {
+    mem.trash.splice(0, mem.trash.length - MEM_TRASH_CAP);
+  }
+}
+
+/** Restore is a CREATE (POST), which is why a name that came back cannot be
+ *  restored over — the 409 says exactly that instead of offering a retry.
+ *
+ *  `which` picks the byte-set: the default is the bytes that were DELETED (what
+ *  "restore" means for a delete), and `"buffer"` is the unsaved edit that was
+ *  discarded with the file. Both are named on the row, so this is a choice the
+ *  operator makes rather than one the page makes for them. */
+async function memRestore(name, which) {
+  const entry = mem.trash.filter((t) => t.name === name)[0];
+  if (!entry) return false;
+  entry.error = "";
+  const fromBuffer = which === "buffer" && !!entry.buffer;
+  const payload = { content: oneTrailingNewline(fromBuffer ? entry.buffer
+                                                          : entry.content) };
+  // A restore re-creates whatever the file WAS, `pinned:` frontmatter included —
+  // and the server refuses that without the explicit flag. Asking here keeps the
+  // flag attached to a sentence the operator answered (the same words the editor's
+  // checkbox spells), instead of leaving them a 4xx blamed on a name collision
+  // (DOCS-6, n2).
+  if (memHasPinned(payload.content)) {
+    const q = name + " carries `pinned:` frontmatter — restoring it re-arms a file "
+      + "that is injected into EVERY session, unasked. Restore it anyway?";
+    if (typeof confirm !== "function" || confirm(q) !== true) {
+      entry.error = "restore cancelled — this file carries `pinned:`, which needs a "
+        + "deliberate yes. Its bytes are still here.";
+      renderTrash();
+      return false;
+    }
+    payload.allowPinned = true;
+  }
+  let r;
+  try {
+    r = await memReq(fileUrl(name), memWriteInit("POST", payload), [409]);
+  } catch (e) {
+    entry.error = "restore failed: " + e.message;
+    renderTrash();
+    return false;
+  }
+  if (r.status === 409) {
+    // Worded from the SERVER's reason when it gave one: a 409 on a create is
+    // usually the name coming back, but it is the server that knows — blaming a
+    // collision for a refusal that was about something else sends the operator
+    // looking for a file that is not there (n2).
+    entry.error = "restore refused — " + memReason(r.body, "a file called " + name
+      + " exists in the memory root again, and a create never overwrites")
+      + ". Open what is there, keep what you want, and paste the rest in; the "
+      + "bytes on this row are untouched.";
+    renderTrash();
+    return false;
+  }
+  mem.trash = mem.trash.filter((t) => t.name !== name);
+  await memRefreshList();
+  return true;
+}
+
+/** Create. The name is checked against the server's own flat-name rule first,
+ *  so a bad name is a sentence on screen rather than a 400. */
+async function memCreate() {
+  const name = String(newName.value || "").trim();
+  newErr.hidden = false;
+  newErr.className = "reason bad";
+  if (!MEM_NAME_RE.test(name)) {
+    newErr.textContent = "a memory file name is letters, digits, dot, dash or "
+      + "underscore, starts with a letter or digit, ends in .md, and is at most "
+      + "64 characters — no directories.";
+    return false;
+  }
+  if (fileEntry(name)) {
+    newErr.textContent = name + " already exists — open it from the list above.";
+    return false;
+  }
+  let r;
+  try {
+    r = await memReq(fileUrl(name),
+                     memWriteInit("POST", { content: oneTrailingNewline("") }), [409]);
+  } catch (e) {
+    newErr.textContent = e.message;
+    return false;
+  }
+  if (r.status === 409) {
+    newErr.textContent = name + " already exists on disk.";
+    return false;
+  }
+  newErr.hidden = true;
+  newName.value = "";
+  await memRefreshList();
+  await memOpen(name);
+  return true;
+}
+
+// ---- preview: a NODE builder over the SAVED bytes, never the buffer ----
+// This is monitor.html's `renderMd`/`mdInline` grammar re-expressed as a node
+// builder, and the two are deliberately NOT one shared helper: a string renderer
+// needs a markup sink to install its output, which is banned here. They are also
+// not expected to track each other — a divergence in what markdown subset each
+// page previews is not a defect in either (n3).
+function memEl(parent, tagName, text) {
+  const node = document.createElement(tagName);
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  parent.appendChild(node);
+  return node;
+}
+/** Inline transforms. Every literal character reaches the DOM through
+ *  createTextNode and every emitted tag is written here, so there is no escape
+ *  step to get wrong and no markup sink to escape FOR. */
+function memInline(target, text) {
+  const re = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|\[([^\]]+)\]\(([^)\s]+)\)/g;
+  let at = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > at) target.appendChild(document.createTextNode(text.slice(at, m.index)));
+    if (m[1] !== undefined) memEl(target, "code", m[1]);
+    else if (m[2] !== undefined) memEl(target, "strong", m[2]);
+    else if (m[3] !== undefined) memEl(target, "em", m[3]);
+    else if (/^(https?:\/\/|#|\.{0,2}\/)/.test(m[5])) {
+      const a = memEl(target, "a", m[4]);
+      a.setAttribute("href", m[5]);
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    } else {
+      target.appendChild(document.createTextNode(m[0]));
+    }
+    at = re.lastIndex;
+  }
+  if (at < text.length) target.appendChild(document.createTextNode(text.slice(at)));
+}
+function memRenderMd(target, src) {
+  target.textContent = "";
+  const lines = String(src).replace(/\r\n?/g, "\n").split("\n");
+  let i = 0, para = [], list = null;
+  const flushP = () => {
+    if (!para.length) return;
+    memInline(memEl(target, "p", null), para.join(" "));
+    para = [];
+  };
+  const flushL = () => { list = null; };
+  while (i < lines.length) {
+    const ln = lines[i];
+    if (/^\s*```/.test(ln)) {
+      flushP(); flushL();
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i += 1; }
+      i += 1;
+      memEl(memEl(target, "pre", null), "code", buf.join("\n"));
+      continue;
+    }
+    const h = ln.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      flushP(); flushL();
+      memInline(memEl(target, "h" + Math.min(h[1].length, 4), null), h[2]);
+      i += 1;
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(ln)) {
+      flushP(); flushL(); memEl(target, "hr", null); i += 1; continue;
+    }
+    const li = ln.match(/^\s*[-*+]\s+(.*)$/), oli = ln.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (li || oli) {
+      flushP();
+      const want = li ? "ul" : "ol";
+      if (!list || list.tag !== want) list = { tag: want, node: memEl(target, want, null) };
+      memInline(memEl(list.node, "li", null), (li || oli)[1]);
+      i += 1;
+      continue;
+    }
+    if (/^\s*>/.test(ln)) {
+      flushP(); flushL();
+      const buf = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^\s*>\s?(.*)$/);
+        if (!m) break;
+        buf.push(m[1]); i += 1;
+      }
+      memInline(memEl(target, "blockquote", null), buf.join(" "));
+      continue;
+    }
+    if (!ln.trim()) { flushP(); flushL(); i += 1; continue; }
+    para.push(ln.trim());
+    i += 1;
+  }
+  flushP();
+}
+function memPreviewToggle() {
+  if (!edPreview.hidden) { edPreview.hidden = true; return; }
+  if (!mem.base) return;
+  edPreviewLabel.textContent = "preview — rendered from the SAVED file"
+    + (mem.dirty ? "; your unsaved edits are NOT shown" : "") + ".";
+  memRenderMd(edPreviewBody, mem.base.content);
+  edPreview.hidden = false;
+}
+
+// ---- wiring ----
+edSave.addEventListener("click", () => { memSave(); });
+edDelete.addEventListener("click", () => { askDelete(); });
+byId("edPreviewBtn").addEventListener("click", () => { memPreviewToggle(); });
+byId("edClose").addEventListener("click", () => {
+  if (!guardDirty("close the editor")) return;
+  mem.name = null; mem.base = null; mem.dirty = false; mem.seq += 1;
+  mem.drift = ""; setNote("");
+  // The `pinned` confirmation is per FILE and never sticky: `memOpen` clears it
+  // on the way in, and closing clears it too, so the next file cannot inherit a
+  // yes the operator gave about this one (n4).
+  mem.pinAsked = false;
+  edPin.checked = false;
+  edCard.hidden = true;
+  hideExtras();
+  renderRows();
+});
+byId("cfReload").addEventListener("click", () => { conflictReload(); });
+byId("cfBoth").addEventListener("click", () => { conflictShowBoth(); });
+byId("cfOverwrite").addEventListener("click", () => { conflictOverwrite(); });
+byId("delGo").addEventListener("click", () => {
+  if (String(delName.value || "").trim() !== mem.name) {
+    delText.textContent = "the typed name does not match " + mem.name
+      + " — nothing was deleted.";
+    return;
+  }
+  edDelConfirm.hidden = true;
+  memDelete();
+});
+byId("delCancel").addEventListener("click", () => { edDelConfirm.hidden = true; });
+byId("newBtn").addEventListener("click", () => { memCreate(); });
+edPin.addEventListener("change", () => { mem.pinAsked = edPin.checked === true; });
+// The one pane preference, under monitor.html's own `orch*` localStorage prefix.
+edWrap.addEventListener("change", () => {
+  edText.className = edWrap.checked ? "" : "nowrap";
+  try {
+    localStorage.setItem("orchMemoryWrap", edWrap.checked ? "1" : "0");
+  } catch (e) { /* storage denied: a pane preference is not worth a broken page */ }
+});
+// The two ways off this page, both gated by the one dirty predicate (UI-8) — and
+// ONE decision, asked once: the link's confirm and the browser's native unload
+// prompt are the same question, so answering the first must not raise the second.
+// Stacking them trains the operator to click through unload dialogs, which is the
+// habit this gate exists to build the other way (m4).
+byId("backLink").addEventListener("click", (e) => {
+  if (guardDirty("leave this page")) {
+    // `mem.dirty` is deliberately NOT cleared: something else could still cancel
+    // this navigation, and the buffer would then be unguarded. The flag says only
+    // "the operator has answered for THIS navigation".
+    mem.leaving = true;
+    return;
+  }
+  if (e && typeof e.preventDefault === "function") e.preventDefault();
+});
+window.addEventListener("beforeunload", (e) => {
+  if (mem.leaving || !isDirty()) return;
+  e.preventDefault();
+  e.returnValue = "unsaved memory edits";
+});
+
+function memBoot() {
+  byId("backLink").href = withToken("/");
+  let wrap = "1";
+  try {
+    wrap = localStorage.getItem("orchMemoryWrap") || "1";
+  } catch (e) { /* storage denied: fall back to the default (wrap on) */ }
+  edWrap.checked = wrap !== "0";
+  edText.className = edWrap.checked ? "" : "nowrap";
+  renderHead();
+  memRefreshList();
+  setInterval(memRefreshList, MEM_POLL_MS);
+}
+memBoot();
+</script>
+</body>
+</html>

@@ -21,6 +21,15 @@ repo's own local-orchestrators state, so a test run can never scope-restrict
 (or be restricted by) a live session. For the same reason every run starts from
 an environment with `CLAUDE_PROJECT_DIR` and the `run_scope_guard` off-switch
 stripped; the tests that care about them set them explicitly.
+
+Every fixture is built at the CURRENT tasks root (`ORCH_REL`,
+`.touch/local-orchestrators`), so the whole file is the positive control
+SECURITY-11 asked for: not "the guard stays inert after the move" but "an ACTIVE
+file at the NEW root really denies a subagent's cross-task read". The legacy
+`.claude` spelling keeps its own test (`test_dual_root_candidates`) for as long
+as it is a candidate — it is what keeps the guard and the HALT brake live across
+the physical move (PROTOCOL-2). When the follow-up item drops that candidate,
+`LEGACY_ORCH_REL` and that one test go with it and nothing else moves.
 """
 import json
 import os
@@ -42,6 +51,28 @@ GUARD = REPO / "plugin" / "touch" / "hooks" / "orch_scope_guard.py"
 HOOKS_JSON = REPO / "plugin" / "touch" / "hooks" / "hooks.json"
 SETTINGS = REPO / ".claude" / "settings.json"
 MATCHER_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write", "Bash")
+
+#: The tasks root, project-relative — the ONE anchor every fixture below builds
+#: from, so the next move is one line here (G10).
+ORCH_REL = (".touch", "local-orchestrators")
+#: The pre-G10 spelling, still a candidate root in the guard for the duration of
+#: the transition. Dropped, here and there, by I17's follow-up item.
+LEGACY_ORCH_REL = (".claude", "local-orchestrators")
+#: The project marker — deliberately NOT the state dir. `.claude/` marks a
+#: *Claude Code* project; `.touch/` is created by Touch and is gitignored, so it
+#: cannot mark one (G10, PROTOCOL-23). Every fixture gets one, because a real
+#: project keeps `.claude/` after the move (settings, statusline) and tier 3
+#: climbs to exactly this.
+MARKER = ".claude"
+#: `SEG_PATTERN`, byte-for-byte as it must stay (Part D-12). The leaf name
+#: `local-orchestrators` was kept through the move precisely so this pattern
+#: needs no edit and both spellings stay enforced (G10, PROTOCOL-12); a rename
+#: would have made it match `plugin/touch/runs/` and every other `runs/` in
+#: every project the plugin is enabled in (LAYOUT-1).
+SEG_PATTERN_LINE = (
+    'SEG_PATTERN = r"local-orchestrators/+([^/\\s\\"\';|&]+)'
+    '((?:/[^\\s\\"\';|&]*)?)"'
+)
 #: The whole of `.claude/settings.json` — a closed set, so a third top-level
 #: key has to be argued for rather than merely committed.
 #: `extraKnownMarketplaces` was briefly a member and is now refused by name
@@ -114,14 +145,31 @@ def hook_call(tool, cwd, agent=True, **tool_input):
     return payload
 
 
-def make_tree(tmp):
-    orch = Path(tmp) / ".claude" / "local-orchestrators"
+def orch_dir(base, rel=ORCH_REL):
+    """The tasks root under `base` — never a literal, so the next move is one
+    constant and not forty call sites (I1's reason, applied here)."""
+    return Path(base).joinpath(*rel)
+
+
+def make_tree(tmp, rel=ORCH_REL, active="task-a\n"):
+    """A throwaway project: the `.claude/` marker, a tasks root under `rel` with
+    task-a (active), task-b (not) and task-b's readable `plan/`.
+
+    The marker is created even when the tasks root is `.touch/…` because that is
+    what a post-move project looks like — `.claude/` keeps settings and the
+    statusline (LAYOUT-6) — and because tier 3 climbs to a `.claude/` and would
+    otherwise walk past the fixture into whatever the machine's temp ancestors
+    happen to contain.
+    """
+    (Path(tmp) / MARKER).mkdir(parents=True, exist_ok=True)
+    orch = orch_dir(tmp, rel)
     for task, sub in (("task-a", "findings"), ("task-b", "findings"),
                       ("task-b", "plan")):
         d = orch / task / sub
         d.mkdir(parents=True, exist_ok=True)
         (d / "f.md").write_text("x\n", encoding="utf-8")
-    (orch / "ACTIVE").write_text("task-a\n", encoding="utf-8")
+    if active is not None:
+        (orch / "ACTIVE").write_text(active, encoding="utf-8")
     return orch
 
 
@@ -292,6 +340,18 @@ def test_scoping():
               "subagent Read of another task's findings is denied")
         check("task-a" in out and "task-b" in out,
               "deny reason names both the active and the offending task")
+        # PROTOCOL-13: the reason quotes what the CALLER wrote and labels the
+        # root the guard resolved, instead of a `join(root, task) + rest` path
+        # that may not exist (the match is not anchored to the root — LAYOUT-16,
+        # measured). Both halves are asserted: the matched span verbatim, and
+        # the resolved root under its label.
+        matched = "local-orchestrators/task-b/findings/f.md"
+        check(f"matched '{matched}'" in out,
+              "deny reason quotes the matched text verbatim (PROTOCOL-13)")
+        check(f"resolved tasks root: {orch}" in out,
+              "...and names the tasks root that actually decided, labelled")
+        check(f"{orch}/task-b/findings/f.md belongs" not in out,
+              "...and no longer presents a synthesised path as the caller's")
 
         rc, out = run_guard(hook_call("Read", tmp, file_path=str(b_plan)), **anchored)
         check(decision(out) == "allow",
@@ -394,15 +454,26 @@ def test_bash_and_glob():
     print("test_bash_and_glob")
     with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
         make_tree(tmp)
-        deny_cmd = "cat .claude/local-orchestrators/task-b/events.jsonl"
+        deny_cmd = "cat .touch/local-orchestrators/task-b/events.jsonl"
         rc, out = run_guard(hook_call("Bash", tmp, command=deny_cmd))
         check(decision(out) == "deny", "Bash naming another task's state denied")
 
+        # The match is a bare substring on the kept leaf name, so a command
+        # written the OLD way is enforced identically — the property that makes
+        # the transition window safe for prompts, findings and pasted commands
+        # that still spell `.claude/` (PROTOCOL-12, G10).
+        rc, out = run_guard(hook_call(
+            "Bash", tmp,
+            command="cat .claude/local-orchestrators/task-b/events.jsonl"))
+        check(decision(out) == "deny",
+              "the legacy spelling of another task's path is denied too")
+
         ok_cmds = (
-            "ls .claude/local-orchestrators",
+            "ls .touch/local-orchestrators",
+            "cat .touch/local-orchestrators/task-a/findings/f.md",
+            "cat .touch/local-orchestrators/task-b/plan/f.md",
+            "rm -f .touch/local-orchestrators/ACTIVE",
             "cat .claude/local-orchestrators/task-a/findings/f.md",
-            "cat .claude/local-orchestrators/task-b/plan/f.md",
-            "rm -f .claude/local-orchestrators/ACTIVE",
         )
         for cmd in ok_cmds:
             rc, out = run_guard(hook_call("Bash", tmp, command=cmd))
@@ -412,22 +483,22 @@ def test_bash_and_glob():
         # Read-only tools may still pass it; Bash may not (there the same glob
         # is just as likely to be the target of an rm).
         rc, out = run_guard(hook_call(
-            "Glob", tmp, pattern=".claude/local-orchestrators/*/findings/*.md"))
+            "Glob", tmp, pattern=".touch/local-orchestrators/*/findings/*.md"))
         check(decision(out) == "allow", "wildcard task segment in Glob allowed")
         rc, out = run_guard(hook_call(
             "Grep", tmp, pattern="verdict",
-            path=".claude/local-orchestrators/*/findings"))
+            path=".touch/local-orchestrators/*/findings"))
         check(decision(out) == "allow", "wildcard task segment in Grep allowed")
         rc, out = run_guard(hook_call(
-            "Read", tmp, file_path=".claude/local-orchestrators/task-?/f.md"))
+            "Read", tmp, file_path=".touch/local-orchestrators/task-?/f.md"))
         check(decision(out) == "allow", "single-char wildcard in Read allowed")
         rc, out = run_guard(hook_call(
-            "Bash", tmp, command="rm -rf .claude/local-orchestrators/*"))
+            "Bash", tmp, command="rm -rf .touch/local-orchestrators/*"))
         check(decision(out) == "deny", "wildcard task segment in Bash still denied")
 
         rc, out = run_guard(hook_call(
             "Grep", tmp, pattern="verdict",
-            path=".claude/local-orchestrators/task-b/findings"))
+            path=".touch/local-orchestrators/task-b/findings"))
         check(decision(out) == "deny", "Grep path into another task denied")
 
 
@@ -457,10 +528,10 @@ def test_project_root_ceiling():
     print("test_project_root_ceiling")
     with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
         # A stray ACTIVE in an ANCESTOR of the project must never restrict it.
-        make_tree(tmp)
+        orch = make_tree(tmp)
         proj = Path(tmp) / "proj"
         (proj / "src").mkdir(parents=True)
-        b = Path(tmp) / ".claude" / "local-orchestrators" / "task-b" / "findings" / "f.md"
+        b = orch / "task-b" / "findings" / "f.md"
 
         rc, out = run_guard(hook_call("Read", proj / "src", file_path=str(b)),
                             CLAUDE_PROJECT_DIR=proj)
@@ -478,21 +549,19 @@ def test_project_root_ceiling():
         # forgotten ~/.claude/local-orchestrators/ACTIVE restricting every
         # project under $HOME. The project here has a `.claude/` but no tasks
         # root at all, so the correct answer is "no run here".
-        (proj / ".claude").mkdir()
+        (proj / MARKER).mkdir()
         rc, out = run_guard(hook_call("Read", proj / "src", file_path=str(b)))
         check(rc == 0 and decision(out) == "allow",
               "tier 3 stops at the first .claude/ marker: ancestor ACTIVE ignored")
 
-        (Path(tmp) / ".claude" / "local-orchestrators" / "HALT").write_text(
-            "stop\n", encoding="utf-8")
+        (orch / "HALT").write_text("stop\n", encoding="utf-8")
         rc, out = run_guard(hook_call("Read", proj / "src", file_path=str(b)))
         check(decision(out) == "allow",
               "a HALT above the marker is out of scope for this project too")
-        (Path(tmp) / ".claude" / "local-orchestrators" / "HALT").unlink()
+        (orch / "HALT").unlink()
 
         # A HALT above the project root is ignored just the same.
-        (Path(tmp) / ".claude" / "local-orchestrators" / "HALT").write_text(
-            "stop\n", encoding="utf-8")
+        (orch / "HALT").write_text("stop\n", encoding="utf-8")
         rc, out = run_guard(hook_call("Read", proj / "src", file_path=str(b)),
                             CLAUDE_PROJECT_DIR=proj)
         check(decision(out) == "allow", "HALT above the project root is ignored")
@@ -503,7 +572,7 @@ def test_project_root_ceiling():
         # the anchored lookup is exactly one location or the guard would
         # behave differently depending on which path it took.
         proj = Path(tmp) / "proj"
-        nested = proj / "sub" / ".claude" / "local-orchestrators"
+        nested = orch_dir(proj / "sub")
         (nested / "task-b" / "findings").mkdir(parents=True)
         (nested / "ACTIVE").write_text("task-a\n", encoding="utf-8")
         rc, out = run_guard(
@@ -550,7 +619,7 @@ def test_tasks_root_override():
     print("test_tasks_root_override")
     with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
         proj = Path(tmp) / "proj"
-        proj_orch = proj / ".claude" / "local-orchestrators"
+        proj_orch = orch_dir(proj)
         proj_orch.mkdir(parents=True)
         # The project's own ACTIVE lists task-b — the opposite of the override's.
         (proj_orch / "ACTIVE").write_text("task-b\n", encoding="utf-8")
@@ -633,7 +702,7 @@ def test_tasks_root_override():
         # project tasks dir would otherwise fast-inert past a HALT that the
         # daemons and status.sh are writing next to.
         proj = Path(tmp) / "proj"
-        (proj / ".claude" / "local-orchestrators").mkdir(parents=True)
+        orch_dir(proj).mkdir(parents=True)
         outside = make_tree(Path(tmp) / "outside")
         halt = outside / "HALT"
         halt.write_text("stop\n", encoding="utf-8")
@@ -657,6 +726,286 @@ def test_tasks_root_override():
                             ORCH_TASKS_ROOT=outside)
         check(decision(out) == "deny" and "HALTED" in out,
               "ORCH_TASKS_ROOT alone anchors the guard, with no project dir set")
+
+
+def test_seg_pattern_is_byte_identical():
+    """Part D-12: `SEG_PATTERN` survives the tasks-root move unchanged.
+
+    A source-text pin rather than an import, in the style the frontend tests
+    already use, because the claim IS about the bytes: keeping the leaf name
+    `local-orchestrators` is what let the move be a two-component edit, and it is
+    the whole reason both spellings stay enforced during the transition
+    (PROTOCOL-12). It also keeps `test_package.py`'s recursive `DENY_EXACT`
+    component — the gate that keeps run history out of the payload — pointed at a
+    directory that still exists (LAYOUT-1).
+    """
+    print("test_seg_pattern_is_byte_identical")
+    src = GUARD.read_text(encoding="utf-8")
+    check(SEG_PATTERN_LINE in src,
+          "SEG_PATTERN is byte-identical to the pre-move pattern (Part D-12)")
+    # ...and the candidate pair exists, new spelling first. Behaviour pins the
+    # preference below; this pins that the constant is the single place the
+    # order is written, so the follow-up item has exactly one line to delete.
+    check(f'ORCH_CANDIDATES = (("{ORCH_REL[0]}", "{ORCH_REL[1]}"),' in src,
+          "ORCH_CANDIDATES lists the current tasks root first")
+    check(f'("{LEGACY_ORCH_REL[0]}", "{LEGACY_ORCH_REL[1]}"))' in src,
+          "...and the legacy root second, as one deletable line")
+
+
+def test_dual_root_candidates():
+    """PROTOCOL-2 / SECURITY-11: both tasks-root spellings are consulted, and a
+    missing or empty new root cannot swallow an armed legacy one.
+
+    The hook is a fresh subprocess per tool call, so during the physical move
+    there is a window where the code and the sentinels disagree about which root
+    is live. A one-sided edit makes the guard — and the HALT brake with it — go
+    silently inert in that window, which is a security control failing OPEN, not
+    a cosmetic ordering bug. The candidate pair makes the order of the code edit
+    and the `mv` irrelevant; these arms are what say so.
+
+    The two sentinels resolve differently across the pair and both halves are
+    pinned here: `ACTIVE` picks ONE root (arm 4 — a union would let a stale
+    sentinel over-PERMIT), `HALT` unions every candidate (arm 5 — a brake may
+    only ever over-restrict, and it has to fire at whichever spelling the
+    operator reaches for, including the one the un-rewritable historical record
+    still names).
+
+    `CLAUDE_PLUGIN_OPTION_RUN_SCOPE_GUARD=false` is not an alternative to any of
+    this: it removes HALT too (`test_off_switch`).
+    """
+    print("test_dual_root_candidates")
+    # 1. The positive control at the NEW root: not "still inert", but "denies".
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        orch = make_tree(tmp)
+        b = orch / "task-b" / "findings" / "f.md"
+        rc, out = run_guard(hook_call("Read", tmp, file_path=str(b)),
+                            CLAUDE_PROJECT_DIR=tmp)
+        check(rc == 0 and decision(out) == "deny",
+              "ACTIVE at the NEW root denies a subagent's cross-task read")
+        check(f"resolved tasks root: {orch}" in out,
+              "...and the reason names the new root as the one that decided")
+
+    # 2. Fail closed: no `.touch/` root at all, legacy root armed. This is the
+    #    pre-move half of the window — the code is new, the sentinels have not
+    #    moved yet.
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        legacy = make_tree(tmp, rel=LEGACY_ORCH_REL)
+        b = legacy / "task-b" / "findings" / "f.md"
+        check(not orch_dir(tmp).exists(), "fixture: the new root does not exist")
+        rc, out = run_guard(hook_call("Read", tmp, file_path=str(b)),
+                            CLAUDE_PROJECT_DIR=tmp)
+        check(rc == 0 and decision(out) == "deny",
+              "an absent new root does not disarm an armed LEGACY root")
+        check(f"resolved tasks root: {legacy}" in out,
+              "...and the reason names the legacy root, so the deny is actionable")
+
+        # ...and the brake, which is the half that actually matters.
+        (legacy / "HALT").write_text("stop\n", encoding="utf-8")
+        rc, out = run_guard(hook_call("Read", tmp, file_path=str(
+            legacy / "task-a" / "findings" / "f.md")), CLAUDE_PROJECT_DIR=tmp)
+        check(decision(out) == "deny" and "HALTED" in out,
+              "HALT at the legacy root still fires (PROTOCOL-2's whole point)")
+        check(str(legacy / "HALT") in out, "...naming the sentinel to delete")
+        (legacy / "HALT").unlink()
+
+        # 3. An EXISTING but empty new root must not shadow it either — the
+        #    realistic mid-move state (`mkdir -p .touch` before the `mv`).
+        orch_dir(tmp).mkdir(parents=True)
+        rc, out = run_guard(hook_call("Read", tmp, file_path=str(b)),
+                            CLAUDE_PROJECT_DIR=tmp)
+        check(rc == 0 and decision(out) == "deny",
+              "an EMPTY new root does not shadow the armed legacy root")
+
+    # 4. Both armed: the new root wins, and the legacy ACTIVE does not widen it.
+    #    A union would let a stale sentinel over-PERMIT, the one direction a
+    #    stale sentinel must never go.
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        orch = make_tree(tmp, active="task-a\n")
+        legacy = make_tree(tmp, rel=LEGACY_ORCH_REL, active="task-b\n")
+        rc, out = run_guard(hook_call(
+            "Read", tmp, file_path=str(orch / "task-a" / "findings" / "f.md")),
+            CLAUDE_PROJECT_DIR=tmp)
+        check(decision(out) == "allow", "the new root's ACTIVE task is allowed")
+        rc, out = run_guard(hook_call(
+            "Read", tmp, file_path=str(orch / "task-b" / "findings" / "f.md")),
+            CLAUDE_PROJECT_DIR=tmp)
+        check(decision(out) == "deny",
+              "with both roots armed the new root's ACTIVE decides, no union")
+        # The `active` list in full — `"task-b" in out` would pass on the
+        # quoted match text alone, so the "only" claim has to be pinned on the
+        # prefix the reason builds from `names`. A union would render it
+        # `'task-a', 'task-b'` and break this string.
+        check("active task(s): 'task-a'." in out,
+              "...and the reason lists ONLY the new root's active task")
+
+    # 5. HALT is a UNION over the candidate pair, unlike ACTIVE's choose-one.
+    #    The dangerous shape is exactly the one arm 4 covers for ACTIVE: one
+    #    root armed, the brake reached for at the OTHER. G11 forbids rewriting
+    #    finished folders, so every `RESUME.md` and `orch-config.json` keeps
+    #    spelling `.claude/local-orchestrators` forever and a surviving daemon
+    #    can re-create that tree (PROTOCOL-3) — an operator following that
+    #    muscle memory must not get a file that exists, prints no error and
+    #    freezes nothing. Both directions are asserted, because a union has two.
+    for armed, braked, label in ((ORCH_REL, LEGACY_ORCH_REL, "legacy"),
+                                 (LEGACY_ORCH_REL, ORCH_REL, "new")):
+        with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+            active_root = make_tree(tmp, rel=armed)
+            halt_root = orch_dir(tmp, braked)
+            halt_root.mkdir(parents=True, exist_ok=True)
+            halt = halt_root / "HALT"
+            halt.write_text("stop\n", encoding="utf-8")
+            a = active_root / "task-a" / "findings" / "f.md"
+            rc, out = run_guard(hook_call("Read", tmp, file_path=str(a)),
+                                CLAUDE_PROJECT_DIR=tmp)
+            check(rc == 0 and decision(out) == "deny" and "HALTED" in out,
+                  f"HALT at the {label} root fires while ACTIVE is at the "
+                  f"other — the brake may only ever over-restrict")
+            check(str(halt) in out,
+                  f"...and names the {label} root's sentinel, so the operator "
+                  f"knows which file to delete")
+
+    # 6. Tier 3, no anchor at all: the climb stops at the `.claude/` marker and
+    #    then still checks both candidates under it.
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        legacy = make_tree(tmp, rel=LEGACY_ORCH_REL)
+        deep = Path(tmp) / "sub" / "dir"
+        deep.mkdir(parents=True)
+        rc, out = run_guard(hook_call(
+            "Read", deep, file_path=str(legacy / "task-b" / "findings" / "f.md")))
+        check(decision(out) == "deny",
+              "tier 3 consults the legacy candidate under the marker too")
+
+
+def test_memory_writes():
+    """G14 / SECURITY-12: a subagent may not write Claude Code memory.
+
+    After the move `.touch/` holds the run history AND the memory dir, so a
+    subagent denied another task's `findings/` was free to `Write`
+    `.touch/memory/MEMORY.md` — the instructions every future session in this
+    project loads. That is a strictly larger capability than the guard exists to
+    withhold, acquired as a side effect of a directory move, so it is closed
+    deliberately and pinned here.
+
+    The limits are pinned in the same test, because a security clause whose
+    edges are unasserted is a clause nobody can reason about: three structured
+    editors only, path keys only, a required trailing separator (so the
+    neighbouring audit log is untouched), and the main terminal agent never
+    restricted.
+    """
+    print("test_memory_writes")
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        make_tree(tmp)
+        mem = Path(tmp) / ".touch" / "memory" / "MEMORY.md"
+        mem.parent.mkdir(parents=True, exist_ok=True)
+        mem.write_text("# memory\n", encoding="utf-8")
+        anchored = {"CLAUDE_PROJECT_DIR": tmp}
+
+        rc, out = run_guard(hook_call("Write", tmp, file_path=str(mem),
+                                      content="owned\n"), **anchored)
+        check(rc == 0 and decision(out) == "deny",
+              "subagent Write into .touch/memory/ is denied")
+        check("matched '.touch/memory/MEMORY.md'" in out,
+              "...and the reason quotes the matched text, not a built path")
+        # Both sanctioned routes by name. `"memory" in out` would be satisfied
+        # by the quoted path alone, so the write plane is asserted on its own
+        # words — the affordance an agent is meant to go use instead.
+        check("write plane" in out and "main terminal agent" in out,
+              "...and points at the two sanctioned routes instead")
+
+        rc, out = run_guard(hook_call("Edit", tmp, file_path=str(mem)), **anchored)
+        check(decision(out) == "deny", "subagent Edit into .touch/memory/ denied")
+        # NotebookEdit is off the matcher today, so this can only ever be
+        # belt-and-braces — but `notebook_path` is a path key and the tool is in
+        # WRITE_TOOLS, so the guard stays honest if the matcher grows again.
+        rc, out = run_guard(hook_call(
+            "NotebookEdit", tmp,
+            notebook_path=str(mem.with_name("notes.ipynb"))), **anchored)
+        check(decision(out) == "deny",
+              "NotebookEdit is covered too, for when the matcher grows")
+
+        rc, out = run_guard(hook_call("Write", tmp, agent=False,
+                                      file_path=str(mem), content="fine\n"),
+                            **anchored)
+        check(decision(out) == "allow",
+              "the main terminal agent writes memory freely (never restricted)")
+
+        rc, out = run_guard(hook_call("Read", tmp, file_path=str(mem)), **anchored)
+        check(decision(out) == "allow",
+              "reading memory is not the threat: a subagent may still read it")
+
+        # Disclosed limitations, asserted so they stay disclosed rather than
+        # assumed away: Bash is not covered (like the plan/ exception), and the
+        # write BODY is not scanned — only path keys.
+        rc, out = run_guard(hook_call(
+            "Bash", tmp, command=f"echo hi >> {mem}"), **anchored)
+        check(decision(out) == "allow",
+              "known limitation: Bash writes into memory are not caught")
+        rc, out = run_guard(hook_call(
+            "Write", tmp, file_path=str(Path(tmp) / "notes.md"),
+            content="see .touch/memory/MEMORY.md for details\n"), **anchored)
+        check(decision(out) == "allow",
+              "the content is not scanned — naming the path in prose is not a write")
+
+        # The boundary the required separator buys: the audit log lives NEXT to
+        # the memory dir and is not part of this clause.
+        rc, out = run_guard(hook_call(
+            "Write", tmp, file_path=str(Path(tmp) / ".touch" / "memory-audit.jsonl"),
+            content="{}\n"), **anchored)
+        check(decision(out) == "allow",
+              ".touch/memory-audit.jsonl is not .touch/memory/ (separator required)")
+
+    # The clause is evaluated BEFORE the active-task list, so an ACTIVE that is
+    # present but empty — a stale or half-written sentinel — is not a way in.
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        orch = make_tree(tmp, active="\n\n")
+        mem = Path(tmp) / ".touch" / "memory" / "MEMORY.md"
+        mem.parent.mkdir(parents=True, exist_ok=True)
+        rc, out = run_guard(hook_call("Write", tmp, file_path=str(mem),
+                                      content="owned\n"), CLAUDE_PROJECT_DIR=tmp)
+        check(decision(out) == "deny",
+              "an empty ACTIVE list is not a way into memory")
+        rc, out = run_guard(hook_call(
+            "Read", tmp, file_path=str(orch / "task-b" / "findings" / "f.md")),
+            CLAUDE_PROJECT_DIR=tmp)
+        check(decision(out) == "allow",
+              "control: with no active task the scope clause itself is inert")
+
+    # ...and with no run at all the guard never runs, so memory is the write
+    # plane's business, not the hook's. Same for the user's own off-switch.
+    #
+    # This is asserted on BOTH resolution tiers, and that is not belt-and-braces:
+    # the fast-inert early return only fires when an anchor supplies a root, so
+    # a tier-3 call (no `$CLAUDE_PROJECT_DIR`, no `$ORCH_TASKS_ROOT`) reads
+    # stdin, climbs to the `.claude/` marker and arrives at the memory clause
+    # with nothing established. Gating the clause on the resolved root actually
+    # bearing a sentinel is what makes the two tiers agree — without it, any
+    # subagent `Write` naming `.touch/memory/` was denied in every project that
+    # has a `.claude/` marker and has never run Touch at all, which the module
+    # docstring twice promises cannot happen.
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        make_tree(tmp, active=None)
+        mem = Path(tmp) / ".touch" / "memory" / "MEMORY.md"
+        mem.parent.mkdir(parents=True, exist_ok=True)
+        call = hook_call("Write", tmp, file_path=str(mem), content="x\n")
+        rc, out = run_guard(call, CLAUDE_PROJECT_DIR=tmp)
+        check(rc == 0 and decision(out) == "allow",
+              "no sentinel (tier 2, anchored): the guard is inert, memory "
+              "clause included")
+        rc, out = run_guard(call)
+        check(rc == 0 and decision(out) == "allow",
+              "no sentinel (tier 3, the climb): same answer — the memory "
+              "clause is not path-dependent")
+        # ...and the control on that same tier: arm the run and the clause
+        # bites, so the arm above is an inertness assertion and not a dead one.
+        (orch_dir(tmp) / "ACTIVE").write_text("task-a\n", encoding="utf-8")
+        rc, out = run_guard(call)
+        check(decision(out) == "deny",
+              "control: tier 3 with an ACTIVE sentinel does deny the memory "
+              "write")
+        rc, out = run_guard(call, CLAUDE_PROJECT_DIR=tmp,
+                            CLAUDE_PLUGIN_OPTION_RUN_SCOPE_GUARD="false")
+        check(decision(out) == "allow",
+              "the off-switch lifts the memory clause too — it is the user's switch")
 
 
 def test_off_switch():
@@ -684,7 +1033,7 @@ def test_fast_inert_never_reads_stdin():
     print("test_fast_inert_never_reads_stdin")
     with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
         proj = Path(tmp) / "proj"
-        (proj / ".claude" / "local-orchestrators").mkdir(parents=True)
+        orch_dir(proj).mkdir(parents=True)
 
         def run_with_open_stdin(project_dir, timeout):
             """Hold stdin open and never write: a guard that reads it hangs.
@@ -715,13 +1064,19 @@ def test_fast_inert_never_reads_stdin():
         check(run_with_open_stdin(proj, 10) == 0,
               "no sentinel in CLAUDE_PROJECT_DIR: exits 0 without reading stdin")
 
-        (proj / ".claude" / "local-orchestrators" / "ACTIVE").write_text(
-            "task-a\n", encoding="utf-8")
+        (orch_dir(proj) / "ACTIVE").write_text("task-a\n", encoding="utf-8")
         check(run_with_open_stdin(proj, 2) is None,
               "control: with an ACTIVE sentinel the guard does read stdin")
 
 
 def test_inert_modes():
+    """"No sentinel → inert" on every tier, not just the anchored ones.
+
+    The anchored arm exercises the fast-inert early return; the unanchored one
+    exercises the path that reads stdin, climbs to the marker and then has to
+    reach the same conclusion the long way. They are different code paths, and
+    the module docstring's claim is about behaviour, so both are pinned.
+    """
     print("test_inert_modes")
     with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
         orch = make_tree(tmp)
@@ -731,6 +1086,13 @@ def test_inert_modes():
                             CLAUDE_PROJECT_DIR=tmp)
         check(rc == 0 and decision(out) == "allow",
               "no ACTIVE sentinel: guard is inert even for subagents")
+        for tool, kwargs in (("Read", {"file_path": str(b)}),
+                             ("Write", {"file_path": str(b),
+                                        "content": "x\n"}),
+                             ("Bash", {"command": f"cat {b}"})):
+            rc, out = run_guard(hook_call(tool, tmp, **kwargs))
+            check(rc == 0 and decision(out) == "allow",
+                  f"...and with no anchor either (tier 3), {tool} is inert too")
 
     rc, out = run_guard("this is not json")
     check(rc == 0 and out == "", "malformed stdin: exit 0, no output, no block")
@@ -741,7 +1103,8 @@ def main():
               test_scoping,
               test_sentinels_reachable, test_halt, test_bash_and_glob,
               test_multi_run, test_project_root_ceiling,
-              test_tasks_root_override, test_off_switch,
+              test_tasks_root_override, test_seg_pattern_is_byte_identical,
+              test_dual_root_candidates, test_memory_writes, test_off_switch,
               test_fast_inert_never_reads_stdin, test_inert_modes):
         t()
     print("-" * 60)

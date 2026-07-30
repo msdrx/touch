@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "touch",
   "displayName": "Touch",
-  "version": "0.2.0",
-  "description": "See what the subagents in a Claude Code session are doing: a read-only, loopback-only, token-gated dashboard over the live agent tree, plus ten skills — four deterministic research and implement orchestration skills, and six engineering-practice ones for architecture, testing, refactoring, design patterns and code review. It reads your transcripts under ~/.claude/projects/, keeps its own state inside the project you run it in (the optional Mongo mirror in docs/mongo.md is off by default), and installs one PreToolUse hook that stays inert unless an orchestration run is active.",
+  "version": "0.3.0",
+  "description": "See what the subagents in a Claude Code session are doing: a loopback-only, token-gated dashboard over the live agent tree, plus ten skills — four deterministic research and implement orchestration skills, and six engineering-practice ones for architecture, testing, refactoring, design patterns and code review. It reads your transcripts under ~/.claude/projects/ and keeps its own state inside the project you run it in (the optional Mongo mirror in docs/mongo.md is off by default). It performs no session verb — nothing here starts or ends an agent loop — and the only files it writes on your behalf are this project's Claude Code memory notes under .touch/memory, editable from a dashboard page whose save side is DISABLED unless you start the dashboard with --allow-memory-write. It installs one PreToolUse hook that stays inert unless an orchestration run is active.",
   "author": {
     "name": "Michael Sadradze",
     "url": "https://github.com/msdrx"
@@ -27,7 +27,7 @@
       "type": "boolean",
       "title": "Run the orchestration scope guard",
       "default": true,
-      "description": "Run the PreToolUse run-scope guard. It is already inert unless .claude/local-orchestrators/ACTIVE exists in your project; set this to false to disable the hook outright."
+      "description": "Run the PreToolUse run-scope guard. It is already inert unless .touch/local-orchestrators/ACTIVE exists in your project; set this to false to disable the hook outright, which also disables the HALT emergency brake and the refusal of subagent writes to .touch/memory."
     }
   }
 }

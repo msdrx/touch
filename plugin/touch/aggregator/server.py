@@ -222,6 +222,7 @@ __all__ = [
     "TOKEN_COALESCE_SECONDS",
     "TICK_SECONDS", "KEEPALIVE_SECONDS", "ARTIFACT_EXTS", "ID_PATTERNS",
     "ServerError", "HttpError", "Response", "header_value",
+    "FILE_CSP", "NO_REFERRER", "STATUS_TEXT", "status_text",
     "valid_id", "optional_id", "one", "flag", "positive_int",
     "Auth", "OriginPolicy", "safe_artifact_path", "artifact_listing",
     "inject_token", "json_default", "json_body",
@@ -316,11 +317,49 @@ class HttpError(Exception):
 
 # --- responses ------------------------------------------------------------
 
+#: Reason phrase per status. Deliberately longer than what this server's routes
+#: emit today (201/204/405/409/411/412/415/422 have no route here yet): the
+#: monitoring server's memory routes need exactly those, keeping one complete
+#: table is cheaper than two half-tables with two fallbacks, and a table that
+#: lists only what today's caller happens to need is how the bug in
+#: :func:`status_text` was written in the first place. No machine check ties the
+#: two servers' tables together, so this is not claimed as a GD-20 twin — the
+#: only pinned twin in this pair is `FILE_CSP`.
 STATUS_TEXT = {
-    200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
-    404: "Not Found", 413: "Payload Too Large", 426: "Upgrade Required",
+    200: "OK", 201: "Created", 204: "No Content",
+    400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+    404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+    411: "Length Required", 412: "Precondition Failed",
+    413: "Payload Too Large", 415: "Unsupported Media Type",
+    422: "Unprocessable Content", 426: "Upgrade Required",
     500: "Internal Server Error", 503: "Service Unavailable",
 }
+
+#: Status class ⇒ what an unnamed status in that class is called.
+_STATUS_CLASS = {1: "Informational", 2: "Success", 3: "Redirection",
+                 4: "Client Error", 5: "Server Error"}
+
+
+def status_text(status: int) -> str:
+    """The reason phrase for `status` — and **never** `"OK"` for one we do not
+    name (SERVER-8).
+
+    The table used to be short enough to lie. Both readers spelled their own
+    fallback: `head_bytes` wrote `STATUS_TEXT.get(status, "OK")`, so the first
+    route to answer `409` would have sent `HTTP/1.1 409 OK` — a conflict wearing
+    a success reason phrase — and `Response.error` wrote `"error": "Error"`,
+    which says nothing. A reason phrase is advisory to every HTTP client, so
+    neither breaks a parser; both mislead the human reading a capture, which is
+    the only audience a reason phrase has. An unnamed status therefore falls
+    back to its **class**, which is derived from the code itself and so cannot
+    contradict it.
+    """
+    status = int(status)
+    named = STATUS_TEXT.get(status)
+    if named:
+        return named
+    return _STATUS_CLASS.get(status // 100, "Unknown Status")
+
 
 #: RFC 7230's `token` — the only shape a header *name* may have. A name is
 #: always written by this file, so one that fails is a code bug and raises.
@@ -382,7 +421,7 @@ class Response:
         alternative — a bare status — sends a reader to read this file instead
         of the message.
         """
-        return cls.json({"error": STATUS_TEXT.get(status, "Error"),
+        return cls.json({"error": status_text(status),
                          "status": status, "message": message},
                         status=status, headers=headers)
 
@@ -392,7 +431,7 @@ class Response:
         # defence-in-depth — but the point of putting the sanitizer in this
         # method was that *every* header the server will ever emit passes
         # through it, and one exempt field is how that stops being true.
-        lines = [f"HTTP/1.1 {self.status} {STATUS_TEXT.get(self.status, 'OK')}",
+        lines = [f"HTTP/1.1 {self.status} {status_text(self.status)}",
                  f"Content-Type: {header_value(self.content_type)}",
                  f"Content-Length: {len(self.body)}",
                  "X-Content-Type-Options: nosniff",
@@ -771,10 +810,37 @@ def safe_artifact_path(state_dir: str, rel: str):
     return full if os.path.isfile(full) else None
 
 
-#: The header set every served file gets. The CSP sandbox puts a report's
-#: scripts in an opaque origin, cut off from this server and from the token
-#: that fetched it; `nosniff` stops a `.md` from being executed as HTML.
-FILE_CSP = "sandbox allow-scripts"
+#: The CSP every served file gets. `sandbox` with **no** `allow-scripts`, the
+#: same value the monitoring server sends — today as an inline
+#: `b"Content-Security-Policy: sandbox\r\n"` literal on its `/` response, not as
+#: a constant this one could import. GD-20 calls the two servers verbatim twins,
+#: so the equality is meant to be machine-checked; that check belongs to the
+#: memory-feature test pass and does not exist yet (`tests/monitoring/` today
+#: only asserts the monitor's own literal and that no `b"…"` line carries
+#: `allow-scripts`). Until it lands, this is two files agreeing on a value
+#: separately — which is why the value is stated here as a value, in one place a
+#: use site cannot re-spell (SECURITY-4).
+#:
+#: The sandbox alone puts a report in an opaque origin, cut off from this server
+#: and from same-origin reads; it does **not** stop a script in the report from
+#: reading its own `location.search` and POSTing the token somewhere — and
+#: agent-generated reports are exactly the documents nobody audited. The monitor
+#: refused `allow-scripts` for that reason from the start and said so in a
+#: comment; this file was copied from it without the CSP and kept the flag for no
+#: recorded reason. The cost is honest and small: a report whose interactivity
+#: needs script no longer gets it here. The gain is that one opened report can no
+#: longer become token-exfil → memory write → persistent injection.
+#:
+#: `nosniff` (in `head_bytes`, on every response) stops a `.md` from being
+#: executed as HTML; `Referrer-Policy: no-referrer` travels with this constant at
+#: every use site, because the URL that fetched the document carries the token in
+#: its query string and a `Referer` header would hand it to whatever the document
+#: links to (SECURITY-5).
+FILE_CSP = "sandbox"
+
+#: The second header of that pair. Named once so a use site cannot set the CSP
+#: and forget this — they are one decision, not two.
+NO_REFERRER = "no-referrer"
 
 
 def inject_token(html: bytes, token: str) -> bytes:
@@ -2214,6 +2280,7 @@ def h_toolresult(api, query, headers) -> Response:
     # that keeps the value *recoverable* rather than merely safe.
     return Response(status=200, body=body, content_type="text/plain; charset=utf-8",
                     headers={"Content-Security-Policy": FILE_CSP,
+                             "Referrer-Policy": NO_REFERRER,
                              "X-Touch-Truncated": "1" if truncated else "0",
                              "X-Touch-Basename": urllib.parse.quote(
                                  spill.get("basename") or "", safe="")})
@@ -2225,11 +2292,29 @@ def h_tasks(api, query, headers) -> Response:
     Plan-only folders are listed with their kind and no controls (RUNSTATE-13):
     a folder with a plan and no run is a real thing the sidebar shows, not an
     error and not an empty task.
+
+    Two shapes of "nothing to list" answer 200 **with a `note`**, because the
+    panel that renders this cannot tell an empty answer from a lost one (UI-13):
+    no root configured at all, and a configured root that is not there. The
+    second is the one the tasks-root move creates — `--tasks-root` is a computed
+    default, so "not configured" is now nearly unreachable, while a resolver
+    that has moved ahead of the directory (or a checkout that has simply never
+    run an orchestration) is ordinary. `legacy.scan` answers `()` for a missing
+    root, correctly and silently, which is precisely why the note has to be here
+    and not inferred from the count.
     """
     model = api.model
     if not model.tasks_root:
         return Response.json({"tasks": [], "count": 0,
                               "note": "no local-orchestrators root configured"})
+    if not os.path.isdir(model.tasks_root):
+        # The note names no path: it is rendered on the page, and the root is
+        # already its own field for a reader that wants it. `exists` is the
+        # machine-readable half of the same fact, so a caller that wants to
+        # branch on it does not have to parse English.
+        return Response.json({"tasks": [], "count": 0, "root": model.tasks_root,
+                              "exists": False,
+                              "note": "local-orchestrators root does not exist yet"})
     reductions = legacy_mod.scan(model.tasks_root)
     rows = [_task_payload(r) for r in reductions]
     rows.sort(key=lambda r: r["task"])
@@ -2273,10 +2358,14 @@ def h_file(api, query, headers) -> Response:
     if full.lower().endswith(".md"):
         # Served as plain text: the page renders the preview with its own
         # escape-first mini renderer (GD-20), so the server never hands a
-        # browser markdown-shaped HTML.
-        return Response(status=200, body=body, content_type="text/plain; charset=utf-8")
+        # browser markdown-shaped HTML. `Referrer-Policy` still applies — a
+        # browser navigated straight to this URL renders the text in a document
+        # of this origin, and the URL carries the token (SECURITY-5).
+        return Response(status=200, body=body, content_type="text/plain; charset=utf-8",
+                        headers={"Referrer-Policy": NO_REFERRER})
     return Response(status=200, body=body, content_type="text/html; charset=utf-8",
-                    headers={"Content-Security-Policy": FILE_CSP})
+                    headers={"Content-Security-Policy": FILE_CSP,
+                             "Referrer-Policy": NO_REFERRER})
 
 
 def h_query(api, query, headers) -> Response:
@@ -2838,8 +2927,13 @@ def default_tasks_root() -> str:
     assertable on its own — the two defaults here used to share one `repo`
     variable derived from the package's own location, which is precisely why
     one of them being wrong (CM-2) was undetectable.
+
+    It **delegates** rather than re-joining the two components: this line used
+    to spell the same root as `legacy.TASK_ROOT` a second time, so a move had to
+    be made twice and a half-landed move showed up as the dashboard and the API
+    listing different tasks for one cwd (LAYOUT-8, PROTOCOL-8).
     """
-    return os.path.join(paths.project_root(), ".claude", "local-orchestrators")
+    return paths.tasks_root()
 
 
 def default_assets() -> str:

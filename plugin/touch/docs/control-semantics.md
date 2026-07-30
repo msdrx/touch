@@ -4,10 +4,17 @@ What Touch may do to a Claude Code session, what it may only *ask*, and what it
 must never claim. This is the detail behind the verb table in `README.md`; the
 two never disagree, because they use one vocabulary.
 
-**Nothing described here is shipped in v0.** The read side is real; the control
-plane is planned (R-34…R-37) and gated. This document exists so that when it
-ships, it ships with these meanings — and so the UI can be built knowing which
+**No verb described in the ladder below is shipped.** The read side is real; the
+control plane is planned (R-34…R-37) and gated. This document exists so that when
+it ships, it ships with these meanings — and so the UI can be built knowing which
 affordances it is not allowed to draw.
+
+One plane *is* shipped and is deliberately not a control verb: the **file plane**
+of §5, which edits this project's Claude Code memory files. It is described here
+because it is the first surface to use §4's separate-route-group rule, and
+because "Touch writes nothing" stopped being true the day it landed — but it acts
+on files, never on a session, so it appears in no verb table and promotes no
+session class.
 
 One rule governs the whole document (D13): **a control is rendered only where
 it can be honest.** A verb that cannot be performed is either absent or shown
@@ -117,8 +124,8 @@ Properties, all load-bearing: it is per-agent; it takes effect only at the next
 tool boundary, so an agent mid-thought keeps thinking; and it is strictly
 blocking, so a slow hook slows the session.
 
-Delivery is settled (R-04 probes 1–2, 2026-07-26, recorded in
-`.claude/local-orchestrators/touch-full-recon/report/probes.md`): a hook added
+Delivery is settled (R-04 probes 1–2, 2026-07-26, recorded in the development
+repository's own run history at `report/probes.md`): a hook added
 to a session's settings **after** it started fires on the very next tool call
 without a restart, from the project `.claude/settings.json` and from a
 `--settings` file, in both `-p` and interactive-PTY modes. So the gate is
@@ -138,11 +145,21 @@ probe" is not the same as "the product does it".
    refusing the route is the security boundary.
 3. **Touch never writes under `~/.claude/`** — not transcripts, not journals,
    not settings. It is a read-only tap. (A hook *installed by the user* into a
-   project's settings is that user's action, not Touch reaching in.)
+   project's settings is that user's action, not Touch reaching in.) The file
+   plane of §5 does not bend this rule, it **relies** on it: the escape hatch is
+   *relocation*, a key in the project's own `.claude/settings.local.json` that
+   asks the CLI to keep this project's memory inside the project, so the files
+   come to Touch instead of Touch reaching into `~/.claude/`. A write whose
+   resolved target sits under `~/.claude` is refused with a named 4xx and never
+   silently followed — which is exactly what keeps this sentence literally true
+   while a write plane exists.
 4. **Controls are command execution**, so they live behind the same posture as
    everything else: loopback by default, per-boot token on every route,
    Origin/Host allowlist at the WebSocket upgrade, and a separate route group
-   from the read-only endpoints.
+   from the read-only endpoints. The memory group of §5 is the first user of
+   that last clause — an exact `(method, route)` table under its own prefix,
+   never a prefix match, never a default handler, and an unknown route under the
+   prefix answers a JSON `404` rather than falling through to a page.
 5. **A control file's path is never restated in two places.** The ingest reads
    the configured path list; it does not hard-code a second copy that can drift
    from the first.
@@ -151,3 +168,61 @@ probe" is not the same as "the product does it".
    file's `permissions.allow` entries were ignored as untrusted). Treat any
    settings file Touch can see as arbitrary code, and never write one on a
    user's behalf without saying so.
+
+---
+
+## 5. The file plane — memory files, and only memory files
+
+Three planes now, not two (GD-13 as amended): **read** (transcripts, journals,
+event streams), **control** (the verb ladder above — unshipped), and **file**
+(this section — shipped, and narrow on purpose).
+
+**What it may touch.** `<project>/.touch/memory/*.md` — the directory Claude
+Code loads this project's auto memory from, once relocated there. Nothing else:
+not another extension, not a nested path, not a file outside that root, not a
+symlink out of it, and never a target that resolves under `~/.claude` or inside
+an installed plugin cache. The resolver is its own function with its own name;
+the task-scoped artifact reader was deliberately **not** widened to reach
+memory, because one reader serving two trees is one rule set serving neither.
+
+**Why it is fenced this hard.** These bytes become model instructions. The index
+is loaded at the start of every conversation in the project; a topic note is
+loaded on demand; a file carrying `pinned:` front matter is loaded into *every*
+session, unasked. A write plane over that directory is a persistent-instruction
+primitive, so it is the one surface where "the token was enough" is not enough.
+
+**The rules, in the order the code applies them** — the order is the security
+property, not a style:
+
+1. the name is validated as a flat name before any filesystem call;
+2. the target is `lstat`ed and a symlink is refused, not resolved;
+3. containment is checked on the realpath of both sides, with explicit refusals
+   for `~/.claude` ancestors and plugin-cache roots;
+4. the write is atomic — `O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW` temp file, `fsync`,
+   `os.replace`, directory `fsync`;
+5. an `ifMatch` checksum is **required** on update and delete (`"*"` is not
+   accepted — there is no legitimate blind overwrite of an instruction file), and
+   a mismatch answers `409` carrying the current state so the page can offer
+   reload / show-both / overwrite instead of a bare retry;
+6. caps are enforced against `Content-Length` before the body is read, and per
+   file and per directory after;
+7. content hygiene: strict UTF-8, no `NUL`, no lone `CR`, no `@`-import outside a
+   code span, no block-level HTML comment, no credential-shaped line, no
+   `pinned:` without an explicit confirmation the UI states in words — every
+   refusal names its **category** and never quotes the offending text;
+8. `DELETE` is a move into a trash directory, never `unlink`;
+9. the previous bytes are kept as a capped `0600` backup;
+10. one JSON line per mutation is appended to `.touch/memory-audit.jsonl`, with
+    its own writer attribution.
+
+**Transport.** Reads may carry the token in the query string like the pages do;
+**writes accept it only from a header**, require `X-Touch-Write: 1` and a present
+same-origin `Origin`, and get no CORS header ever. The whole write half is
+**off by default** and turned on only by `--allow-memory-write` /
+`TOUCH_ALLOW_MEMORY_WRITE` — D13 applies to the disabled state too, so rows
+render disabled *with the reason* rather than absent.
+
+**What it is not.** It emits no `touch-status` event and appends to no
+`events.jsonl`: a memory edit is not a plan card, and a failed save is an HTTP
+status, never a fabricated `failed` badge. It promotes no session class, and
+`CONTROL_ROUTES` on the aggregator stays empty.

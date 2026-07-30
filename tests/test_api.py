@@ -536,8 +536,13 @@ def test_toolresult_rechecks_containment_at_serve_time():
     response = get(api, "/api/toolresult?id=toolu_spill01")
     check(response.status == 200 and response.body == b"the spilled output",
           "a contained spill is served")
-    check(response.headers["Content-Security-Policy"] == "sandbox allow-scripts",
+    # Bare `sandbox`, no `allow-scripts` (SECURITY-4): the opaque origin does not
+    # stop a script in an agent-authored document reading its own tokened URL and
+    # POSTing it out. Paired with `no-referrer` for the same reason.
+    check(response.headers["Content-Security-Policy"] == "sandbox",
           "in a CSP sandbox, as text/plain with nosniff")
+    check(response.headers.get("Referrer-Policy") == "no-referrer",
+          "…and no-referrer, so the tokened URL is not handed onward")
     check(get(api, "/api/toolresult?id=toolu_absent").status == 404,
           "an unrecorded toolUseId is 404")
 

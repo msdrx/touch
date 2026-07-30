@@ -2332,7 +2332,15 @@ function fetchTasks() {
     if (tasksInFlight) return tasksInFlight;
     const job = getJson("/api/tasks").then((body) => {
         state.tasks = (body && body.tasks) || [];
-        setError("tasks", null);
+        // A 200 with an empty list and a note is the server saying WHY it is
+        // empty — no root configured, or a configured root that is not there —
+        // and an empty panel with a blank count says nothing at all. The note
+        // goes through the same per-source slot as a fetch failure, so a panel
+        // that has forgotten its history explains itself instead of looking like
+        // history that ended (UI-13). The trailing "|| null" clears the slot on
+        // the ordinary answer, which carries no note; the slot is a plain
+        // string, so no template literal is involved.
+        setError("tasks", (body && body.note) || null);
     }, (err) => {
         setError("tasks", err.message);
     });

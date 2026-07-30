@@ -58,8 +58,11 @@ and the `PROJECT_DIR` / `PLUGIN_ROOT` split in both templates.
 
 One positive check has no negative twin and needs its own paragraph: the tasks
 root. The shipped hook resolves it as `$ORCH_TASKS_ROOT` >
-`$CLAUDE_PROJECT_DIR/.claude/local-orchestrators` > a marker-ceilinged cwd
-walk-up (GD-T5). A driver whose SKILL.md says `$PWD/.claude/local-orchestrators`
+`$CLAUDE_PROJECT_DIR/.touch/local-orchestrators` > a walk up from the cwd to a
+`.claude/` marker, then that same `.touch/local-orchestrators` beneath it
+(GD-T5 as amended by G10 — the marker directory and the state directory
+deliberately differ). A driver whose SKILL.md says
+`$PWD/.touch/local-orchestrators` (or the legacy `$PWD/.claude/…` spelling)
 agrees with that only on a machine where all three coincide; anywhere else it
 writes `ACTIVE` and `HALT` where the guard does not look, and the guard — and
 the HALT brake — go inert for the whole run without an error or a warning. So
@@ -351,14 +354,19 @@ def test_cycle_reporter_is_where_its_wrapper_looks():
 
 
 #: A tasks-root anchored on a bare `$PWD`. The shipped hook resolves the root as
-#: `$ORCH_TASKS_ROOT` > `$CLAUDE_PROJECT_DIR/.claude/local-orchestrators` >
-#: a marker-ceilinged cwd walk-up; a driver that writes `ACTIVE`/`HALT` (or the
+#: `$ORCH_TASKS_ROOT` > `$CLAUDE_PROJECT_DIR/.touch/local-orchestrators` >
+#: a `.claude/`-marker-ceilinged cwd walk-up joined with the same
+#: `.touch/local-orchestrators`; a driver that writes `ACTIVE`/`HALT` (or the
 #: task folder itself) under `$PWD` instead diverges from that on any machine
 #: where the two differ, and the guard then reports itself inert for the whole
 #: run — silently, HALT included. `${CLAUDE_PROJECT_DIR:-$PWD}` is the
 #: sanctioned tail of the resolution chain and must still pass, so the pattern
-#: matches `$PWD` only when it is the WHOLE anchor.
-BARE_PWD_ANCHOR = re.compile(r'(?<!:-)\$(?:PWD\b|\{PWD\})[^\n]{0,4}?/\.claude/local-orchestrators')
+#: matches `$PWD` only when it is the WHOLE anchor. BOTH root spellings are
+#: matched: `.touch/` is the post-G10 home and `.claude/` is the legacy one the
+#: guard still reads transitionally, so a payload file cannot dodge this ban by
+#: keeping the old literal.
+BARE_PWD_ANCHOR = re.compile(
+    r'(?<!:-)\$(?:PWD\b|\{PWD\})[^\n]{0,4}?/\.(?:touch|claude)/local-orchestrators')
 
 
 def test_tasks_root_is_resolved_not_assumed():
@@ -388,6 +396,15 @@ def test_tasks_root_is_resolved_not_assumed():
                 if BARE_PWD_ANCHOR.search(line)]
         check(not hits,
               f"{path.relative_to(SKILLS_DIR)}: no bare-$PWD tasks root ({hits[:5]})")
+        # G10: the tasks root moved to `.touch/local-orchestrators`. The skills
+        # are the copy-paste source for a driver's own ladder one-liner, so a
+        # stale `.claude/` spelling here re-creates the old tree on the next run
+        # even after the move — the daemons would then write where nothing reads.
+        legacy = [n for n, line in enumerate(text.splitlines(), 1)
+                  if "/.claude/local-orchestrators" in line]
+        check(not legacy,
+              f"{path.relative_to(SKILLS_DIR)}: tasks root is "
+              f".touch/local-orchestrators, not the legacy .claude/ one ({legacy[:5]})")
 
 
 # --- the two-root split in the templates (PLUGIN-SPEC-8)

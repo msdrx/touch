@@ -4,11 +4,12 @@ Reusable, task-agnostic live monitoring for deterministic orchestrator runs
 (Workflow-tool scripts, or any driver that spawns agents). This module ships
 inside the Touch plugin at `${CLAUDE_PLUGIN_ROOT}/shared/monitoring/` and is
 stateless; nothing about it is per-task and nothing about it lives in your
-project. The only project-side path is
-`.claude/local-orchestrators/<task-name>/`, where each task keeps its
+project. The project-side paths are
+`.touch/local-orchestrators/<task-name>/`, where each task keeps its
 orchestration scripts and monitoring state (events, config, checkpoints),
-selected via the `ORCH_STATE_DIR` env var. See the `m-orchestrator` skill for
-the integration checklist.
+selected via the `ORCH_STATE_DIR` env var — and, for the file plane below,
+`.touch/memory/`, the directory Claude Code loads this project's auto memory
+from. See the `m-orchestrator` skill for the integration checklist.
 
 Zero third-party dependencies: bash + Python 3 stdlib + a browser.
 
@@ -18,7 +19,8 @@ Zero third-party dependencies: bash + Python 3 stdlib + a browser.
 |------|------|
 | `status.sh` | Deterministic trace point — agents/orchestrators append status events |
 | `events.jsonl` | Append-only event stream (single source of truth; created on first event) |
-| `monitor_server.py` | HTTP + WebSocket server: serves `monitor.html` at `/`, streams `events.jsonl` at `/ws` (full replay on connect, then live tail; `?task=<name>` selects a task; `&v=2` opts into the snapshot-prelude protocol — see "Wire framing" below), `/tasks` lists every discovered task folder, `/artifacts?task=<name>` lists the task's `.html`/`.md` artifacts, `/file?task=<name>&path=<rel>` serves one (extension-whitelisted, realpath-contained), `/health` probe |
+| `monitor_server.py` | HTTP + WebSocket server: serves `monitor.html` at `/`, streams `events.jsonl` at `/ws` (full replay on connect, then live tail; `?task=<name>` selects a task; `&v=2` opts into the snapshot-prelude protocol — see "Wire framing" below), `/tasks` lists every discovered task folder, `/artifacts?task=<name>` lists the task's `.html`/`.md` artifacts, `/file?task=<name>&path=<rel>` serves one (extension-whitelisted, realpath-contained), `/health` probe. **The file plane** adds `/memory` (serves `memory.html`) and the JSON group `/api/memory/list` + `/api/memory/file` (`GET`/`POST`/`PUT`/`DELETE`) — the only routes on this server that parse the request METHOD, dispatch on `(method, route)`, read a request body and answer `405` with `Allow:` or a JSON `404` inside their own prefix; every other route stays method-blind by design |
+| `memory.html` | The memory editor — a separate full page at `/memory` (not an overlay on the dashboard), listing `<project>/.touch/memory/*.md` with size/age, a per-file state machine (`idle → loading → clean → dirty → saving → saved(sha) \| conflict \| error`), one dirty gate over navigation and `beforeunload`, a slow list poll that never overwrites a dirty buffer or fills the wrong editor, and a `409` offering reload / show-both / overwrite rather than a bare retry. Header states the resolved memory root, whether the CLI agrees with it (`aligned`), the caps, and the posture sentence — these files are loaded into every future session in this project. Non-writable rows render disabled **with the reason**; with the write plane off, that is every row |
 | `monitor.html` | Live dashboard — one card per plan, event-driven, no rebuild for updates; header dropdown switches between running tasks live; a header zoom selector (100% default, up to 200%, persisted like the refresh rate) scales the whole task/stats view uniformly via CSS `zoom` (real layout reflow — cards, dials and log text all grow in the same proportion; home never zooms); task page shows a session timeplan strip with time dials (wall-clock bar of agents-working / idle / stall segments derived from event-stream gaps, a 24-hour clock ruler under it, horizontal sliding for multi-day sessions; hovering it draws a time-point cursor line and previews the agents mid-run at that instant) and an artifacts card (pins the final HTML report + the plan document with size/age; every other file sits behind an "all files" popup grouped plan → reports → notes, `.md` opens an in-page preview; each loop card's header carries a "files" pill opening the same popup filtered to that loop's output); the Orchestrator card's fold arrow reveals, above the decision log, a sub-plans bullet list (state dot + name + state, click jumps to that loop's card); a statistics page (`?task=<name>&view=stats`, linked from the timeplan card) shows large-figure run stats — an entire-flow status tile (running/done/failed with a matching state dot, same fold as the home-grid tile: any running plan or agent wins — a failed loop that was resumed never overrides running loops — while idle a failed plan is the verdict, e.g. a loop awaiting the user after its last attempt failed, and all-green folds to done; while running the sub-line reads as progress — settled/all plans, where settled counts green and red both and "all" is `max(cards seen, declared plans_total)` so unstarted plans count — and the green/red breakdown appears only once the run settled), tokens/cache-hit/burn-rate, plans green/red, agents, attempts and retries, agent durations, dead air and stalls |
 | `decision_watcher.py` | Tails a Workflow run's `journal.jsonl`; emits orchestrator decision events + per-agent token accounting into `events.jsonl` |
 | `orch-config.json` | Optional config: `wf_dir` (workflow transcript dir), `port`, attempt caps `max_plan_attempts` (default 4) / `max_gate_attempts` (default 3) / `max_e2e_attempts` (default 3) / `max_finalgate_attempts` (default 2) that the decision watcher quotes in its retry/exhausted narration, the live token-tick cadence cap `token_tick_secs` (seconds; **default 15**, `0` = no ceiling, i.e. the pre-cadence behavior: a delta line on every poll tick that has a non-zero delta — the env var `ORCH_TOKEN_TICK_SECS` pins the value and WINS over this key, so an operator debugging a live run is never overridden by a config the orchestrator script republishes; a negative value reads as `0`), and `strategy` (`parallel` \| `sequential` \| legacy `serial`, which is the only value that re-enables the retired sequenced plan-close heuristic — **no reference template publishes it**, so that branch is reachable only from a hand-written legacy config; do not "fix" a template to emit `serial`, it resurrects the fabricated `plan failed` badge). The watcher **re-reads this file whenever its mtime moves**, so an orchestrator script that publishes its own caps after the daemons started is still honored (it logs `config reloaded: …`). The **first `orch-config.json` that exists** wins outright — task dir, then the module dir — and if it does not parse the watcher keeps the documented defaults, warns on stderr, and re-reads that same file when it is repaired |
@@ -316,7 +318,25 @@ writers append lines exactly as they always did.
    together, so anything else would make the flag unreachable). Report HTML
    served from `/file` is sent `Content-Security-Policy: sandbox` **without**
    `allow-scripts` plus `Referrer-Policy: no-referrer`, so a script in an
-   agent-generated report cannot read the token out of its own URL.
+   agent-generated report cannot read the token out of its own URL. Both HTML
+   pages carry the same `Referrer-Policy` and a `<meta name="referrer"
+   content="no-referrer">`: their URLs contain the token, and a `Referer` would
+   hand it to whatever they link to.
+   **The memory routes are stricter than the rest of this server**, because the
+   same token now authorizes a write into a file the model will read as
+   instructions. On every `/api/memory/` route, reads included, the Origin/Host
+   gate runs; on a WRITE (`POST`/`PUT`/`DELETE`) the token is accepted **only**
+   from `X-Orch-Token:` or `Authorization: Bearer` — never `?token=`, so a
+   mutation cannot be bookmarked, prefetched or fired from an `<img src>` — an
+   `X-Touch-Write: 1` header is required, a missing `Origin` is NOT forgiven,
+   `Content-Type: application/json` is required (`415` otherwise), and the body
+   is read only against a present `Content-Length` (`411` without one, `400` on
+   `Transfer-Encoding: chunked`, `413` when the length exceeds the cap — checked
+   before a byte is read, `400` on a short read). No `Access-Control-Allow-*`
+   header is ever emitted, on any route, and every memory response carries
+   `Cache-Control: no-store`. The write plane itself is **default-off**:
+   `--allow-memory-write` or `TOUCH_ALLOW_MEMORY_WRITE=1`; `/health` reports
+   `memoryWrite: "on"|"off"` and no path.
    The watcher auto-discovers the most recently active
    `~/.claude/projects/*/*/subagents/workflows/wf_*/journal.jsonl` when not
    configured — set `wf_dir` in `orch-config.json` to pin a specific run.
@@ -333,7 +353,7 @@ writers append lines exactly as they always did.
    `events.jsonl` the sandboxed agents write.
 
    One `monitor_server.py` serves every task: it rescans
-   `.claude/local-orchestrators/*/` on each request (`/tasks` endpoint), and
+   `.touch/local-orchestrators/*/` on each request (`/tasks` endpoint), and
    the dashboard's header dropdown switches the live stream between them —
    no restart needed when a new orchestration starts. `ORCH_STATE_DIR` only
    picks which task is selected by default. `decision_watcher.py` still
@@ -479,18 +499,34 @@ path resolving outside the task folder (traversal/symlink safe).
   directory (`${CLAUDE_PLUGIN_ROOT}/shared/monitoring/`) is code-only and is NOT
   an authoritative state dir — as of 2026-07-28 that is enforced, not merely
   documented. With `ORCH_STATE_DIR` unset, `status.sh` resolves the project's
-  **tasks root** (`$ORCH_TASKS_ROOT` > `$CLAUDE_PROJECT_DIR/.claude/local-orchestrators`
-  > cwd walk-up to a `.claude/` marker > the legacy module-relative path *only
-  if it already exists*), writes to the newest task folder there with a loud
+  **tasks root** (`$ORCH_TASKS_ROOT` > `$CLAUDE_PROJECT_DIR/.touch/local-orchestrators`
+  > cwd walk-up to a `.claude/` marker, then join `.touch/local-orchestrators`
+  onto it — the marker directory and the state directory are deliberately
+  different names, because `.touch/` is created by Touch and gitignored and so
+  cannot mark a project), writes to the newest task folder there with a loud
   stderr warning, and **exits 2** when even that fails; both daemons resolve the
-  same four rungs (`resolve_tasks_root()`, duplicated verbatim and pinned by a
-  source-text equality test) and **exit 1** rather than falling back to the
-  module dir. None of the three will write inside an ancestor holding
-  `.claude-plugin/plugin.json` — a packaged copy must never write into the
+  same **three** rungs (`resolve_tasks_root()`, duplicated verbatim and pinned by
+  a source-text equality test) and **exit 1** rather than falling back to the
+  module dir. The former fourth rung — a module-relative
+  `../../local-orchestrators` — is **gone**: it had nothing to resolve to once
+  the module shipped inside the plugin, and inside an installed copy it would
+  have globbed sibling plugins. None of the three will write inside an ancestor
+  holding `.claude-plugin/plugin.json` — a packaged copy must never write into the
   version-stamped plugin cache: `status.sh` and `decision_watcher.py` refuse
   outright (exit 2 / exit 1, they exist to write), while `monitor_server.py`
   writes no token file and says so on startup, since serving read-only from a
-  plugin cache is fine and it has no other state to write.
+  plugin cache is fine.
+  It does have one other state directory now, and the same rule governs it: the
+  file plane's **memory root**, `<project>/.touch/memory`, resolved through the
+  same project ladder and never derived from any state-dir override. Inside a
+  plugin cache the whole memory family is **disabled** with a banner rather than
+  writing into a directory an update replaces; a memory root that is itself a
+  symlink is refused for the same reason a symlinked target is (it would
+  redirect every save and every backup at once), and a target that resolves
+  under `~/.claude` or out of the root is refused by name. The audit log sits
+  beside the root at `.touch/memory-audit.jsonl` — never in `events.jsonl`,
+  which is the plan-card stream and must never carry a fabricated badge for a
+  file edit.
   The two `.gitignore` lines that used to sanction
   module-dir droppings are gone, and the development repository's
   `tests/test_bootstrap.py` asserts they stay gone. Set `ORCH_STATE_DIR` on
@@ -533,15 +569,25 @@ Your project, the only place a run writes:
 
 ```
 <your project>/
-└── .claude/
-    └── local-orchestrators/<task-name>/   # per task: workflow scripts + state
-        ├── events.jsonl                   # the append-only stream
-        ├── orch-config.json               # the run's config
-        ├── .watcher-state.json            # the watcher's checkpoint
-        ├── orch-scripts/                  # the task's adapted workflow script
-        └── …                              # plan/, findings/, report/ — the run's
-                                           #   own documents, served by /artifacts
+├── .claude/                               # the project MARKER only: settings,
+│                                          #   never run state (and never written
+│                                          #   to by this module)
+└── .touch/
+    ├── local-orchestrators/<task-name>/   # per task: workflow scripts + state
+    │   ├── events.jsonl                   # the append-only stream
+    │   ├── orch-config.json               # the run's config
+    │   ├── .watcher-state.json            # the watcher's checkpoint
+    │   ├── orch-scripts/                  # the task's adapted workflow script
+    │   └── …                              # plan/, report/ and the run's other
+    │                                      #   documents, served by /artifacts
+    ├── memory/                            # Claude Code's auto memory for this
+    │   ├── MEMORY.md                      #   project — the file plane's root;
+    │   ├── <topic>.md                     #   *.md only, 0600, dir 0700
+    │   ├── .history/<name>/                # backup-on-write copies
+    │   └── .trash/                        # what DELETE moves, never unlink
+    └── memory-audit.jsonl                 # one line per memory mutation
 ```
 
 `ORCH_STATE_DIR` names one `<task-name>` folder in the second tree; it never
-points into the first.
+points into the first. The memory root is resolved from the project, not from
+`ORCH_STATE_DIR` — moving one must not move the other.

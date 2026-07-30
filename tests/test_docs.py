@@ -96,9 +96,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True   # no .pyc droppings next to the tests (house
                                  # pattern, item 06; this file imports only
                                  # `tests/_roots.py`, nothing under the payload)
-from _roots import CATALOG, PAYLOAD, SRC   # noqa: E402  (the bytecode flag
-                         # must precede the first import, so these cannot sit
-                         # with the rest)
+from _roots import CATALOG, ORCH, PAYLOAD, SRC   # noqa: E402  (the bytecode
+                         # flag must precede the first import, so these cannot
+                         # sit with the rest)
 
 README = REPO / "README.md"
 CLAUDE = REPO / "CLAUDE.md"
@@ -107,13 +107,19 @@ INCEPTION = REPO / "inception.md"
 CONTROL_DOC = SRC / "docs/control-semantics.md"
 MONGO_DOC = SRC / "docs/mongo.md"
 
-# The run-history artifacts. `.claude/local-orchestrators/` is gitignored and
-# untracked (2026-07-27 amendment), so these files exist in a working tree that
-# ran the orchestrations and in NO clean checkout — not `git archive HEAD`, not
-# a fresh clone, not a packaged plugin. Reading them unguarded made this file
-# crash with FileNotFoundError everywhere but this machine, which is the one
-# thing a before/after gate may not do.
-RECON = REPO / ".claude/local-orchestrators/touch-full-recon"
+# The run-history artifacts. The tasks root is gitignored and untracked
+# (2026-07-27 amendment), so these files exist in a working tree that ran the
+# orchestrations and in NO clean checkout — not `git archive HEAD`, not a fresh
+# clone, not a packaged plugin. Reading them unguarded made this file crash with
+# FileNotFoundError everywhere but this machine, which is the one thing a
+# before/after gate may not do.
+#
+# Named through `_roots.ORCH`, never spelled here: the tree moved from `.claude/`
+# to `.touch/` (G10), and a literal in this file is one more place the next move
+# half-lands. Until the physical `mv` happens these guards therefore SKIP, which
+# is the same answer they give on a clean checkout and exactly what `have()` is
+# for — a wrong ANSWER would be the failure; a printed skip is not.
+RECON = ORCH / "touch-full-recon"
 PLAN = RECON / "plan/touch-full-recon-plan.md"
 PROBES = RECON / "report/probes.md"
 REGISTER = RECON / "plan/findings-register.md"
@@ -985,9 +991,12 @@ def test_plugin_docs_carry_no_local_or_ladder_paths():
         return
     # Two different leaks, one guard: a path that only exists on the author's
     # machine, and a pointer into this repo's orchestration history. Neither
-    # travels — the payload ships no `.claude/local-orchestrators/`, no plan
-    # files and no findings, so a reference to one is a dead link that also
-    # tells a stranger who wrote it and where (DISTRIBUTION-4).
+    # travels — the payload ships no task folders, no plan files and no
+    # findings, so a reference to one is a dead link that also tells a stranger
+    # who wrote it and where (DISTRIBUTION-4). The `local-orchestrators/touch-`
+    # entry below is unchanged by the tasks-root move: G10 keeps the LEAF name,
+    # so the substring that identifies one of this repo's own runs is the same
+    # under `.touch/` as it was under `.claude/`.
     pii = ("/home/", "/Users/", "laniakea", "michaelsadradze", "-home-laniakea")
     ladder = ("-plan.md", "inception.md", "CLAUDE.md", "touch-full-recon",
               "touch-mongo-live", "touch-aggregator", "touch-plugin-pack",
@@ -1847,6 +1856,349 @@ def test_release_script_real_mode_publishes_by_pushing_this_repo():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ============================================================================
+# The tasks-root move (G10/G11) and the memory file plane (G1…G8) — I8/I16, and
+# I5's repo-wide backstop, which lands here because this file is the last of the
+# path rewrites and a backstop can only be green once every rewrite has landed.
+# ============================================================================
+
+#: The retired spelling of the tasks root, assembled from two halves ON PURPOSE.
+#: A guard that spells the string it forbids exempts its own file from itself,
+#: and this file is a document about paths like any other — the `RECON` anchor
+#: above went through `_roots` precisely so no literal would be needed here.
+#: Split, the arm below covers `tests/test_docs.py` too.
+LEGACY_ORCH_ROOT = ".claude/" + "local-orchestrators"
+
+#: Tracked files whose mention of `LEGACY_ORCH_ROOT` is DELIBERATE, each with
+#: the reason it is deliberate — the reasons are the point, because an allowlist
+#: without them decays into "the files that happened to fail".
+#:
+#: Everything not listed (and not under `tests/fixtures/`) must be clean: the
+#: move is finished, so a mention anywhere else is either an instruction that
+#: now leads nowhere or a resolver that would write where nothing reads. New
+#: files are covered by construction — the default is "must not contain it".
+LEGACY_ORCH_ALLOWED = {
+    ".gitignore":
+        "the three legacy ignore lines, kept and relabelled as defence against "
+        "a RE-CREATED old tree (G9)",
+    "inception.md":
+        "a dated snapshot; it gets one dated path note, not a rewrite (G11)",
+    "plugin/touch/CHANGELOG.md":
+        "the 0.1.0 entry records where 0.1.0 actually wrote, and the new entry "
+        "names the old root to say it MOVED — a changelog is dated record",
+    "plugin/touch/aggregator/store.py":
+        "the WAL's own prohibition: the store is never placed under run history",
+    "plugin/touch/hooks/orch_scope_guard.py":
+        "the transitional dual-root read — the legacy root is consulted on "
+        "purpose so no flip order can disarm HALT (I6/G11)",
+    "tests/run_all.sh":
+        "describes the gitignored run history a clean checkout of HEAD lacks",
+    "tests/test_agents.py":
+        "the same clean-checkout note, at its own fixture anchor",
+    "tests/test_ws.py":
+        "the same clean-checkout note, at its own fixture anchor",
+    "tests/test_bin_wrappers.py":
+        "records that a wrapper and the aggregator answer different roots",
+    "tests/test_bootstrap.py":
+        "pins the legacy ignore lines as legacy (the twin of `.gitignore`)",
+    "tests/test_custom_state.py":
+        "reads this repo's run history at its pre-move location",
+    "tests/test_publish_hygiene.py":
+        "cites one historical findings file by path, as evidence",
+    "tests/test_register.py":
+        "reads this repo's run history at its pre-move location",
+    "tests/test_scope_guard.py":
+        "drives the guard's legacy-root arms, which must keep passing",
+    "tests/test_skills_payload.py":
+        "asserts the SKILLS do not carry the legacy spelling",
+    "tests/test_store.py":
+        "asserts the store's prohibition, quoting it",
+    "tests/monitoring/test_shell.py":
+        "asserts `status.sh` no longer carries it, and pins the legacy ignore "
+        "twin",
+    "tests/monitoring/test_watcher.py":
+        "quotes a historical prompt line verbatim",
+}
+
+#: Frozen corpora: hash-pinned in `tests/fixtures/MANIFEST`, and their paths are
+#: what a past run really recorded. Editing one to modernise a path would break
+#: the manifest and falsify the fixture in the same stroke (G11).
+LEGACY_ORCH_ALLOWED_TREES = ("tests/fixtures/",)
+
+
+def tracked_files():
+    """Every path `git ls-files` reports, or None when this is not a checkout.
+
+    `git archive HEAD | tar -x` has no index, and `release.sh` step 2 runs this
+    file in exactly such a tree — so "no git" is a SKIP, never a verdict.
+    """
+    try:
+        res = subprocess.run(["git", "ls-files", "-z"], cwd=str(REPO),
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    return [p for p in res.stdout.split("\0") if p]
+
+
+def test_no_tracked_file_names_the_retired_tasks_root():
+    """I5's backstop: the `.claude` → `.touch` move left nothing behind.
+
+    Every resolver, hook, skill, template, test and doc was edited by hand, and
+    a hand edit over ~40 sites half-lands by default. The failure it guards is
+    not cosmetic: a surviving spelling either sends a reader to a directory that
+    no longer exists, or makes a writer create the old tree again — and a daemon
+    writing where nothing reads is a run with no dashboard and no history.
+
+    Deliberate mentions are allowlisted WITH their reason, and the allowlist is
+    checked for rot: an entry whose file no longer exists (or no longer holds
+    the literal) is itself a failure, so the list cannot quietly become a
+    licence.
+    """
+    print("test_no_tracked_file_names_the_retired_tasks_root")
+    files = tracked_files()
+    if files is None:
+        skip("not a git checkout — the tracked-file backstop needs the index")
+        return
+    offenders, stale = [], []
+    seen = set()
+    for rel in sorted(files):
+        if rel.startswith(LEGACY_ORCH_ALLOWED_TREES):
+            continue
+        try:
+            text = (REPO / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue                      # a symlink or a deleted-but-indexed
+                                          # path is not this guard's business
+        if LEGACY_ORCH_ROOT not in text:
+            continue
+        if rel in LEGACY_ORCH_ALLOWED:
+            seen.add(rel)
+            continue
+        offenders.append(rel)
+    for rel, reason in sorted(LEGACY_ORCH_ALLOWED.items()):
+        if rel not in seen:
+            stale.append(f"{rel} ({reason})")
+    check(not offenders,
+          f"no tracked file outside the reasoned allowlist names the retired "
+          f"tasks root — the run history lives under `.touch/` now (bad: "
+          f"{offenders})")
+    check(not stale,
+          f"every allowlisted exception is still real: an entry whose file is "
+          f"gone or already clean must be DELETED, or the allowlist becomes a "
+          f"licence (stale: {stale})")
+
+
+def test_claude_md_documents_the_touch_state_tree():
+    """G10/G11 + the amended GD-1/GD-16: where state lives, and how to stage it.
+
+    The layout table is the first thing an agent reads, and it described the
+    tree as it was before the move for as long as nobody guarded it (the same
+    DUP-MAP-10 defect, one migration later). Asserted on the ROW, because
+    `token in text` is satisfied by any of the forty other mentions in the file.
+    """
+    print("test_claude_md_documents_the_touch_state_tree")
+    text = read(CLAUDE)
+    rows = [b.strip() for b in guard_blocks(text) if b.lstrip().startswith("|")]
+    row = [r for r in rows if r.startswith("| `.touch/`")]
+    check(row, "CLAUDE.md's layout table has a row whose subject is `.touch/`")
+    if row:
+        cell = flatten(row[0])
+        for token in ("local-orchestrators", "memory", "server.json",
+                      "trust classes"):
+            check(token in cell,
+                  f"the `.touch/` row names {token} — one directory, four "
+                  f"trust classes (LAYOUT-9/PROTOCOL-9)")
+    # The operational half of the amended commit gate. The gate's own wording
+    # ("inside the paths being committed") is pinned by
+    # `test_claude_md_watcher_lifecycle` above and stays; what is new is that
+    # run state is gitignored, so the rule that actually bites is about STAGING.
+    flat = flatten(text)
+    check("pathspec-resolved tracked paths" in flat,
+          "CLAUDE.md scopes GD-1's commit gate to the pathspec-resolved "
+          "TRACKED paths (PROTOCOL-21)")
+    check("never `git add .touch/`" in flat or "never** `git add .touch/`" in flat,
+          "CLAUDE.md carries the staging rule: `git add .touch/memory`, never "
+          "`git add .touch/` (LAYOUT-11)")
+    # PROTOCOL-18: never-delete gained a never-REWRITE half, because a path
+    # migration that "helpfully" updates a finished run's scripts destroys the
+    # only record of what that run actually did.
+    check("never REWRITE" in text or "Never REWRITE" in text
+          or "never rewrite" in flat.lower(),
+          "CLAUDE.md states that a finished task folder is never rewritten "
+          "either, not only never deleted (PROTOCOL-18)")
+
+
+#: Every memory KIND the CLI has, as the G2 scope table must list them. The
+#: point of the table is that `autoMemoryDirectory` moves exactly ONE of these,
+#: and the cost of assuming otherwise is a session quietly loading instructions
+#: from a directory nobody is editing (DOCS-5).
+MEMORY_KINDS = ("MEMORY.md", "autoMemoryDirectory", "CLAUDE.md",
+                "agent-memory", "managed-policy")
+
+
+def test_claude_md_memory_kind_scope_table():
+    print("test_claude_md_memory_kind_scope_table")
+    text = read(CLAUDE)
+    for kind in MEMORY_KINDS:
+        check(kind in text,
+              f"CLAUDE.md's memory-kind scope table accounts for {kind} (DOCS-5)")
+    flat = flatten(text)
+    # The three that make the mechanism a PROGRAM's job rather than a hand edit:
+    # a rejected value is silent, three undocumented env vars outrank the key,
+    # and the key may only be written to the untracked local settings file.
+    check("silently rejected" in flat or "silently" in flat and "rejected" in flat,
+          "CLAUDE.md says a relative or interpolated value is rejected "
+          "SILENTLY — the only reason the mechanism needs verifying (DOCS-1)")
+    for var in ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
+                "CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_MEMORY_STORES"):
+        check(var in text,
+              f"CLAUDE.md names the undocumented override {var} (DOCS-13)")
+    check("settings.local.json" in text,
+          "CLAUDE.md says the key goes in `.claude/settings.local.json` — "
+          "GD-C1's two-key `settings.json` is untouched")
+    check("no relocation mechanism exists" in flat,
+          "the table says out loud which kind CANNOT be moved (subagent "
+          "memory), instead of leaving it to be assumed")
+
+
+def test_memory_feature_docs_are_honest_about_writing():
+    """I16 / SECURITY-13 / UI-6: the docs that a user's trust decision rests on.
+
+    Touch was "read-only" in every document, and one of them is the only
+    pre-install disclosure there is. A write plane that ships behind prose
+    saying it cannot happen is the failure this guards — and the two promises
+    that must survive VERBATIM are the payload README's "renders no button it
+    cannot honestly honour" and its `~/.claude/` read-only tap, both kept true
+    by a carve-out sentence rather than deleted or hedged.
+    """
+    print("test_memory_feature_docs_are_honest_about_writing")
+    mon_doc = SRC / "shared/monitoring/monitoring.md"
+    if not have_plugin(mon_doc) or not have_plugin(PLUGIN_README):
+        return
+    mon = read(mon_doc)
+    flat_mon = flatten(mon)
+    # monitoring.md is normative for this module: the route table, the auth
+    # asymmetry and the state-dir authority section all have to name the group.
+    for token in ("/memory", "/api/memory/list", "/api/memory/file",
+                  "memory.html", "X-Touch-Write", "--allow-memory-write"):
+        check(token in mon, f"monitoring.md documents {token}")
+    check("Allow:" in mon and "405" in mon,
+          "monitoring.md documents the 405 + Allow: answer that the memory "
+          "group alone gives (SERVER-1)")
+    check("never `?token=`" in flat_mon or "never ?token=" in flat_mon,
+          "monitoring.md states that a WRITE takes the token from a header "
+          "only (W4)")
+    check(".touch/memory-audit.jsonl" in mon,
+          "monitoring.md names the audit log — a memory edit never lands in "
+          "events.jsonl (PROTOCOL-20)")
+    check("six shipping files" in read(CONTRIBUTING)
+          or "Six files" in read(CONTRIBUTING),
+          "CONTRIBUTING counts the monitoring core as SIX files (UI-19)")
+    # The control-semantics document: a third plane, named, with the `~/.claude`
+    # ban reaffirmed rather than quietly dropped.
+    ctl = read(CONTROL_DOC)
+    check("file plane" in ctl.lower(), "control-semantics.md has a file plane")
+    check("relocation" in ctl.lower(),
+          "control-semantics.md says relocation is the escape hatch, so the "
+          "`~/.claude` write ban still holds (PROTOCOL-7)")
+    check("never writes under `~/.claude/`" in ctl,
+          "control-semantics.md keeps the `~/.claude` rule verbatim")
+    # The payload README's two literal promises, plus the disclosure itself.
+    readme = read(PLUGIN_README)
+    check("renders no button it cannot honestly honour" in readme,
+          "the shipped README keeps its `:14` promise verbatim (UI-6)")
+    check("never writes anywhere under" in readme and "~/.claude/" in readme,
+          "the shipped README keeps its `~/.claude/` read-only-tap claim")
+    for token in (".touch/memory", "--allow-memory-write", "autoMemoryDirectory",
+                  "X-Touch-Write", "memory-audit.jsonl"):
+        check(token in readme,
+              f"the shipped README discloses {token} before a user installs "
+              f"(SECURITY-13)")
+    check("off by default" in readme.lower(),
+          "the shipped README states the write plane's default posture")
+    # CONTRIBUTING carries the one-line rule for this repo's own memory files.
+    check("write it as if it ships" in read(CONTRIBUTING),
+          "CONTRIBUTING says memory is public now (I9's doc half)")
+    # The CHANGELOG entry a user reads to find out what changed under them —
+    # the TOP one, cut at the next version heading rather than at a version
+    # number spelled here: a literal would have to be edited every release, and
+    # the release it was forgotten in is the one where this arm silently reads
+    # the whole file instead.
+    changelog = read(PLUGIN_CHANGELOG)
+    heads = [m.start() for m in
+             re.finditer(r"^##\s+\[?\d+\.\d+\.\d+", changelog, re.M)]
+    check(len(heads) >= 2,
+          f"the shipped CHANGELOG has more than one version entry "
+          f"(found {len(heads)})")
+    top = changelog[heads[0]:heads[1]] if len(heads) >= 2 else changelog
+    check(".touch/local-orchestrators" in top,
+          "the new CHANGELOG entry states where run folders live now")
+    check("--allow-memory-write" in top,
+          "the new CHANGELOG entry names the flag, not just the feature")
+
+
+def test_release_script_tells_a_dirty_memory_tree_from_a_dirty_payload():
+    """Step 1 after `.touch/memory/*.md` became tracked (I8).
+
+    `git archive HEAD` ships that subtree now, so an uncommitted memory note is
+    a release that publishes yesterday's notes — still a refusal, but a refusal
+    whose message has to say WHICH kind of dirt it found, or the operator goes
+    hunting through the payload for an edited `.md`. Run for real against a
+    fixture, because the sentence is not the property: the partition is.
+    """
+    print("test_release_script_tells_a_dirty_memory_tree_from_a_dirty_payload")
+    if not RELEASE_SH.is_file():
+        check(False, "scripts/release.sh exists")
+        return
+    if shutil.which("git") is None:
+        skip("git is not on PATH — the release script's gates cannot be exercised")
+        return
+    code = script_code(read(RELEASE_SH))
+    check(".touch/memory" in code,
+          "step 1's partition names `.touch/memory` in the CODE, not only in a "
+          "comment")
+    tmp = Path(tempfile.mkdtemp(prefix="release-memdirt-"))
+    try:
+        dev, env, _origin, _log = _release_fixture(tmp)
+        script = dev / "scripts/release.sh"
+        mem = dev / ".touch" / "memory"
+        mem.mkdir(parents=True)
+        (mem / "MEMORY.md").write_text("# Memory index\n", encoding="utf-8")
+        _git(["add", "-A"], dev, env)
+        _git(["commit", "-q", "-m", "memory tree"], dev, env)
+        # Clean again — the committed memory tree must not itself trip step 1.
+        clean = _run([script, "--check"], dev, env)
+        check(clean.returncode == 0,
+              f"a COMMITTED memory tree is not dirt (rc={clean.returncode})")
+        (mem / "MEMORY.md").write_text("# Memory index\n\n- a note\n",
+                                       encoding="utf-8")
+        dirty = _run([script, "--check"], dev, env)
+        section = _step_section(dirty.stdout, 1)
+        check(dirty.returncode != 0,
+              f"an uncommitted memory edit still refuses to publish "
+              f"(rc={dirty.returncode})")
+        check("only dirt is under .touch/memory/" in section,
+              f"step 1 names the memory tree as the thing it found "
+              f"(printed: {_gate_lines(section)})")
+        check("git add .touch/memory" in section,
+              "step 1 names the remedy, staging that subtree BY NAME")
+        # …and the ordinary case still reads as the ordinary case.
+        (dev / PLUGIN_REL / "NOTE.md").write_text("payload dirt\n",
+                                                  encoding="utf-8")
+        both = _run([script, "--check"], dev, env)
+        section = _step_section(both.stdout, 1)
+        check("uncommitted or untracked changes" in section,
+              f"dirt outside the memory tree keeps the original verdict "
+              f"(printed: {_gate_lines(section)})")
+    except (OSError, subprocess.SubprocessError) as exc:
+        skip(f"could not exercise scripts/release.sh here "
+             f"({exc.__class__.__name__}: {exc})")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     for t in (test_claude_md_pointers_and_no_omnigent,
               test_claude_md_true_inventory,
@@ -1891,7 +2243,13 @@ def main():
               test_release_script_gates_the_publish_half_before_the_point_of_no_return,
               test_release_script_check_mode_runs_its_gates_for_real,
               test_release_script_history_gate_blocks_and_takes_only_its_own_knob,
-              test_release_script_real_mode_publishes_by_pushing_this_repo):
+              test_release_script_real_mode_publishes_by_pushing_this_repo,
+              # I5 / I8 / I16 — the tasks-root move and the memory file plane
+              test_no_tracked_file_names_the_retired_tasks_root,
+              test_claude_md_documents_the_touch_state_tree,
+              test_claude_md_memory_kind_scope_table,
+              test_memory_feature_docs_are_honest_about_writing,
+              test_release_script_tells_a_dirty_memory_tree_from_a_dirty_payload):
         t()
     print()
     for message in skips:

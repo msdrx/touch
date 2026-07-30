@@ -5,7 +5,7 @@
 #
 # This is the consumer-facing half of "does it work here". The plugin ships no
 # test suite (GD-T6): the dev repo's tests need fixtures, a git checkout and a
-# runner, none of which belong in a payload — but the eight things that actually
+# runner, none of which belong in a payload — but the nine things that actually
 # break on someone else's machine are cheap to check, so they are checked here:
 #
 #   1. python3 clears the 3.11 floor (its absence is not a check but a refusal:
@@ -17,17 +17,67 @@
 #   5. task state resolves INTO that project, never into this (version-stamped,
 #      swept-on-update) plugin directory — asked of BOTH shipping resolvers,
 #      the monitoring one and the aggregator one, which must agree
-#   6. a loopback port can be bound
-#   7. every wrapper in bin/ kept its exec bit — the one thing a zip round trip
+#   6. auto memory goes where Touch serves it — or is honestly reported as
+#      unmapped (see the next block; this is the check the CLI cannot give you)
+#   7. a loopback port can be bound
+#   8. every wrapper in bin/ kept its exec bit — the one thing a zip round trip
 #      silently destroys (CM-13)
-#   8. one event survives a real write/read round trip through touch-status
+#   9. one event survives a real write/read round trip through touch-status
 #
 # Exits 0 when every check passes, 1 otherwise. Writes nothing except one
-# throwaway event in a temporary directory that it removes on the way out.
+# throwaway event in a temporary directory that it removes on the way out —
+# `--init`, below, is the one mode that writes, and it says so in its name.
+#
+# WHY A MEMORY CHECK IS IN AN INSTALL VERIFIER
+# --------------------------------------------
+#   touch-selfcheck --init
+#
+# maps Claude Code auto memory into the project, at `<project>/.touch/memory`,
+# by merging ONE key — `autoMemoryDirectory` — into `.claude/settings.local.json`
+# (G1). It goes there and never into the committed `.claude/settings.json`:
+# that file is honoured on any machine that merely trusted the folder, which is
+# the hijack GD-C1 removed for marketplaces, and the value is an absolute path
+# that is wrong for every other clone anyway.
+#
+# The key accepts ONLY an absolute or `~/`-prefixed value, and a rejection is
+# SILENT — the validator returns undefined, the CLI falls back to its default
+# directory, and there is no error, no warning and no log line (verified, CLI
+# 2.1.220). A relative `.touch/memory` and a `$VAR`-interpolated path are both
+# inert and both look like they worked. Three undocumented environment
+# variables outrank every settings layer on top of that. So the mapping is not
+# something a program may write and assume: `--init` writes it and then
+# VERIFIES it, and check 6 above re-verifies it on every ordinary run, because
+# "Claude quietly ignores my memory" has no other symptom.
+#
+# `--init` refuses rather than guesses. It will not write a mapping it cannot be
+# right about — from a linked worktree the CLI shares the primary checkout's
+# memory tree while Touch serves this one, and no command makes those agree —
+# and it will not create a memory tree that is not really inside the project: a
+# symlinked `.touch/` puts the tree wherever the link points, git does not
+# descend a symlinked directory, so the one tracked subtree
+# (`.touch/memory/*.md`) would silently track nothing. Every refusal writes
+# nothing at all and says so.
+#
+# All of them are ONE function — `init_refusal` — and check 6 ASKS it rather
+# than guessing which of them apply. A report that ends "`touch-selfcheck
+# --init` maps it to X" where `--init` will refuse advertises a capability this
+# file has decided not to offer, which is the dishonesty the README forbids one
+# plane over ("renders no button it cannot honestly honour"); a report that says
+# "would refuse to map it to X because Y" is the same sentence the writing mode
+# prints, from the same code. Two copies of a gate chain drift, and the drift is
+# always in that direction, because the writer is where the refusals get added.
+#
+# Scope, stated because the key sounds broader than it is: this moves AUTO
+# memory only — the `MEMORY.md` index and its topic notes. Project and user
+# `CLAUDE.md` and subagent memory have no relocation mechanism and do not move.
+# And `--init` moves no memory CONTENT: existing notes were written on the
+# documented promise that they stay machine-local, so relocating them into a
+# tracked tree is a read-then-publish decision for a person, not a side effect
+# of a settings edit.
 #
 # A REPORT IS ONLY BELIEVABLE IF IT IS COMPLETE
 # ---------------------------------------------
-# Checks 1-6 all come out of ONE python3 process, so "the probe crashed at
+# Checks 1-7 all come out of ONE python3 process, so "the probe crashed at
 # check 3" and "the probe only had three checks in it" look identical from
 # here unless the probe says which it was. It says: it ends its report with an
 # `END <n>` sentinel written in a `finally`, and the loop below refuses to
@@ -45,6 +95,10 @@
 # diagnosis reads like a Touch bug. A crash never shortens it, so the shapes
 # that matter still cannot summarize.
 #
+# `--init` reports through the same machinery with its own promised count — a
+# writing mode that cannot say "I wrote nothing after step 2" would be worse
+# than the read-only one, not better.
+#
 # WHY THERE IS NO ENVIRONMENT LOOKUP HERE
 # ---------------------------------------
 # A bin/ process receives NONE of the three plugin variables the harness
@@ -58,6 +112,44 @@ ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
     echo "touch-selfcheck: cannot locate the plugin root from $0" >&2
     exit 1
 }
+
+# Two modes, and the split is deliberate: the default one is a REPORT (it
+# writes nothing outside a temporary directory) and `--init` is the only thing
+# in this file that touches the project. An operator who typed the command the
+# README offers cannot be surprised by a settings edit.
+#
+# The arity check comes FIRST, above the dispatch, so every spelling of "too
+# many arguments" is refused the same way: with the check below the `case`,
+# `--help extra` printed usage and exited 0 while `--init extra` exited 2, and a
+# command whose strictness depends on which mode you mistyped is one nobody can
+# reason about. `$#` is tested rather than `${1:-}` for the same reason: no
+# argument and one EMPTY argument are different requests, and only the first is
+# a request for the default mode.
+MODE=check
+if [ "$#" -gt 1 ]; then
+    echo "touch-selfcheck: takes at most one argument (try --help)" >&2
+    exit 2
+fi
+if [ "$#" -eq 1 ]; then
+    case "$1" in
+        --init) MODE=init ;;
+        -h|--help)
+            echo "usage: touch-selfcheck [--init]"
+            echo
+            echo "  (no argument)  verify this installation; writes nothing"
+            echo "  --init         map Claude Code auto memory to"
+            echo "                 <project>/.touch/memory by merging"
+            echo "                 autoMemoryDirectory into"
+            echo "                 .claude/settings.local.json, then verify it"
+            exit 0
+            ;;
+        *)
+            echo "touch-selfcheck: unknown argument '${1}' (try --help)" >&2
+            exit 2
+            ;;
+    esac
+fi
+
 command -v python3 >/dev/null 2>&1 || {
     # Not reported as a failed check: with no interpreter there is nothing to
     # check, so this is the same one-line refusal every other wrapper gives.
@@ -90,19 +182,27 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/touch-selfcheck.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/scratch"
 
-# --- checks 1-6 run inside ONE interpreter: everything after the floor check
-# depends on the import, and re-launching python3 per check would make the
-# report slower than the server it is checking.
+# --- checks 1-7 (and, under `--init`, the whole of the init mode) run inside
+# ONE interpreter: everything after the floor check depends on the import, and
+# re-launching python3 per check would make the report slower than the server it
+# is checking. One program, one mode argument — the memory ladder that `--init`
+# writes against and the ladder check 6 reads are then the SAME code, which is
+# the only way "it wrote it" and "the CLI will honour it" can be one answer.
 PY_RC=0
 python3 -c '
+import json
 import os
+import re
 import socket
 import sys
+import tempfile
+import unicodedata
 
 #: How many PASS/FAIL lines a COMPLETE run emits. Declared to the caller in the
 #: END sentinel below, because the caller cannot otherwise tell a short report
-#: from a short list of checks.
-EXPECTED = 6
+#: from a short list of checks. `--init` has its own, shorter list.
+EXPECTED = 7
+INIT_EXPECTED = 4
 
 DONE = []
 
@@ -127,6 +227,795 @@ def stop_early():
     EXPECTED = len(DONE)
 
 
+def oneline(value, limit=None):
+    """`value` collapsed to ONE whitespace-normalized line, optionally capped.
+
+    Every report line is read back by the shell loop below as exactly one line,
+    and the summary refuses a report whose line count disagrees with the END
+    sentinel. So a message carrying a newline — an exception text over a path
+    with one in it, a JSON error quoting a multi-line document, an environment
+    variable somebody exported with a line break — would arrive as one report
+    line plus one unrecognised line, and the run would gain a SECOND, confusing
+    failure about the probe itself underneath the line that already named the
+    real fault. Everything interpolated from the outside world goes through here.
+
+    The cap is OFF by default, and that is the decision: truncating a path or an
+    exception text throws away the half of the line a reader has to act on, and
+    this file is only worth running if its lines can be believed and pasted. It
+    is passed only where the content is arbitrary and unbounded — the value of an
+    environment variable, a settings value somebody typed — never for a path this
+    program resolved itself.
+    """
+    text = " ".join(str(value).split())
+    if limit is None or len(text) <= limit:
+        return text
+    return text[:limit - 3] + "..."
+
+
+#: The three environment variables that outrank every settings layer in the
+#: memory resolver (DOCS-13, read out of the shipped bundle; the first verified
+#: live). NONE of them is documented, the first is consulted BEFORE policy
+#: settings, and the second replaces the base of the default location — so with
+#: any of them set, the settings file in front of you is not what decides where
+#: memory goes. They are a diagnosis trap, never a mechanism: this file reports
+#: them and refuses to read them.
+MEMORY_OVERRIDES = ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
+                    "CLAUDE_CODE_REMOTE_MEMORY_DIR",
+                    "CLAUDE_MEMORY_STORES")
+
+#: The ONE documented relocation key, and the ONE file it may be written to
+#: (G1). The committed sibling `.claude/settings.json` is deliberately not a
+#: candidate — see the header.
+MEMORY_KEY = "autoMemoryDirectory"
+LOCAL_REL = os.path.join(".claude", "settings.local.json")
+
+
+def primary_checkout(project):
+    """The PRIMARY checkout of the repository `project` belongs to (DOCS-10).
+
+    Auto memory is documented as shared by every worktree of one repository, so
+    the mapping has to name the primary checkout: pointing each linked worktree
+    at its own `.touch/memory` fragments memory per worktree, which is the
+    opposite of the documented behaviour.
+
+    Resolved by READING `.git`, not by shelling out: a payload that could only
+    configure memory on a machine with git on PATH would fail on exactly the
+    machines that install from an archive, and `git rev-parse --show-toplevel`
+    answers with the LINKED worktree anyway — the wrong one of the two paths
+    this function exists to tell apart. In a linked worktree `.git` is a FILE
+    holding `gitdir: <primary>/.git/worktrees/<name>`, and `<gitdir>/commondir`
+    points back at the primary `.git`, whose parent is the checkout. Anything
+    unrecognised falls back to `project`, which is the right answer for a plain
+    clone and for no git at all.
+    """
+    marker = os.path.join(project, ".git")
+    if not os.path.isfile(marker):        # a directory, or absent: this is it
+        return project
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            first = fh.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return project
+    if not first.startswith("gitdir:"):
+        return project
+    gitdir = first.split(":", 1)[1].strip()
+    if not gitdir:
+        return project
+    if not os.path.isabs(gitdir):
+        gitdir = os.path.join(project, gitdir)
+    try:
+        with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as fh:
+            rel = fh.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        rel = ""
+    if rel:
+        common = os.path.normpath(os.path.join(gitdir, rel))
+    elif os.path.basename(os.path.dirname(gitdir)) == "worktrees":
+        common = os.path.dirname(os.path.dirname(gitdir))
+    else:
+        return project
+    if os.path.basename(common) != ".git":
+        # A worktree of a BARE repository: `commondir` points at the bare
+        # repository itself (`srv.git`), which has no working tree, so "the
+        # parent of the common .git directory" names the directory the bare
+        # repository happens to sit in — not a checkout, not a project, and
+        # outside every worktree the `.gitignore` carve covers. There is no
+        # primary checkout to share with, so this worktree is the answer.
+        return project
+    parent = os.path.dirname(common)
+    return parent if os.path.isdir(parent) else project
+
+
+def memory_value(raw, tilde_ok=True):
+    """What the CLI resolves a configured value TO, or None when it drops it.
+
+    Mirrors the shipped validator (DOCS-1, CLI 2.1.220): a `~/` value is
+    expanded and refused if it climbs, everything else must ALREADY be
+    absolute, and the result is normalized with trailing separators removed. A
+    rejection returns undefined there, and undefined falls through to the
+    default location with no error, no warning and no log line. There is no
+    variable interpolation either, so the obvious portable spelling
+    (a `$VAR` path) is inert and looks like it worked. That silence is the
+    entire reason this check exists.
+
+    The result is NFC-normalized because the validator normalizes too: on a
+    filesystem that hands back decomposed Unicode (HFS+ is the famous one) a
+    path with an accent in it compares unequal to the answer the CLI gives for
+    the same directory, and the report would be a confident FAIL over two
+    spellings of one name. `same_dir` normalizes the other side.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    value = raw
+    if tilde_ok and (value.startswith("~/") or value.startswith("~\\")):
+        rest = value[2:]
+        if ".." in re.split(r"[/\\]", rest):
+            return None
+        value = os.path.join(os.path.expanduser("~"), rest)
+    norm = os.path.normpath(value).rstrip("/\\")
+    if (not os.path.isabs(norm) or len(norm) < 3
+            or re.match(r"^[A-Za-z]:$", norm) or norm.startswith("\\\\")
+            or norm.startswith("//") or "\0" in norm):
+        return None
+    return unicodedata.normalize("NFC", norm)
+
+
+def same_dir(a, b):
+    """True when two path strings name the same directory.
+
+    Lexical on purpose — realpath would resolve a directory that does not exist
+    yet to itself and one that does through its symlinks, so a mapping written
+    before the directory exists and read after it does could compare unequal to
+    itself. Normalized the way the CLI normalizes (NFC), for the reason
+    `memory_value` says.
+    """
+    return (unicodedata.normalize("NFC", os.path.normpath(a))
+            == unicodedata.normalize("NFC", os.path.normpath(b)))
+
+
+def read_setting(path):
+    """(raw value, complaint) for one settings file; an absent file is silent.
+
+    A complaint here is UNREADABLE, never "ignored": the file could not be
+    parsed, so whether it configures memory is unknown. The caller keeps that
+    distinction — see `effective_memory` — because "I cannot read this layer" and
+    "this layer holds a value nobody honours" are different reports and only the
+    second one is about a mapping.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return None, "%s could not be read (%s)" % (path, type(exc).__name__)
+    if not isinstance(data, dict):
+        return None, "%s does not hold a JSON object" % path
+    raw = data.get(MEMORY_KEY)
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, "%s sets %s to a non-string" % (path, MEMORY_KEY)
+    return raw, None
+
+
+def config_dir():
+    """The CLI configuration directory: `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+
+    Absolute, so a relative `$CLAUDE_CONFIG_DIR` cannot put a `..` into a report
+    line — a path a reader cannot paste into `ls` is a diagnosis they have to
+    reconstruct.
+    """
+    return os.path.abspath(os.environ.get("CLAUDE_CONFIG_DIR")
+                           or os.path.join(os.path.expanduser("~"), ".claude"))
+
+
+def contained(base, path):
+    """True when `path` IS `base` or sits under it, symlinks resolved.
+
+    Both sides through realpath, never one abspath against one realpath: that
+    mix is the classic containment bypass, and this one is load-bearing — it is
+    what keeps `--init` from writing under the CLI configuration directory,
+    which is a read-only tap for this project by hard rule (PROTOCOL-7).
+
+    The separator is appended only when `base` does not already end in one, so
+    the ROOT directory works: `"/" + os.sep` is `"//"`, which nothing starts
+    with, and a `contained("/", …)` that answered False for every path would
+    switch a gate off rather than fail loudly. Reachable through
+    `$CLAUDE_CONFIG_DIR=/`, which is a silly thing to set and exactly the kind of
+    silly thing a containment check may not depend on nobody setting.
+    """
+    try:
+        base = os.path.realpath(base)
+        full = os.path.realpath(path)
+    except OSError:
+        return False
+    if full == base:
+        return True
+    return full.startswith(base if base.endswith(os.sep) else base + os.sep)
+
+
+def settings_layers(project):
+    """(label, file) per documented settings layer, HIGHEST precedence first.
+
+    The full order in the bundle is: the environment overrides above, policy
+    (managed) settings, `--settings` flag settings, then — once the folder is
+    trusted — local settings, project settings, and finally user settings.
+    `--settings` is an argument to a session this process is not part of, so it
+    is unknowable from here and is named in the report instead of pretended
+    away. Trust is not modelled either: a session that reads this project has
+    already accepted the dialog.
+    """
+    if sys.platform == "darwin":
+        managed = "/Library/Application Support/ClaudeCode/managed-settings.json"
+    else:
+        managed = "/etc/claude-code/managed-settings.json"
+    config = config_dir()
+    return (("managed policy settings", managed),
+            ("local settings", os.path.join(project, LOCAL_REL)),
+            ("project settings", os.path.join(project, ".claude", "settings.json")),
+            ("user settings", os.path.join(config, "settings.json")))
+
+
+def effective_memory(project):
+    """(label, directory, complaints) — where auto memory actually goes.
+
+    `directory` is None when no layer configures the key at all, which means the
+    default location under the CLI config dir applies.
+
+    Each complaint is a (kind, text) pair, and the KIND is what keeps the report
+    from saying something untrue:
+
+    * `dropped` — a layer sets the key to a value the validator refuses. That is
+      definitive: the CLI falls through to the next layer, so the value never
+      becomes the answer, but it is still a setting somebody wrote, nobody
+      honours, and the CLI will never mention.
+    * `blind` — a layer that OUTRANKS whatever eventually won could not be read
+      or is not a JSON object. Nothing can be concluded: that file may hold the
+      key and would beat the winner. Detected by position — the loop walks the
+      layers in precedence order, so a complaint raised while `winner` is still
+      None comes from a layer above it.
+    * `blind-below` — the same fault in a layer the winner already outranks. It
+      cannot change the answer, so it is a footnote.
+
+    A blind layer is NOT a broken mapping, and the difference matters in
+    practice: a trailing comma in `~/.claude/settings.json` is an ordinary state,
+    and reporting it as "auto memory mapping is not honoured" is both false and
+    the kind of wrong sentence that makes a reader distrust the whole report.
+    """
+    complaints = []
+    raw = os.environ.get(MEMORY_OVERRIDES[0])
+    if raw:
+        # This one is resolved with tilde expansion OFF: absolute or nothing.
+        resolved = memory_value(raw, tilde_ok=False)
+        if resolved:
+            return "$" + MEMORY_OVERRIDES[0], resolved, complaints
+        complaints.append(("dropped",
+                           "$%s is set but is not an absolute path, so even it "
+                           "is ignored" % MEMORY_OVERRIDES[0]))
+    winner = None
+    for label, path in settings_layers(project):
+        raw, complaint = read_setting(path)
+        if complaint:
+            complaints.append(("blind" if winner is None else "blind-below",
+                               oneline(complaint)))
+            continue
+        if raw is None:
+            continue
+        resolved = memory_value(raw)
+        if resolved is None:
+            complaints.append((
+                "dropped",
+                "%s (%s) sets %s to %r, which is silently ignored — it must be "
+                "an absolute or ~/ path, and no variable is interpolated"
+                % (label, path, MEMORY_KEY, oneline(raw, 120))))
+        elif winner is None:
+            winner = (label, resolved)
+    if winner is None:
+        return None, None, complaints
+    return winner[0], winner[1], complaints
+
+
+def complaints_by_kind(complaints, kind):
+    """The texts of one kind, in the order they were raised."""
+    return [text for k, text in complaints if k == kind]
+
+
+def memory_escape(project, intended, primary):
+    """Why `intended` is not a place this project may keep memory, or None.
+
+    ONE rule with TWO callers: `--init` refuses to create such a directory (it
+    is the last gate of `init_refusal`), and check 6 refuses to call an EXISTING
+    mapping green. Two copies of the rule would drift into the state where the
+    verifier certifies what the writer refuses, and the sub-plan this file
+    implements is the one that owns the rule.
+
+    The arms, worst-first by how convincingly they look correct:
+
+    * a SYMLINKED `.touch/` or `.touch/memory` — the mapping reads right, the CLI
+      honours it, and the report would be green, while the memory tree sits
+      wherever the link points: possibly on another filesystem, possibly under
+      `~/.claude`. git does not descend a symlinked directory, so the ONE tracked
+      subtree of `.touch/` (`.touch/memory/*.md`, G9) would silently track
+      nothing — every migrated note invisible to the release gate, with no red
+      line anywhere. Refused rather than resolved, exactly as the sibling write
+      path refuses a symlinked target (G7 step 2).
+    * resolving INTO the CLI configuration directory — writing there is forbidden
+      outright (PROTOCOL-7). Both spellings are checked, `$CLAUDE_CONFIG_DIR` and
+      a literal `~/.claude`, because either reaches the same tree and only one of
+      them is under the environment.
+    * resolving OUTSIDE the project — the containment arm. Skipped in a linked
+      worktree, where the mapping is MEANT to name the primary checkout
+      (DOCS-10); that divergence is a different report, and the caller makes it.
+
+    Symlinks are tested with `islink` and containment with realpath on both
+    sides: one abspath against one realpath is the classic bypass, and it is the
+    bypass that made this whole gate necessary — the plugin-cache gate caught the
+    symlinked case only because it happened to realpath both of its arguments.
+
+    The git-tracking half of the symlink sentence is unconditional and the
+    "outside the project" half is not, because a link can point INSIDE the
+    project (`.touch -> ./state` is a real layout). Refusing it is still right —
+    git does not descend a symlinked directory whatever it points at, so the G9
+    carve matches nothing either way — but saying "the memory tree is not in the
+    project" over a target that plainly is would be a false sentence in a file
+    that spends a paragraph on why its lines have to be believable.
+    """
+    def symlink_reason(link):
+        target = os.path.realpath(link)
+        where = ("" if contained(project, target)
+                 else ", which is outside the project")
+        return ("%s is a symlink (to %s%s); git does not descend a symlinked "
+                "directory, so nothing under the memory tree would be tracked"
+                % (link, target, where))
+
+    if os.path.islink(intended):
+        return symlink_reason(intended)
+    parent = os.path.dirname(intended)
+    if os.path.islink(parent):
+        return symlink_reason(parent)
+    resolved = os.path.realpath(intended)
+    home_claude = os.path.join(os.path.expanduser("~"), ".claude")
+    if contained(config_dir(), resolved) or contained(home_claude, resolved):
+        return ("it resolves to %s, inside the Claude Code configuration "
+                "directory, which is a read-only tap for Touch (PROTOCOL-7)"
+                % resolved)
+    if same_dir(primary, project) and not contained(project, resolved):
+        return "it resolves to %s, which is outside the project" % resolved
+    return None
+
+
+def init_refusal(root, project, primary, intended, settings, served):
+    """Why `--init` will not write here, as a `because …` clause, or None.
+
+    ONE gate chain, TWO callers, and the second one is the whole point: `run_init`
+    prints it as `FAIL … (nothing was written)`, and check 6 prints it as
+    "`touch-selfcheck --init` would refuse to map it to X because <this>". While
+    the chain lived inside `run_init` and the report guessed which parts of it
+    applied, the report guessed wrong in three of five states — it told a linked
+    worktree, a `$HOME` project and a project inside the plugin cache to run a
+    command that refuses them, and for the worktree it went further and stated the
+    capability ("the mapping names the primary checkout, which every worktree
+    shares") that this implementation had deliberately decided not to offer. A
+    verifier advertising a write its own writer declines is the failure this file
+    exists to prevent, one plane over.
+
+    The gates, in the order they must be asked — each one is the reason the NEXT
+    one cannot be trusted on its own:
+
+    1. **No `.claude/` in the project root.** Nothing here may guess: writing a
+       settings file into whatever directory the shell happened to be in is how a
+       mapping ends up in a tree nobody runs Claude Code from. (Check 6 never
+       sees this one: it reports the same state in its own words one line under
+       check 4, which has already named the wrong `cd`.)
+    2. **`$HOME`, or the CLI configuration directory.** Gate 1 passes for `$HOME`
+       — it holds a `.claude/` — and `~/.claude` is a read-only tap by hard rule
+       (PROTOCOL-7). Both spellings are reachable: the project directory arrives
+       through the environment and `$CLAUDE_CONFIG_DIR` can point anywhere.
+    3. **Inside the plugin tree.** The plugin root is a version-stamped cache: an
+       update re-copies it and a sweep removes the old one about a fortnight
+       later, so anything durable written there is data loss with extra steps —
+       the reasoning check 5 applies to task state (Part D-8). BOTH targets are
+       tested, the settings file and the directory the mapping names, because a
+       linked worktree puts the second outside the first.
+    4. **A linked worktree.** The CLI shares one memory tree per repository, so
+       the value must name the primary checkout (DOCS-10), while
+       `paths.memory_root()` — what the memory page serves — is anchored on the
+       project Touch was started in. No sequence of commands run from here makes
+       those agree, so the write is refused BEFORE it happens rather than
+       performed and then reported red.
+    5. **`memory_escape`** — the directory itself, which the four gates above
+       cannot see: `intended` is built by `os.path.join` and never resolved, so a
+       symlinked `.touch/` walked past all of them.
+    """
+    if not os.path.isdir(os.path.join(project, ".claude")):
+        return ("there is no .claude/ directory in the project root %s — run "
+                "--init from the project you use Claude Code in" % project)
+    if (contained(config_dir(), settings)
+            or os.path.realpath(project) == os.path.realpath(
+                os.path.expanduser("~"))):
+        return ("the project root %s is your home directory or the Claude Code "
+                "configuration directory, and that tree is a read-only tap for "
+                "Touch (PROTOCOL-7)" % project)
+    for what, target in (("the settings file %s" % settings, settings),
+                         ("the memory directory %s" % intended, intended)):
+        if contained(root, target):
+            return ("%s is inside the Touch plugin tree %s, a version-stamped "
+                    "cache that an update sweeps, so nothing durable may be "
+                    "written there" % (what, root))
+    if not same_dir(intended, served):
+        return ("this is a linked worktree: the mapping would have to name %s "
+                "(the primary checkout, which every worktree shares) while Touch "
+                "serves %s from here — the memory page would edit files no "
+                "session reads; run this from %s" % (intended, served, primary))
+    return memory_escape(project, intended, primary)
+
+
+def check_memory(root, project, memory_rel, served, in_project=True):
+    """(ok, text) for check 6 — the mapping, judged rather than assumed.
+
+    `served` is where THIS installation serves memory from, asked of the shipped
+    resolver (`paths.memory_root()`) rather than re-derived here: the question is
+    "would the memory page edit files a session reads", and only one half of that
+    comparison belongs to the CLI. Re-deriving both halves in this file measures
+    this file against itself, which is how a verifier reports PASS over a real
+    divergence.
+
+    The verdict is decided on the WINNER — the layer the CLI would actually
+    honour — and never on the mere presence of a complaint. A value the
+    validator drops is not a mapping: it loses to any lower layer that resolves,
+    so reporting "not honoured" because *some* layer holds an inert value calls
+    a correct install broken (and `--init` would then exit non-zero straight
+    after succeeding). A dropped value is the verdict only when nothing won at
+    all; otherwise it is a footnote on the surviving line, because it is still a
+    setting somebody wrote that nobody honours and the CLI will never mention.
+
+    States, and only one of them is red on a machine that never asked for the
+    mapping:
+
+    * an undocumented environment override is set — red: it outranks every
+      settings layer, so nothing this function reads decides anything.
+    * a settings layer that outranks the winner could not be READ — red, and the
+      sentence says "cannot verify", not "not honoured": an unparseable file is
+      not a mapping, and it may well hold one.
+    * nothing configures the key — auto memory stays in the default location,
+      which is not a broken install but an unadopted feature. Green, and the
+      line names the command that adopts it — or, when `init_refusal` says that
+      command will refuse this project, says so and why instead. Every line that
+      names `--init` as the remedy asks the writers own gate chain first; that
+      is the ONE rule holding the two modes together, and it is asked here rather
+      than restated, because a restatement is a copy and copies drift.
+    * the winner is where Touch serves memory — the one green mapped state,
+      unless the directory itself escapes the project (`memory_escape`).
+    * the winner is the intended primary checkout but Touch serves a DIFFERENT
+      directory (a linked worktree: the CLI shares one memory tree across
+      worktrees, `paths.memory_root()` is anchored on the project it was run
+      from) — red, naming both, because this is the exact split the check exists
+      for and each half looks correct on its own.
+    * the winner is anywhere else — red, because the memory page would edit
+      files no session reads, and this is the state the CLI reports with
+      complete silence.
+    """
+    primary = primary_checkout(project)
+    intended = os.path.join(primary, memory_rel)
+    settings = os.path.join(project, LOCAL_REL)
+
+    def refusal():
+        """What `--init` would say instead of writing, or None — asked, not guessed.
+
+        Every branch below that offers `--init` as the remedy goes through here
+        first. It is a function rather than a value so the gate chain (which
+        stats the plugin tree, the config dir and the memory directory) is not
+        run for the states that never mention the command.
+        """
+        return init_refusal(root, project, primary, intended, settings, served)
+
+    # Named rather than hidden: in a linked worktree the mapping deliberately
+    # points OUT of this checkout, at the primary one, because that is the
+    # sharing behaviour the CLI documents (DOCS-10). A reader who is not told
+    # will read the path as a bug.
+    shared = ("" if same_dir(primary, project)
+              else " [a linked worktree, so the mapping names the primary "
+                   "checkout %s, which every worktree shares]" % primary)
+    overridden = [name for name in MEMORY_OVERRIDES if os.environ.get(name)]
+    label, effective, complaints = effective_memory(project)
+    dropped = complaints_by_kind(complaints, "dropped")
+    blind = complaints_by_kind(complaints, "blind")
+    outranked = complaints_by_kind(complaints, "blind-below")
+    if overridden:
+        # Every other branch prints a directory, and a reader who is told only
+        # "unset $X" has nothing to go and look at. But only the FIRST of the
+        # three is modelled by `effective_memory`: with either of the other two
+        # set, the settings answer is not the effective one, and printing it as
+        # "memory currently resolves to X" in the same sentence that says nothing
+        # below the variable can be trusted is a contradiction the reader has to
+        # resolve. So those two print their own value instead, and say the
+        # location is not knowable from here.
+        unmodelled = [n for n in overridden if n != MEMORY_OVERRIDES[0]]
+        if unmodelled:
+            where = ("the effective location cannot be determined from here: %s"
+                     % "; ".join("$%s=%s" % (n, oneline(os.environ.get(n, ""), 60))
+                                 for n in unmodelled))
+        else:
+            where = ("memory currently resolves to %s"
+                     % (effective or "the CLI default location"))
+        return False, ("auto memory: unset %s — undocumented, outranks every "
+                       "setting, so nothing below it can be trusted (%s)"
+                       % (", ".join("$" + n for n in overridden), where))
+    if blind:
+        # A layer ABOVE the winner could not be read, so this cannot certify
+        # anything — and must not pretend either way. Deliberately NOT the "not
+        # honoured" sentence: an unparseable settings file is not a mapping, and
+        # it may hold the one that wins.
+        if effective is None:
+            return False, ("auto memory cannot be verified: %s — nothing else "
+                           "configures %s, so memory is in the CLI default "
+                           "location unless that file maps it (fix the file, "
+                           "then re-run)" % ("; ".join(blind), MEMORY_KEY))
+        return False, ("auto memory looks mapped to %s (%s), but %s — and that "
+                       "layer outranks it, so where memory goes is not knowable "
+                       "from here (fix the file, then re-run)"
+                       % (effective, label, "; ".join(blind)))
+    if effective is None and dropped:
+        return False, "auto memory mapping is not honoured: " + "; ".join(dropped)
+    note = ("" if not dropped
+            else " (also, ignored elsewhere: %s)" % "; ".join(dropped))
+    if outranked:
+        note += (" (also unreadable, but outranked: %s)" % "; ".join(outranked))
+    if effective is None:
+        if not in_project:
+            # The cwd is not a project, so `--init` would refuse this directory
+            # (its own gate says so) — recommending it here sends the reader to
+            # a second refusal. Check 4, one line above, already named the fault.
+            return True, ("auto memory is unmapped and stays in the CLI default "
+                          "location — run `touch-selfcheck --init` from your "
+                          "project to map it there%s" % note)
+        why = refusal()
+        if why:
+            # Same reason as the branch above: the hint must not name a command
+            # that will refuse. It is the writing modes OWN gate chain that
+            # decides, so this cannot advertise a write `--init` declines — and
+            # the sentence a reader gets here is the sentence they would have got
+            # from running it.
+            return True, ("auto memory is unmapped and stays in the CLI default "
+                          "location — `touch-selfcheck --init` would refuse to "
+                          "map it to %s because %s%s" % (intended, why, note))
+        return True, ("auto memory is unmapped and stays in the CLI default "
+                      "location — `touch-selfcheck --init` maps it to %s%s%s"
+                      % (intended, shared, note))
+    if same_dir(effective, intended):
+        if not same_dir(intended, served):
+            return False, ("auto memory maps to %s (%s — the primary checkout, "
+                           "which every worktree shares) but Touch serves %s "
+                           "from this worktree — the memory page would edit "
+                           "files no session reads; run Touch from %s%s"
+                           % (effective, label, served, primary, note))
+        escape = memory_escape(project, intended, primary)
+        if escape:
+            # The mapping the CLI honours and the directory Touch serves agree,
+            # LEXICALLY — which is the right comparison for those two questions
+            # (`same_dir` says why) and is exactly what makes a symlinked
+            # `.touch/` invisible here. Asked separately, so a tree that escaped
+            # the project after `--init` ran cannot stay green for ever.
+            return False, ("auto memory maps to %s (%s) but %s%s"
+                           % (effective, label, escape, note))
+        return True, ("auto memory maps to %s (%s)%s%s"
+                      % (effective, label, shared, note))
+    # The last remedy line that names `--init`, so it asks the same question the
+    # unmapped branch does. A mapping pointing at a third directory FROM a linked
+    # worktree (or a `$HOME` project, or a cache) reaches this line, and "--init
+    # aligns them" is exactly the sentence `--init` will not honour there.
+    why = refusal()
+    fix = ("would refuse to align them because %s" % why if why
+           else "aligns them")
+    return False, ("auto memory maps to %s (%s), not %s%s — the memory page "
+                   "would edit files no session reads; `touch-selfcheck --init` "
+                   "%s%s" % (effective, label, intended, shared, fix, note))
+
+
+def merge_setting(path, key, value):
+    """Merge ONE key into a JSON settings file, atomically; say what it did.
+
+    Returns `"already set"`, `"written"` or `"replaced <old value>"`, and the
+    third one is not a nicety. A memory mapping is invisible unless a program
+    says it out loud — that is this modes entire justification — so a run that
+    quietly overwrote a DIFFERENT `autoMemoryDirectory` somebody had set on
+    purpose would be the same silence one level up: the report would say
+    "(written)", the old value would be gone, and nothing anywhere would ever
+    mention that a deliberate setting had been replaced. The old value goes
+    through `oneline(…, 120)` because it is arbitrary text out of a file this
+    program did not write.
+
+    Merge, not write: this is the users own file and routinely carries
+    permissions and hooks. A corrupt or non-object file is REFUSED rather than
+    replaced — the alternative is silently deleting local settings somebody is
+    in the middle of debugging.
+
+    The replace is atomic (temp file in the same directory, fsync the file,
+    os.replace, fsync the DIRECTORY) for the reason every other writer in this
+    project is: a settings file truncated by a crash is a session that starts
+    with no settings at all, and the directory entry is as much part of the
+    write as the bytes are. An existing files mode is preserved; a new file is
+    0600, because this is a file that may hold permission rules.
+
+    A SYMLINK is refused rather than followed. `os.replace` would replace the
+    link, so the keys from whatever it pointed at would be copied into a new
+    project-local file and the link would vanish — a destructive answer to a
+    layout somebody chose on purpose, and the same posture the sibling write
+    path takes for the memory tree (G7).
+
+    Re-serialized with `indent=2`, so a hand-formatted file comes back
+    reformatted even though one key changed. Accepted, and stated because the
+    diff surprises: that is the shape the CLI writes this file in.
+    """
+    if os.path.islink(path):
+        raise ValueError("%s is a symlink; refusing to replace it — write the "
+                         "key into the file it points at, or remove the link"
+                         % path)
+    data = {}
+    mode = 0o600
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        mode = os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        pass
+    if not isinstance(data, dict):
+        raise ValueError("%s does not hold a JSON object; refusing to rewrite it"
+                         % path)
+    old = data.get(key)
+    if old == value:
+        return "already set"
+    state = "written" if old is None else "replaced %s" % oneline(old, 120)
+    data[key] = value
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=".settings.local.json.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    # The rename itself is metadata: without this, a crash can leave the
+    # directory entry pointing at neither file. Best-effort — a directory that
+    # cannot be opened for fsync (some network filesystems) is not a reason to
+    # report a write that did happen as a failure.
+    try:
+        dirfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    except OSError:
+        return state
+    try:
+        os.fsync(dirfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
+    return state
+
+
+def import_aggregator(root):
+    """(aggregator, legacy, paths), or None having reported the failure itself.
+
+    Shared by both modes. The cwd is the users project and may hold its own
+    aggregator/ — for -c it sits FIRST on sys.path, ahead of anything we
+    prepend, so it comes off.
+    """
+    sys.path[:] = [p for p in sys.path if p not in ("", ".", os.getcwd())]
+    sys.path.insert(0, root)
+    try:
+        import aggregator
+        from aggregator import legacy, paths
+    except Exception as exc:
+        report(False, "aggregator imports from this tree (%s: %s)"
+                      % (type(exc).__name__, oneline(exc)))
+        return None
+    return aggregator, legacy, paths
+
+
+def memory_rel_of(paths):
+    """`.touch/memory` as the shipped module spells it — one owner for the path.
+
+    getattr, not attribute access, for the reason `__version__` is read that
+    way below: a pinned copy built from an older tree may not have the constant,
+    and a MISSING CONSTANT must not be able to abort the checks after it.
+    """
+    return getattr(paths, "MEMORY_REL", os.path.join(".touch", "memory"))
+
+
+def memory_root_of(paths, project, memory_rel):
+    """Where THIS installation serves memory from — asked of the shipped code.
+
+    `paths.memory_root()` is what the memory page resolves its root through, so
+    it is the only honest right-hand side for check 6. Called, not reimplemented:
+    the whole point of the check is that the two answers can differ.
+
+    getattr-guarded and exception-guarded for the reason `memory_rel_of` is: a
+    pinned copy built from an older tree may not have the function, and a payload
+    half-way through an update may have one that raises. Falling back to the
+    project-relative join makes the check degrade to the question it used to ask
+    instead of ending the report.
+    """
+    fn = getattr(paths, "memory_root", None)
+    if fn is None:
+        return os.path.join(project, memory_rel)
+    try:
+        return fn()
+    except Exception:
+        return os.path.join(project, memory_rel)
+
+
+def run_init(root):
+    """Map auto memory into the project, then prove the CLI will honour it (G1).
+
+    Writes exactly one key into exactly one file; everything else it does is
+    verification, because the failure this mode exists for is a settings file
+    that looks right and does nothing. It does NOT migrate or write memory
+    CONTENT — the files are the models, and moving them is a deliberate,
+    reviewed step (they were written on the documented assumption that they stay
+    machine-local, so they get read before they get published).
+    """
+    loaded = import_aggregator(root)
+    if loaded is None:
+        stop_early()
+        return
+    paths = loaded[2]
+    memory_rel = memory_rel_of(paths)
+    project = paths.project_root()
+    settings = os.path.join(project, LOCAL_REL)
+    primary = primary_checkout(project)
+    intended = os.path.join(primary, memory_rel)
+    served = memory_root_of(paths, project, memory_rel)
+    # ONE call, and the gate chain lives in `init_refusal` so check 6 can ask the
+    # SAME question before it names this command as a remedy — see that
+    # function docstring for the five gates and why each is needed. Nothing is
+    # created before it answers: "nothing was written" is the sentence, and the
+    # order of the statements is what makes it true.
+    why = init_refusal(root, project, primary, intended, settings, served)
+    if why:
+        report(False, "auto memory was not mapped: %s (nothing was written)" % why)
+        stop_early()
+        return
+    # Deliberately not just "holds .claude/": this ONE line is the positive form
+    # of the whole gate chain above it, and a claim narrower than what was
+    # actually checked reads as though the rest was not.
+    report(True, "project root %s holds .claude/ and nothing refuses the mapping"
+                 % project)
+
+    try:
+        state = merge_setting(settings, MEMORY_KEY, intended)
+    except (OSError, ValueError) as exc:
+        report(False, "%s sets %s (%s: %s)"
+                      % (settings, MEMORY_KEY, type(exc).__name__, oneline(exc)))
+        stop_early()
+        return
+    report(True, "%s sets %s to %s (%s)"
+                 % (settings, MEMORY_KEY, intended, state))
+
+    err = None
+    try:
+        # The parent first, explicitly: `makedirs(mode=…)` applies the mode to
+        # the LEAF only (CPython >= 3.7), and `.touch/` is not a public
+        # directory either — it holds `server.json`, which carries the per-boot
+        # token. An EXISTING parent is left as it is: tightening a directory
+        # somebody else created is a side effect nobody asked this command for.
+        os.makedirs(os.path.dirname(intended), mode=0o700, exist_ok=True)
+        os.makedirs(intended, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        err = exc
+    report(err is None, "memory directory %s exists%s"
+                        % (intended, "" if err is None else " (%s)" % oneline(err)))
+
+    ok, text = check_memory(root, project, memory_rel, served)
+    report(ok, text)
+
+
 def run_checks(root, scratch):
     v = sys.version_info
     report(v[:2] >= (3, 11),
@@ -135,23 +1024,16 @@ def run_checks(root, scratch):
         stop_early()
         return
 
-    # The cwd is the users project and may hold its own aggregator/ — for -c it
-    # sits FIRST on sys.path, ahead of anything we prepend, so it comes off.
-    sys.path[:] = [p for p in sys.path if p not in ("", ".", os.getcwd())]
-    sys.path.insert(0, root)
-    try:
-        import aggregator
-        from aggregator import legacy, paths
-    except Exception as exc:
-        report(False, "aggregator imports from this tree (%s: %s)"
-                      % (type(exc).__name__, exc))
+    loaded = import_aggregator(root)
+    if loaded is None:
         stop_early()
         return
+    aggregator, legacy, paths = loaded
 
     here = os.path.abspath(aggregator.__file__)
     # getattr, not attribute access: a pinned copy built from an older tree, or
     # one assembled by hand, may have no __version__ — and a MISSING VERSION
-    # STRING must not be able to abort the six checks that come after it.
+    # STRING must not be able to abort every check that comes after it.
     report(here.startswith(root + os.sep),
            "aggregator %s imported from this tree (%s)"
            % (getattr(aggregator, "__version__", "unknown"), here))
@@ -196,7 +1078,7 @@ def run_checks(root, scratch):
     # would end the whole report at the exact moment it has something to say.
     except (SystemExit, Exception) as exc:            # never abort the report
         report(False, "task state resolver loaded (%s: %s)"
-                      % (type(exc).__name__, exc))
+                      % (type(exc).__name__, oneline(exc)))
     else:
         override = bool(os.environ.get("ORCH_TASKS_ROOT")
                         or os.environ.get("TOUCH_LEGACY_ROOT"))
@@ -235,6 +1117,15 @@ def run_checks(root, scratch):
     finally:
         sys.argv = argv
 
+    # Check 6: where auto memory ACTUALLY goes. Reported after the task-state
+    # check because it is the same shape of question one plane over — a root
+    # this installation resolves for itself, which nothing in the CLI will
+    # confirm or deny out loud (see the header).
+    memory_rel = memory_rel_of(paths)
+    report(*check_memory(root, project, memory_rel,
+                         memory_root_of(paths, project, memory_rel),
+                         in_project=in_project))
+
     sock = socket.socket()
     try:
         sock.bind(("127.0.0.1", 0))
@@ -248,17 +1139,21 @@ def run_checks(root, scratch):
 
 
 try:
-    run_checks(sys.argv[1], sys.argv[2])
+    if sys.argv[3] == "init":
+        EXPECTED = INIT_EXPECTED
+        run_init(sys.argv[1])
+    else:
+        run_checks(sys.argv[1], sys.argv[2])
 except BaseException as exc:
     # Nothing above is allowed to end the report silently: an unguarded
     # attribute, a resolver raising on a half-built payload, a MemoryError.
     # Name what blew up and where, then let the sentinel below tell the caller
     # how much of the report is missing.
     report(False, "every check ran (crashed after %d of %d — %s: %s)"
-                  % (len(DONE), EXPECTED, type(exc).__name__, exc))
+                  % (len(DONE), EXPECTED, type(exc).__name__, oneline(exc)))
 finally:
     sys.stdout.write("END %d\n" % EXPECTED)
-' "$ROOT" "$TMP/scratch" > "$TMP/py.out" 2> "$TMP/py.err" || PY_RC=$?
+' "$ROOT" "$TMP/scratch" "$MODE" > "$TMP/py.out" 2> "$TMP/py.err" || PY_RC=$?
 
 # `IFS= read -r line` + one string strip, rather than `read -r status text`:
 # the two-field read collapses runs of spaces inside a message (a resolver path
@@ -293,32 +1188,38 @@ if [ "$GOT" != "$WANT" ] || [ "$PY_RC" -ne 0 ]; then
     report FAIL "the python probe reported every check ($WHY${ERR1:+; $ERR1})"
 fi
 
-# --- check 7: exec bits. git records the bit and `git archive` preserves it,
-# but a zip built without -X, or any copy through a mode-dropping filter,
-# produces a bin/ nobody can run — and status.sh failures are stderr-only, so
-# the dashboard would just stay empty. The loop reads the directory instead of a
-# hardcoded list of six: a mode dropped on a SEVENTH wrapper added later is the
-# identical failure, and a list would report PASS without ever looking at it.
-NOEXEC=""
-NWRAP=0
-for w in "$ROOT"/bin/*; do
-    [ -f "$w" ] || continue
-    NWRAP=$((NWRAP + 1))
-    [ -x "$w" ] || NOEXEC="$NOEXEC ${w##*/}"
-done
-if [ "$NWRAP" -eq 0 ]; then
-    report FAIL "the wrappers are present ($ROOT/bin holds no file at all)"
-elif [ -n "$NOEXEC" ]; then
-    report FAIL "every wrapper in bin/ is executable ($NWRAP checked; not executable:$NOEXEC — chmod +x them)"
-else
-    report PASS "every wrapper in bin/ is executable ($NWRAP checked)"
-fi
+# --- checks 8 and 9 are about THIS INSTALLATION, not about the project, so
+# `--init` skips them: it was asked to configure one thing and its report has to
+# be about that one thing. `touch-selfcheck` with no argument is still the
+# install proof, and it runs everything.
+if [ "$MODE" = check ]; then
+    # --- check 8: exec bits. git records the bit and `git archive` preserves it,
+    # but a zip built without -X, or any copy through a mode-dropping filter,
+    # produces a bin/ nobody can run — and status.sh failures are stderr-only, so
+    # the dashboard would just stay empty. The loop reads the directory instead of
+    # a hardcoded list of six: a mode dropped on a SEVENTH wrapper added later is
+    # the identical failure, and a list would report PASS without ever looking at
+    # it.
+    NOEXEC=""
+    NWRAP=0
+    for w in "$ROOT"/bin/*; do
+        [ -f "$w" ] || continue
+        NWRAP=$((NWRAP + 1))
+        [ -x "$w" ] || NOEXEC="$NOEXEC ${w##*/}"
+    done
+    if [ "$NWRAP" -eq 0 ]; then
+        report FAIL "the wrappers are present ($ROOT/bin holds no file at all)"
+    elif [ -n "$NOEXEC" ]; then
+        report FAIL "every wrapper in bin/ is executable ($NWRAP checked; not executable:$NOEXEC — chmod +x them)"
+    else
+        report PASS "every wrapper in bin/ is executable ($NWRAP checked)"
+    fi
 
-# --- check 8: the full write path, end to end, into a throwaway task folder.
-mkdir -p "$TMP/task"
-if ORCH_STATE_DIR="$TMP/task" "$ROOT/bin/touch-status" \
-        touch-selfcheck check info "selfcheck probe" >/dev/null 2>"$TMP/status.err" \
-   && python3 -c '
+    # --- check 9: the full write path, end to end, into a throwaway task folder.
+    mkdir -p "$TMP/task"
+    if ORCH_STATE_DIR="$TMP/task" "$ROOT/bin/touch-status" \
+            touch-selfcheck check info "selfcheck probe" >/dev/null 2>"$TMP/status.err" \
+       && python3 -c '
 import json
 import sys
 
@@ -330,39 +1231,55 @@ event = json.loads(lines[-1])
 raise SystemExit(0 if event.get("plan") == "touch-selfcheck"
                  and event.get("stage") == "check" else 1)
 ' "$TMP/task/events.jsonl" >/dev/null 2>&1; then
-    report PASS "event written and read back through touch-status"
-else
-    report FAIL "event written and read back through touch-status ($(head -n 1 "$TMP/status.err" 2>/dev/null))"
+        report PASS "event written and read back through touch-status"
+    else
+        report FAIL "event written and read back through touch-status ($(head -n 1 "$TMP/status.err" 2>/dev/null))"
+    fi
 fi
 
 echo
-# `command -v` proves that A touch-serve is first on PATH, not that it is THIS
-# one — and two installed versions at once is precisely the situation a
-# version-stamped plugin cache produces. Compare the resolved paths, so the
-# reassuring line can only be printed when it is true.
-MINE="$ROOT/bin/touch-serve"
-MINE_REAL="$(readlink -f "$MINE" 2>/dev/null || printf '%s' "$MINE")"
-FIRST="$(command -v touch-serve 2>/dev/null || true)"
-[ -z "$FIRST" ] || FIRST="$(readlink -f "$FIRST" 2>/dev/null || printf '%s' "$FIRST")"
-if [ -n "$FIRST" ] && [ "$FIRST" = "$MINE_REAL" ]; then
-    echo "note: the wrappers are on PATH (bare command names work)"
-elif [ -n "$FIRST" ]; then
-    echo "note: a DIFFERENT touch-serve is first on PATH ($FIRST); the one this"
-    echo "      report is about is $MINE — call it by path, or put its bin/"
-    echo "      ahead on PATH"
-else
-    echo "note: bin/ is not on PATH — inside a Claude Code session it is; from a"
-    echo "      plain shell, call the wrappers by path ($ROOT/bin/…)"
+if [ "$MODE" = check ]; then
+    # `command -v` proves that A touch-serve is first on PATH, not that it is
+    # THIS one — and two installed versions at once is precisely the situation a
+    # version-stamped plugin cache produces. Compare the resolved paths, so the
+    # reassuring line can only be printed when it is true.
+    MINE="$ROOT/bin/touch-serve"
+    MINE_REAL="$(readlink -f "$MINE" 2>/dev/null || printf '%s' "$MINE")"
+    FIRST="$(command -v touch-serve 2>/dev/null || true)"
+    [ -z "$FIRST" ] || FIRST="$(readlink -f "$FIRST" 2>/dev/null || printf '%s' "$FIRST")"
+    if [ -n "$FIRST" ] && [ "$FIRST" = "$MINE_REAL" ]; then
+        echo "note: the wrappers are on PATH (bare command names work)"
+    elif [ -n "$FIRST" ]; then
+        echo "note: a DIFFERENT touch-serve is first on PATH ($FIRST); the one this"
+        echo "      report is about is $MINE — call it by path, or put its bin/"
+        echo "      ahead on PATH"
+    else
+        echo "note: bin/ is not on PATH — inside a Claude Code session it is; from a"
+        echo "      plain shell, call the wrappers by path ($ROOT/bin/…)"
+    fi
+    echo
 fi
-echo
 
 if [ "$FAILS" -eq 0 ]; then
     echo "$CHECKS checks: all passed"
     echo
-    echo "Next, from your project directory:"
-    echo "  touch-serve"
-    echo "It prints a loopback URL carrying a per-boot token, e.g."
-    echo "  http://127.0.0.1:8932/?token=<per-boot token>"
+    if [ "$MODE" = init ]; then
+        # The resolution is memoized per cwd for the life of a session, so the
+        # session that ran this command is still writing to the old directory.
+        # Saying so is not politeness: without it the next observation is
+        # "nothing appeared in .touch/memory", which reads as a failed mapping.
+        echo "Next:"
+        echo "  restart your Claude Code session — the memory location is"
+        echo "  resolved once per session, so the running one still uses the old"
+        echo "  directory."
+        echo "This maps AUTO memory only. Project CLAUDE.md, user CLAUDE.md and"
+        echo "subagent memory are separate tiers and stay where they are."
+    else
+        echo "Next, from your project directory:"
+        echo "  touch-serve"
+        echo "It prints a loopback URL carrying a per-boot token, e.g."
+        echo "  http://127.0.0.1:8932/?token=<per-boot token>"
+    fi
     exit 0
 fi
 

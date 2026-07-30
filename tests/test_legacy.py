@@ -44,11 +44,12 @@ REPO = HERE.parents[0]
 # The canonical trees are named through `tests/_roots.py`, never by a
 # literal under REPO: GD-U1 moves them and this is the single flip point.
 sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree
-from _roots import SRC                # noqa: E402  (path juggling first)
+from _roots import ORCH_REL, SRC      # noqa: E402  (path juggling first)
 sys.path.insert(0, str(SRC))
 
 from aggregator import legacy as lg                            # noqa: E402
 from aggregator import mongo_store as ms                       # noqa: E402
+from aggregator import paths                                   # noqa: E402
 from aggregator import refs                                    # noqa: E402
 
 FIXTURES = HERE / "fixtures" / "legacy"
@@ -1138,7 +1139,10 @@ def test_the_artifact_stream_id_round_trips_any_folder_name():
 def test_the_sources_own_their_paths_and_nothing_else():
     print("test_the_sources_own_their_paths_and_nothing_else")
     with tempfile.TemporaryDirectory() as tmp:
-        root = os.path.join(tmp, ".claude", "local-orchestrators")
+        # The one root in this file shaped like the DEFAULT rather than a bare
+        # fixture name — so it is spelled through the suite's single flip point
+        # (`_roots.ORCH_REL`) instead of a literal that a move leaves behind.
+        root = os.path.join(tmp, *ORCH_REL.parts)
         os.makedirs(root)
         path = task_tree(root, "demo", events=line(
             ts="2026-07-25T00:00:00.000Z", plan="p", stage="plan", state="done",
@@ -1284,6 +1288,27 @@ def test_a_whole_root_scan_reduces_every_folder():
               "$TOUCH_LEGACY_ROOT selects the root for a daemon started anywhere")
         check(lg.orchestrator_root().endswith(lg.TASK_ROOT),
               "…and the default is the repo's own history folder")
+        check(lg.TASK_ROOT == os.path.join(*ORCH_REL.parts),
+              f"…which is `{os.path.join(*ORCH_REL.parts)}`, the suite's one "
+              f"spelling of those two components (got {lg.TASK_ROOT!r})")
+        # PROTOCOL-8: this used to be a SECOND resolver — it read
+        # `$TOUCH_LEGACY_ROOT` and the daemons/hook read `$ORCH_TASKS_ROOT`, so
+        # one cwd could give the dashboard and the API two different task lists.
+        # It is now `paths.tasks_root` under another name, which is what makes
+        # `touch-selfcheck`'s "they must agree" check able to pass at all.
+        other = os.path.join(tmp, "elsewhere")
+        check(lg.orchestrator_root(env={"ORCH_TASKS_ROOT": other})
+              == os.path.abspath(other),
+              "$ORCH_TASKS_ROOT — which this resolver used to ignore — is "
+              "honoured, so the adapter and the daemons agree")
+        check(lg.orchestrator_root(env={"ORCH_TASKS_ROOT": other,
+                                        "TOUCH_LEGACY_ROOT": root})
+              == os.path.abspath(other),
+              "…with the stated precedence when both are set")
+        check(lg.orchestrator_root(env=env)
+              == paths.tasks_root(env=env),
+              "orchestrator_root() is paths.tasks_root() under the adapter's "
+              "own name — one ladder, not two that can drift")
 
 
 def main():

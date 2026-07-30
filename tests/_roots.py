@@ -25,6 +25,13 @@ move is a two-line edit HERE.
     MON       the canonical monitoring module directory (the five core files:
               `status.sh`, `monitor_server.py`, `decision_watcher.py`,
               `monitor.html`, `monitoring.md`). The second flip point.
+    ORCH_REL  the tasks root RELATIVE to a project root — the two components
+              every shipped resolver joins onto whatever project it found
+              (`paths.tasks_root()`, `legacy.TASK_ROOT`,
+              `server.default_tasks_root()`, `status.sh`, both daemons).
+              Flip point 3.
+    ORCH      this repo's own run history, `REPO / ORCH_REL` — the tree the
+              task folders live in.
     CATALOG   the marketplace catalog, `.claude-plugin/marketplace.json` at the
               REPO root — the one canonical path that is deliberately NOT under
               PAYLOAD. It is not payload: it is a catalog *about* the payload,
@@ -43,6 +50,13 @@ today. The next layout change is a two-line edit here, again.
 The asserts below are the loud half: a wrong flip fails at IMPORT, in every
 file at once, with the path it looked for — instead of ~200 individually
 confusing "file not found" checks.
+
+`ORCH_REL`/`ORCH` are the deliberate exception: they get NO import-time assert.
+The tasks root is gitignored, so it is absent from a clean checkout of HEAD —
+which is exactly the tree `scripts/release.sh` step 2 runs the whole suite in.
+An assert there would turn "this repo has no runs yet" into every test file
+failing to import, during a release. The tests that read real run folders skip
+themselves instead (`test_docs.py`, `test_register.py`, `test_custom_state.py`).
 """
 from pathlib import Path
 
@@ -58,6 +72,17 @@ SRC = PAYLOAD
 
 #: Flip point 2: the canonical monitoring module.
 MON = PAYLOAD / "shared" / "monitoring"
+
+#: Flip point 3: the tasks root as a path RELATIVE to a project root. Every
+#: shipped resolver joins these two components onto the project it resolved, so
+#: the leaf name `local-orchestrators` is load-bearing — the scope guard's
+#: `SEG_PATTERN` is a bare literal on it (G10), which is why the move is a
+#: `.claude` -> `.touch` edit and not a rename.
+ORCH_REL = Path(".touch") / "local-orchestrators"
+
+#: This repo's own run history. NO assert: see the module docstring — the tree
+#: is gitignored and absent in the clean checkout `release.sh` step 2 tests.
+ORCH = REPO / ORCH_REL
 
 #: The marketplace catalog, at the REPO root and never inside PAYLOAD — a
 #: git-cloned catalog is only ever read from `<repo>/.claude-plugin/

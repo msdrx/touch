@@ -557,9 +557,18 @@ def test_the_notice_surface_states_the_current_cycle():
     check('setError("sessions", null)' in model,
           "the sessions arm clears its own slot on success")
     tasks = slice_fn(CODE, "function fetchTasks(", "\n}")
-    check('setError("tasks", null)' in tasks and 'setError("tasks", err.message)' in tasks,
+    # The success arm's value is the server's `note` **or** null, so one
+    # expression both sets (a 200 that explains an empty list, UI-13) and clears
+    # (the ordinary answer, which carries no note) — the rule this guard protects
+    # is unchanged: whoever sets a slot clears it, on the success that
+    # contradicts it. Counted rather than matched character for character,
+    # because the guard is "two calls, one per outcome, in this function", not a
+    # spelling; the set-then-clear BEHAVIOUR is driven in the node+vm arm.
+    check(tasks.count('setError("tasks"') == 2
+          and "body.note" in tasks
+          and 'setError("tasks", err.message)' in tasks,
           "the tasks arm sets and clears its own slot, in the one function that "
-          "issues the request")
+          "issues the request — the success value is the server's note or null")
     health = slice_fn(CODE, "async function refreshHealth", "\n}")
     check('setError("health", null)' in health and 'setError("health"' in health,
           "a /health failure is named, and un-named again when a poll succeeds")
@@ -931,6 +940,37 @@ def test_the_expensive_route_is_polled_on_its_own_slow_cadence():
     boot = slice_fn(CODE, "function boot(", "\n}")
     check("window.setInterval(refreshTasks, TASKS_MS)" in boot,
           "the slow poll is wired at boot")
+
+
+def test_an_empty_task_panel_says_why_it_is_empty():
+    print("test_an_empty_task_panel_says_why_it_is_empty")
+    # The move of the tasks root is the occasion for this guard (UI-13): the
+    # aggregator resolves that root itself, so a half-landed move empties the
+    # third sidebar panel and blanks its count. `/api/tasks` already ANSWERS why
+    # — a 200 with `note: "no local-orchestrators root configured"` — and the
+    # page used to read `body.tasks` only, so a page that had quietly forgotten
+    # its history looked exactly like history that ended.
+    server_src = read(SRC / "aggregator" / "server.py")
+    h_tasks = slice_fn(server_src, "def h_tasks", "\ndef ")
+    # Two shapes of empty answer carry a note — no root configured, and a
+    # configured root that is not there (the shape the tasks-root move creates).
+    # `test_server_core.py` owns the assertions about their content; this end
+    # only cares that the page has something to render.
+    check(h_tasks.count('"note":') == 2,
+          "h_tasks answers 200-with-a-note for BOTH shapes of nothing-to-list")
+    shared = slice_fn(CODE, "function fetchTasks(", "\n}")
+    check("body.note" in shared and 'setError("tasks"' in shared,
+          "…and fetchTasks routes that note into the SAME per-source slot a "
+          "fetch failure uses, so it reaches a surface that already renders "
+          "(the set-and-clear behaviour itself is driven in the node+vm arm)")
+    check("`" not in shared,
+          "the arm obeys app.js's no-backtick rule (no template literal — the "
+          "slot is a plain string)")
+    # The slot has to be painted, or "surfaced" is a claim about a variable.
+    check("state.errors[source] = source" in CODE and
+          "Object.keys(state.errors)" in CODE,
+          "every error slot is composed and then enumerated onto the notice "
+          "surface — the note is displayed, not merely stored")
 
 
 def test_every_live_region_is_written_only_when_it_changes():
@@ -1406,6 +1446,8 @@ let runGraph = { runId: "wf_a", observed: {}, nodes: [], agents: [] };
 const SESSION_RECORDS = 300;
 /** Flipped on to make the backwards-paging route fail for one click. */
 let eventsFail = false;
+/** The `note` /api/tasks answers with, or null for the ordinary answer. */
+let tasksNote = null;
 const fetched = [];
 const fetchedUrls = [];
 function fakeFetch(url) {
@@ -1420,7 +1462,13 @@ function fakeFetch(url) {
     }
     let body = {};
     if (u.pathname === "/api/sessions") body = { sessions: [] };
-    else if (u.pathname === "/api/tasks") body = { tasks: [] };
+    else if (u.pathname === "/api/tasks") {
+        // A 200 that explains its own empty list (UI-13). `tasksNote` is null
+        // for the ordinary answer, which is what makes the CLEAR assertable.
+        body = tasksNote === null
+            ? { tasks: [], count: 0 }
+            : { tasks: [], count: 0, note: tasksNote };
+    }
     else if (u.pathname === "/health") body = { mirror: { state: "absent" } };
     else if (u.pathname === "/api/run/graph") body = runGraph;
     else if (u.pathname === "/api/session/timeline") {
@@ -1868,6 +1916,29 @@ function atEdge(node) {
        subscribes.length === 1 && subscribes[0].cursors["run:wf_a"] === 700,
        JSON.stringify(subscribes));
 
+    // --- UI-13: an empty task panel says why it is empty --------------------
+    // A source guard can see that the note is passed to `setError`; only
+    // execution can see that it reaches the notice box AND leaves again. The
+    // second half is the one that rots: a note that never clears is the
+    // fabricated-badge failure in another costume.
+    tasksNote = "no local-orchestrators root configured";
+    await sandbox.refreshTasks();
+    await settle();
+    ok("a note on an empty /api/tasks 200 is painted on the notice surface",
+       byId.notice.textContent.indexOf(
+           "no local-orchestrators root configured") !== -1 &&
+       byId.notice.hidden === false,
+       byId.notice.textContent + " :: hidden=" + byId.notice.hidden);
+    ok("…attributed to the panel it explains, not to the page at large",
+       byId.notice.textContent.indexOf("tasks: ") !== -1,
+       byId.notice.textContent);
+    tasksNote = null;
+    await sandbox.refreshTasks();
+    await settle();
+    ok("…and the next note-free answer takes the line away again",
+       byId.notice.textContent.indexOf("local-orchestrators") === -1,
+       byId.notice.textContent);
+
     // --- n5: what a resume actually re-delivered ---------------------------
     send(sock2, { type: "subscribed", live: true, cursors: { "run:wf_a": 700 },
                   accepted: { "run:wf_a": 700 }, rejected: [],
@@ -1950,6 +2021,9 @@ HARNESS_EXPECTED = (
     "the resync timer really re-asks for the cursors",
     "…with the position the SERVER published, never the newest seq received",
     "the ack's backfill count reaches the meta line",
+    "a note on an empty /api/tasks 200 is painted on the notice surface",
+    "…attributed to the panel it explains, not to the page at large",
+    "…and the next note-free answer takes the line away again",
 )
 
 
@@ -2007,6 +2081,7 @@ def main():
               test_a_run_stream_the_run_routes_cannot_answer_for_is_not_a_link,
               test_the_session_timeline_can_reach_every_record_it_admits_to,
               test_the_expensive_route_is_polled_on_its_own_slow_cadence,
+              test_an_empty_task_panel_says_why_it_is_empty,
               test_every_live_region_is_written_only_when_it_changes,
               test_the_events_toolbar_is_not_the_heading,
               test_the_load_older_button_names_the_stream_it_walks,

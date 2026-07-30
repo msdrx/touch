@@ -22,7 +22,7 @@ IS the payload, not because a copier was re-run.
 Two properties survive the move, and one is new:
 
   the monitoring subset   the payload's `shared/monitoring/` holds EXACTLY the
-                          five shipping files. Its dev-only material (tests,
+                          six shipping files. Its dev-only material (tests,
                           fixtures, `gen_stream.py`) lives at `tests/monitoring/`
                           (GD-U6) — 1.1 MB of PII-slug carriers that must never
                           creep back across the directory boundary.
@@ -95,13 +95,21 @@ PLUGIN_MANIFEST_DIR_CONTENTS = {"plugin.json"}
 #: documented value, never to legitimise a coinage.
 DOCUMENTED_CATEGORIES = {"productivity", "development"}
 
-#: The payload's monitoring tree holds exactly these five files and nothing
+#: The payload's monitoring tree holds exactly these six files and nothing
 #: else. Stated positively (an exact set, not a denylist) because that is the
 #: form a silent SHRINK also fails: an empty directory passes every "none of
 #: the bad names arrived" check ever written.
+#:
+#: `memory.html` is the sixth, and it is a SECOND page rather than a section of
+#: `monitor.html` on purpose (G4): the dashboard is 2,700 lines with
+#: enumerated view-gating CSS and insertion-fragile text-marker test slices,
+#: while the memory editor has to be small enough to drive under a real
+#: `node` + `vm` harness. It lives here, inside an existing owned tree, so the
+#: feature adds no top-level payload directory (G12) and `TOP_ALLOWLIST` is
+#: untouched.
 MONITORING_CORE = {
     "status.sh", "monitor_server.py", "decision_watcher.py",
-    "monitor.html", "monitoring.md",
+    "monitor.html", "memory.html", "monitoring.md",
 }
 
 #: GD-T2's never-ship list, kept as an explicit arm on top of the exact-set one
@@ -122,7 +130,7 @@ COMPONENT_KEYS = (
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 
-#: Verbs the shipped description may not use while Touch is read-only. The
+#: Verbs the shipped description may not use while no SESSION verb ships. The
 #: `/plugin` UI shows the description and never the README (DISTRIBUTION-7), so
 #: this string is the entire pre-install surface — the one place a claimed
 #: capability cannot be contradicted by the UI before the user has believed it.
@@ -202,7 +210,7 @@ def test_monitoring_subset_ships_nothing_extra():
     # module" rather than "the copier over-copied" — and the shrink half still
     # matters: an empty directory passes every denylist ever written.
     check(present == MONITORING_CORE,
-          f"the payload's shared/monitoring/ holds exactly the five shipping "
+          f"the payload's shared/monitoring/ holds exactly the six shipping "
           f"files (missing: {sorted(MONITORING_CORE - present)}, "
           f"extra: {sorted(present - MONITORING_CORE)})")
 
@@ -247,8 +255,28 @@ def test_plugin_manifest():
           "description discloses the hook (DISTRIBUTION-7/GD-T8)")
     claimed = sorted({m_.group(0).lower() for m_ in UNSHIPPED_VERBS.finditer(desc)})
     check(not claimed,
-          f"description claims no control verb — v0 is read-only "
+          f"description claims no session-control verb — none ships "
           f"(README.md:23, D13; found: {claimed})")
+    # The memory write plane (G6/SECURITY-13). This string is the WHOLE
+    # pre-install disclosure — the `/plugin` UI shows it and never the README —
+    # so the two halves are asserted separately: the stale claim must be gone,
+    # and the replacement must be specific enough to be a decision.
+    #
+    # "read-only" as a bare adjective for the product is now false: the dashboard
+    # writes `<project>/.touch/memory/*.md`. It may still describe a PART (the
+    # skills' read-only researchers, a read-only tap), so the arm forbids the
+    # word only where it qualifies Touch or its dashboard — the shape the old
+    # string used ("a read-only, loopback-only, token-gated dashboard").
+    stale = re.search(r"read-only[^.]{0,60}\bdashboard\b", desc, re.IGNORECASE)
+    check(stale is None,
+          f"the description no longer sells a read-only dashboard — one write "
+          f"plane ships (found: {stale.group(0) if stale else None!r})")
+    check(".touch/memory" in desc,
+          "the description names the ONE directory Touch writes on the user's "
+          "behalf (SECURITY-13)")
+    check("--allow-memory-write" in desc,
+          "the description names the flag that turns the write plane on, so "
+          "'off by default' is checkable before installing (G6)")
     # GD-T8's other two disclosure clauses, asserted rather than assumed: the
     # transcript read and the project-local write. Both were written into the
     # string once and could be edited back out by anyone trimming for length.

@@ -258,16 +258,117 @@ def test_served_files_carry_the_csp_sandbox_and_nosniff():
     api = Api(ReadModel(state={}, store=None, tasks_root=root), auth=Auth("t"))
     headers = {"authorization": "Bearer t"}
     html = api.get("/file?task=t1&path=report/r.html", headers)
-    check(html.status == 200 and html.headers["Content-Security-Policy"] == "sandbox allow-scripts",
-          "a report HTML is served in a CSP sandbox (opaque origin, cut off from this server)")
+    # `sandbox` with NO `allow-scripts` (SECURITY-4). The opaque origin stops a
+    # report reading anything of this server's, but it does NOT stop a script in
+    # the report reading its own `location.search` — which carries the token —
+    # and POSTing it somewhere. Agent-generated reports are exactly the documents
+    # nobody audited. The monitoring server refused the flag from the start; this
+    # file was copied from it (GD-20) without the CSP, so the twin had drifted.
+    check(html.status == 200 and html.headers["Content-Security-Policy"] == "sandbox",
+          "a report HTML is served in a bare CSP sandbox — no allow-scripts")
+    check("allow-scripts" not in server_mod.FILE_CSP,
+          "…and the constant itself carries no script grant, so a new use site "
+          "cannot inherit one")
+    check(html.headers.get("Referrer-Policy") == "no-referrer",
+          "…with Referrer-Policy: no-referrer — the URL that fetched it holds "
+          "the token in its query string (SECURITY-5)")
     check(b"X-Content-Type-Options: nosniff" in html.to_bytes(), "and with nosniff")
     md = api.get("/file?task=t1&path=note.md", headers)
     check(md.content_type.startswith("text/plain"),
           "a .md is served as text — the page renders it escape-first, the server never does")
+    check(md.headers.get("Referrer-Policy") == "no-referrer",
+          "…and the text arm is no-referrer too: navigated to directly it is "
+          "still a document of this origin, loaded from a tokened URL")
     check(api.get("/file?task=t1&path=missing.md", headers).status == 404,
           "a missing artifact is 404")
     check(b"Cache-Control: no-store" in html.to_bytes(),
           "every response is no-store: a cached observation is a lie with a timestamp")
+    # Both use sites of the constant, from the source: `/file`'s HTML arm above is
+    # exercised live, `/api/toolresult`'s needs a spilled tool result to reach, so
+    # the pairing is asserted structurally rather than left to one route.
+    csp_sites = [n for n, line in enumerate(SOURCE.splitlines(), 1)
+                 if '"Content-Security-Policy": FILE_CSP' in line]
+    # `>= 2`, not `== 2`: a third defensive use site (giving some other served
+    # document the same sandbox) must not redden a security test for ADDING
+    # security. The load-bearing half is the per-site pairing below.
+    check(len(csp_sites) >= 2,
+          f"the CSP is used at both document routes, at least: {csp_sites}")
+    for site in csp_sites:
+        window = "\n".join(SOURCE.splitlines()[site - 1:site + 3])
+        check("NO_REFERRER" in window,
+              f"the use site at :{site} sets Referrer-Policy alongside the CSP — "
+              "they are one decision, not two")
+
+
+def test_an_empty_task_list_says_which_kind_of_empty_it_is():
+    print("test_an_empty_task_list_says_which_kind_of_empty_it_is")
+    # UI-13: the panel that renders this cannot tell an empty answer from a lost
+    # one, so both shapes of "nothing to list" answer 200 WITH a note. The
+    # second shape is the one the tasks-root move creates: the resolvers now say
+    # `.touch/local-orchestrators` while the directory may not be there yet, and
+    # `legacy.scan` answers `()` for a missing root — correctly and silently.
+    unconfigured = Api(ReadModel(state={}, store=None, tasks_root=None),
+                       auth=Auth("t")).get("/api/tasks",
+                                           {"authorization": "Bearer t"})
+    body = json.loads(unconfigured.body)
+    check(unconfigured.status == 200 and body["count"] == 0
+          and body["note"] == "no local-orchestrators root configured",
+          f"no root configured ⇒ 200 with the note that says so: {body}")
+
+    absent = os.path.join(tmpdir("tasks-note"), "not-there")
+    answer = Api(ReadModel(state={}, store=None, tasks_root=absent),
+                 auth=Auth("t")).get("/api/tasks", {"authorization": "Bearer t"})
+    body = json.loads(answer.body)
+    check(answer.status == 200 and body["tasks"] == [] and body["count"] == 0,
+          f"a configured-but-absent root is still a 200 with an empty list: {body}")
+    check(body.get("note") and body.get("exists") is False,
+          "…carrying BOTH a note the page can render and the machine-readable "
+          f"`exists: false`, so nobody parses English: {body}")
+    check(os.sep not in body["note"] and "not-there" not in body["note"],
+          f"…and the note names no path — it is rendered on the page, and the "
+          f"root is already its own field: {body['note']!r}")
+
+    present = tmpdir("tasks-present")
+    os.makedirs(os.path.join(present, "some-task"))
+    listed = Api(ReadModel(state={}, store=None, tasks_root=present),
+                 auth=Auth("t")).get("/api/tasks", {"authorization": "Bearer t"})
+    body = json.loads(listed.body)
+    check(listed.status == 200 and "note" not in body and body["count"] == 1,
+          f"a root that exists carries no note at all — the slot clears: {body}")
+
+
+def test_no_status_is_ever_labelled_ok_when_it_is_not():
+    print("test_no_status_is_ever_labelled_ok_when_it_is_not")
+    status_text = server_mod.status_text
+    # The bug this replaces: BOTH readers of the table spelled their own
+    # fallback, and both were wrong. `head_bytes` used `.get(status, "OK")`, so
+    # the first route to answer 409 would have sent `HTTP/1.1 409 OK` — a
+    # conflict wearing a success reason phrase — and `Response.error` used
+    # `.get(status, "Error")`, a body field that says nothing (SERVER-8).
+    check(status_text(409) == "Conflict", "409 is Conflict, not OK")
+    check(b"HTTP/1.1 409 Conflict" in Response.error(409, "taken").head_bytes(),
+          "…and that is what goes on the wire")
+    check(json.loads(Response.error(409, "taken").body)["error"] == "Conflict",
+          "…and in the body's `error` field, which used to read 'Error'")
+    for status in (200, 201, 204, 400, 401, 403, 404, 405, 409, 411, 412, 413,
+                   415, 422, 426, 500, 503):
+        # Every status either server can emit has a phrase. The memory routes on
+        # the monitoring server emit the ones this one has no route for yet, and
+        # one complete table beats two half-tables with two fallbacks — a table
+        # listing only what today's caller needs is how the bug above was
+        # written. Nothing machine-checks the two servers' tables against each
+        # other, so this is not asserted as a GD-20 twin; `FILE_CSP` is.
+        check(status in server_mod.STATUS_TEXT,
+              f"{status} has a named reason phrase")
+    for status in (207, 418, 451, 599):
+        phrase = status_text(status)
+        check(phrase != "OK" and phrase != "Error",
+              f"an unnamed {status} falls back to its CLASS ({phrase!r}), which "
+              "is derived from the code and so cannot contradict it")
+    check(status_text(418) == "Client Error" and status_text(599) == "Server Error",
+          "…4xx is a Client Error and 5xx a Server Error")
+    check(b"HTTP/1.1 418 Client Error" in Response.error(418, "x").head_bytes(),
+          "…and an unknown status still produces a well-formed status line")
 
 
 # --- the page -------------------------------------------------------------
@@ -964,6 +1065,8 @@ def main():
                   test_an_unknown_id_is_never_answered_with_another_ones_data,
                   test_safe_artifact_path_contains_everything,
                   test_served_files_carry_the_csp_sandbox_and_nosniff,
+                  test_an_empty_task_list_says_which_kind_of_empty_it_is,
+                  test_no_status_is_ever_labelled_ok_when_it_is_not,
                   test_the_token_is_injected_into_the_page,
                   test_health_never_carries_a_credential,
                   test_health_publishes_no_observation_to_an_unauthenticated_caller,

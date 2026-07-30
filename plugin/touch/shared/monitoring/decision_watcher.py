@@ -41,43 +41,46 @@ _CFG_WARNINGS: list[str] = []
 
 
 def resolve_tasks_root() -> str:
-    """The orchestration tasks root: env > project > cwd walk-up > legacy.
+    """The orchestration tasks root: env > project > cwd walk-up (G10).
 
     Order, and why each rung exists:
 
     1. ``$ORCH_TASKS_ROOT`` — the operator's explicit override, always wins.
-    2. ``$CLAUDE_PROJECT_DIR/.claude/local-orchestrators`` — the hook/skill
+    2. ``$CLAUDE_PROJECT_DIR/.touch/local-orchestrators`` — the hook/skill
        environment's first-class project anchor.
-    3. cwd walk-up to the nearest ``.claude/`` marker — a bare shell in a
-       project checkout.
-    4. the legacy module-relative ``../../local-orchestrators`` — kept for the
-       in-repo layout this module grew up in, but **only if it already
-       exists**, so a packaged copy never invents a tasks root beside its own
-       code (or, one level up, globs its sibling plugins).
+    3. cwd walk-up to the nearest ``.claude/`` marker, then
+       ``.touch/local-orchestrators`` under it — a bare shell in a project
+       checkout. The MARKER dir and the STATE dir are deliberately DIFFERENT:
+       ``.claude/`` is what marks a *Claude Code* project (``.touch/`` is
+       created by Touch and is gitignored, so it cannot mark one), and the run
+       history lives under ``.touch/``.
 
-    Returns ``""`` when nothing resolves. There is deliberately no
-    module-directory fallback: the shared module dir is code-only (D6), and in
-    a plugin install it is a version-stamped cache directory that is re-copied
-    on update and swept ~14 days later — state written there is data loss with
-    extra steps. The caller decides what an unresolved root means.
+    Three rungs, and ``""`` when none of them resolves. The former FOURTH rung —
+    a module-relative ``../../local-orchestrators`` sibling lookup — is DELETED:
+    after GD-U1 nothing sits two levels above this directory in the payload, so
+    it had nothing to resolve to, and in an installed copy it would glob
+    whatever sits beside the plugin (LAYOUT-15, PROTOCOL-11). There is
+    deliberately no module-directory fallback either: the shared module dir is
+    code-only (D6), and in a plugin install it is a version-stamped cache
+    directory that is re-copied on update and swept ~14 days later — state
+    written there is data loss with extra steps. The caller decides what an
+    unresolved root means.
     """
     env = os.environ.get("ORCH_TASKS_ROOT")
     if env:
         return os.path.abspath(env)
     project = os.environ.get("CLAUDE_PROJECT_DIR")
     if project:
-        return os.path.abspath(os.path.join(project, ".claude", "local-orchestrators"))
+        return os.path.abspath(os.path.join(project, ".touch", "local-orchestrators"))
     here = os.path.abspath(os.getcwd())
     while True:
         if os.path.isdir(os.path.join(here, ".claude")):
-            return os.path.join(here, ".claude", "local-orchestrators")
+            return os.path.join(here, ".touch", "local-orchestrators")
         parent = os.path.dirname(here)
         if parent == here:
             break
         here = parent
-    legacy = os.path.abspath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "local-orchestrators"))
-    return legacy if os.path.isdir(legacy) else ""
+    return ""
 
 
 def in_plugin_cache(path: str) -> bool:
@@ -120,7 +123,7 @@ def resolve_state_dir() -> str:
         return os.path.dirname(max(candidates, key=os.path.getmtime))
     sys.exit("decision_watcher: no task state dir found. Set ORCH_STATE_DIR to the "
              "task folder, or ORCH_TASKS_ROOT / CLAUDE_PROJECT_DIR to the project "
-             f"that owns .claude/local-orchestrators (tasks root: {TASKS_ROOT or 'unresolved'})")
+             f"that owns .touch/local-orchestrators (tasks root: {TASKS_ROOT or 'unresolved'})")
 
 
 STATE_DIR = os.path.abspath(resolve_state_dir())
