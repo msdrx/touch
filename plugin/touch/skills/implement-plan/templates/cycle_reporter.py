@@ -45,6 +45,7 @@ Checkpointed in $ORCH_STATE_DIR/.cycle-reporter-state.json (restart-safe; a
 loop-close event is emitted exactly once). Stdlib only.
 """
 
+import glob
 import json
 import os
 import re
@@ -63,6 +64,11 @@ STAGE_SLOT = {"implement": "impl", "test": "gate", "critique": "crit"}
 PROTOCOL_SLOT = {"divide": {"partition": "partition"},
                  "finalgate": {"sweep": "sweep", "implement": "fix"}}
 FINDINGS_EMBED_CAP = 60_000
+#: Where session dirs live: <root>/<project-slug>/<session-id>/subagents/…
+#: The same override knob decision_watcher.py uses (tests point it at a
+#: fixture tree; a foreign layout can too).
+WF_GLOB_ROOT = os.environ.get(
+    "ORCH_WF_GLOB_ROOT", os.path.expanduser("~/.claude/projects"))
 
 CYCLE_CSS = """
   :root { --ink:#1a1a19; --muted:#6b6b68; --surface:#fff; --card:#f6f6f4; --line:#d8d8d4;
@@ -121,7 +127,8 @@ class Reporter:
         self.protocol = {}
         self.plan_order = []          # first-seen order == execution order (serial)
         self.closed = {}              # plan -> {"state": .., "cls": .., "attempt": n}
-        self.marker_cache = {}        # agentId -> marker tuple or None
+        self.marker_cache = {}        # agentId -> marker tuple; HITS only
+        self.pending = []             # result records whose marker is unresolved YET
         # offsets are IN-MEMORY only: every start re-reads the journals from
         # zero and rebuilds the full picture (rendering is idempotent; journals
         # are small). Only `emitted` persists — a loop-close status event must
@@ -196,14 +203,34 @@ class Reporter:
         return lambda plan: base + int(extra.get(plan, 0) or 0)
 
     # -- journal ingestion --------------------------------------------------
-    def marker(self, wf_dir, agent_id):
-        if agent_id in self.marker_cache:
-            return self.marker_cache[agent_id]
-        m = None
-        # A resumed run keeps ONE journal but scatters transcripts across the
-        # session dirs it lived in — search every provided wf_dir, record's own
-        # dir first.
-        dirs = [wf_dir] + [d for d in self.wf_dirs if d != wf_dir]
+    def _run_dirs(self):
+        """Every session dir carrying this run's transcripts, argv dirs first.
+
+        The harness keys the transcript dir to the ACTIVE session id, and
+        /clear or /compact rotates that id mid-run while a background workflow
+        keeps going — so one run's transcripts scatter across sibling session
+        dirs named ``…/<session-id>/subagents/workflows/<run-name>/`` while
+        ``journal.jsonl`` stays at its launch-time path. decision_watcher.py
+        rides the same glob (``agent_paths``); the reporter that searched only
+        its argv dirs sat wedged for hours on a real run — every post-/clear
+        result was markerless, so no page rendered and no loop close fired
+        after the rotation. Re-globbed every pass: a /clear can add a dir at
+        any moment.
+        """
+        dirs = list(self.wf_dirs)
+        for wf in self.wf_dirs:
+            run = os.path.basename(os.path.normpath(wf))
+            pat = os.path.join(WF_GLOB_ROOT, "*", "*",
+                               "subagents", "workflows", run)
+            for d in sorted(glob.glob(pat)):
+                if d not in dirs:
+                    dirs.append(d)
+        return dirs
+
+    def marker(self, dirs, agent_id):
+        m = self.marker_cache.get(agent_id)
+        if m is not None:
+            return m
         for d in dirs:
             path = os.path.join(d, f"agent-{agent_id}.jsonl")
             try:
@@ -214,13 +241,56 @@ class Reporter:
             hit = MARKER_RE.search(head)
             if hit:
                 m = (hit.group(1), hit.group(2), hit.group(3), int(hit.group(4)))
-                break
-        self.marker_cache[agent_id] = m
-        return m
+                # Cache HITS only. A miss may just be a transcript that has
+                # not landed yet — or one sitting in a session dir a later
+                # pass will see; caching the None is what made the wedge above
+                # permanent instead of transient.
+                self.marker_cache[agent_id] = m
+                return m
+        return None
+
+    def _apply(self, rec, dirs):
+        """Route one journal result record into cycles/protocol.
+
+        Returns False when the record's [monitor] marker cannot be resolved
+        YET — the caller parks it in ``pending`` and retries next pass.
+        Everything else (routed, or resolvable-but-not-ours) is consumed:
+        True. State changes flag ``self._dirty`` directly.
+        """
+        mark = self.marker(dirs, rec.get("agentId", ""))
+        if not mark:
+            return False
+        plan, stage, _role, attempt = mark
+        res = rec.get("result")
+        if plan in PROTOCOL_SLOT:
+            pslot = PROTOCOL_SLOT[plan].get(stage)
+            if pslot is not None and isinstance(res, dict):
+                self.protocol.setdefault(plan, {}) \
+                    .setdefault(attempt, {})[pslot] = res
+                self._dirty = True
+            return True
+        slot = STAGE_SLOT.get(stage)
+        if slot is None or not plan.startswith("sp-"):
+            return True
+        if not isinstance(res, dict):
+            return True
+        per = self.cycles.setdefault(plan, {})
+        if plan not in self.plan_order:
+            self.plan_order.append(plan)
+        # journal order: a retry's result simply overwrites its attempt slot
+        per.setdefault(attempt, {})[slot] = res
+        self._dirty = True
+        return True
 
     def ingest(self):
-        """Consume new complete journal lines; return True if anything changed."""
-        changed = False
+        """Consume new journal lines + retry pending; True if anything changed."""
+        self._dirty = False
+        dirs = self._run_dirs()
+        # Parked records first (oldest first): their transcripts may have
+        # appeared since, possibly in a session dir the last pass had no way
+        # to see.
+        if self.pending:
+            self.pending = [r for r in self.pending if not self._apply(r, dirs)]
         for wf in self.wf_dirs:
             jp = os.path.join(wf, "journal.jsonl")
             try:
@@ -245,30 +315,9 @@ class Reporter:
                     continue
                 if rec.get("type") != "result":
                     continue
-                mark = self.marker(wf, rec.get("agentId", ""))
-                if not mark:
-                    continue
-                plan, stage, _role, attempt = mark
-                res = rec.get("result")
-                if plan in PROTOCOL_SLOT:
-                    pslot = PROTOCOL_SLOT[plan].get(stage)
-                    if pslot is not None and isinstance(res, dict):
-                        self.protocol.setdefault(plan, {}) \
-                            .setdefault(attempt, {})[pslot] = res
-                        changed = True
-                    continue
-                slot = STAGE_SLOT.get(stage)
-                if slot is None or not plan.startswith("sp-"):
-                    continue
-                if not isinstance(res, dict):
-                    continue
-                per = self.cycles.setdefault(plan, {})
-                if plan not in self.plan_order:
-                    self.plan_order.append(plan)
-                # journal order: a retry's result simply overwrites its attempt slot
-                per.setdefault(attempt, {})[slot] = res
-                changed = True
-        return changed
+                if not self._apply(rec, dirs):
+                    self.pending.append(rec)
+        return self._dirty
 
     # -- loop close ---------------------------------------------------------
     def classify(self, crit):

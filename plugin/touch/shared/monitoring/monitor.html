@@ -67,6 +67,15 @@
   .card.wide { grid-column: 1 / -1; }
   .card h2 { font-size:13px; font-weight:600; margin:0; padding:12px 14px; display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; border-bottom:1px solid var(--line); min-width:0; }
   .card h2 .title { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Source-impact icon (loop cards only): a pencil when the loop's observed
+     roles include an implementer — it edits source code — and the same pencil
+     struck through when they never do (read-only: its output is .md files).
+     Hidden until any role is known; never shown on the orchestrator card. */
+  .card h2 .editico { flex:none; color:var(--muted); line-height:0; }
+  .card h2 .editico[hidden] { display:none; }
+  .card h2 .editico svg { width:13px; height:13px; display:block; }
+  .card h2 .editico .strike { visibility:hidden; }
+  .card h2 .editico.readonly .strike { visibility:visible; }
   /* Log disclosure (every card): the header always stays visible; only the log
      list folds (plus the sub-plans list on the orchestrator). Collapsed by
      default, arrow rotates when open. */
@@ -526,7 +535,7 @@ function planEl(id) {
   if (plans.has(id)) return plans.get(id);
   const card = document.createElement("section");
   card.className = "card" + (id === "orchestrator" ? " wide" : "");
-  card.innerHTML = `<h2><span class="badge">queued</span><span class="title"></span><span class="span"></span><span class="tok"></span></h2>
+  card.innerHTML = `<h2><span class="badge">queued</span><span class="title"></span><span class="editico" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" d="M11.6 2.4l2 2L5.4 12.8l-2.8.6.6-2.8z"/><line class="strike" x1="2.2" y1="2.2" x2="13.8" y2="13.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span><span class="span"></span><span class="tok"></span></h2>
     <div class="flow"></div><ul class="agents"></ul><div class="stagebar"></div><ul class="log"></ul>`;
   card.querySelector(".title").textContent = id === "orchestrator" ? "Orchestrator" : id;
   if (id === "orchestrator") {
@@ -557,6 +566,7 @@ function planEl(id) {
                   titleEl: card.querySelector(".title"), spanEl: card.querySelector(".span"),
                   flowEl: card.querySelector(".flow"), agentsEl: card.querySelector(".agents"),
                   subplansEl: card.querySelector(".subplans"), subplansKey: "", roster: [], filesBtn: null,
+                  editIco: id === "orchestrator" ? null : card.querySelector(".editico"), editKind: "",
                   agents: new Map(), roles: new Map(), firstTs: null, lastTs: null, lastMs: null,
                   tokIn: 0, tokOut: 0, tokCached: 0, tokWrite: 0, stages: new Map(), state: "queued",
                   flowDirty: false, spanDirty: false,
@@ -764,6 +774,28 @@ function agentRow(p, aid, label) {  // one <li>, built the same way for a live e
   p.agents.set(aid, row);
   return row;
 }
+// Source-impact icon: the role set is the evidence — an "impl" role (bare or
+// stage-qualified, "implement:impl") means this loop's agents edit source
+// code; any other mix (research/synth/test/critique) only ever writes .md
+// files, so the pencil wears the strike. The classification can only change
+// when a NEW role joins the set (finalgate upgrades to editor the moment its
+// fixer spawns), so callers invoke this on exactly that occasion — never on
+// the per-event path. p.editIco is null on the orchestrator card by design.
+function updateEditIcon(p) {
+  if (!p.editIco) return;
+  let impl = false;
+  for (const role of p.roles.keys())
+    if (role.split(":").pop() === "impl") { impl = true; break; }
+  const kind = impl ? "editor" : "readonly";
+  if (kind === p.editKind) return;
+  p.editKind = kind;
+  p.editIco.hidden = false;
+  p.editIco.classList.toggle("readonly", !impl);
+  const label = impl ? "edits source code" : "read-only — writes .md files only";
+  p.editIco.title = label;
+  p.editIco.setAttribute("role", "img");
+  p.editIco.setAttribute("aria-label", label);
+}
 function upsertAgent(p, a, ts, tms) {
   let row = p.agents.get(a.id);
   if (!row) {
@@ -786,10 +818,10 @@ function upsertAgent(p, a, ts, tms) {
   if (a.runtime) row.dur.textContent = a.runtime;
   const role = (a.label || a.id).split(" #")[0];
   const attempt = parseInt((a.label || "").split(" #")[1]) || 1;
-  const node = p.roles.get(role) || { state: "running", attempt: 1 };
+  let node = p.roles.get(role);
+  if (!node) { p.roles.set(role, node = { state: "running", attempt: 1 }); updateEditIcon(p); }
   if (a.state) node.state = a.state;
   node.attempt = Math.max(node.attempt, attempt);
-  p.roles.set(role, node);
   // FRONTEND-RENDER-4: the strip was torn down and rebuilt 11,416 times for a
   // topology that changes a handful of times. Mark it; flushDirty rebuilds once.
   p.flowDirty = true;
@@ -2575,6 +2607,7 @@ function hydratePlan(p, ps) {
     const n = pair[1] || {};
     p.roles.set(pair[0], { state: n.state || "running", attempt: n.attempt || 1 });
   }
+  updateEditIcon(p);
   p.flowDirty = true;
   const log = Array.isArray(ps.log) ? ps.log : [];
   p.logTotal = typeof ps.logTotal === "number" ? ps.logTotal : log.length;

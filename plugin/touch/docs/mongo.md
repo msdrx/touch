@@ -204,8 +204,10 @@ being mirrored is resolved separately (`$CLAUDE_PROJECT_DIR` >
 `$TOUCH_PROJECT_CWD` > a cwd walk-up to a `.claude/` marker > the cwd itself),
 and `.touch/` plus the derived database name hang off that — so `cd` into the
 checkout you mean to inspect before running any of these, or export one of
-those two variables. (`-P` keeps an unrelated `aggregator/` in that cwd from
-shadowing the payload's.)
+those two variables. (`$TOUCH_STATE_DIR`, if you set it, relocates `.touch/`
+alone; the database name keeps following the project root, so the two can end
+up naming different checkouts. `-P` keeps an unrelated `aggregator/` in that
+cwd from shadowing the payload's.)
 
 **Credentials live in `.touch/mongo.json`, mode 0600** — the same handling as
 `server.json`'s per-boot token (GD-13):

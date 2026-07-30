@@ -354,7 +354,14 @@ but stay one click away. Each plan/loop card's header additionally carries a
 **"files" pill** (same UI, same popup) filtered to the files that loop
 produced — attribution is by basename prefix (`<plan>-…`/`<plan>.md`, the
 findings handoff naming convention; the longest matching plan id wins), and
-the pill stays hidden while no file matches:
+the pill stays hidden while no file matches. Next to a loop card's title sits
+a **source-impact icon**: a plain pencil when the loop's observed roles
+include an implementer (`impl`, bare or stage-qualified — it edits source
+code), the same pencil struck through when they never do (read-only — a role
+mix like research/synth/test/critique only ever writes `.md` files). It is
+derived from the role set, never the plan id, so it appears with the first
+agent, upgrades if a finalgate fixer spawns, and never renders on the
+Orchestrator card:
 
 - **`.html`/`.htm` files** (e.g. the final illustrated report the driver
   writes when the run completes) open in a new tab. Reports are served with
@@ -497,18 +504,29 @@ the plugin, state stays in your project.** Nothing under the plugin root is
 ever written to — it is a version-stamped cache that an update replaces — and
 nothing under the project tree is copied per task from the module.
 
-The plugin root (`${CLAUDE_PLUGIN_ROOT}` inside a session; `claude plugin list`
-prints the install path; in the development checkout it is `plugin/touch`):
+The plugin root: `claude plugin list --json` reports it as `installPath`
+(shape: `~/.claude/plugins/cache/<marketplace>/touch/<version>`) — the plain
+`claude plugin list` prints only version, scope and status, no path; in the
+development checkout it is `plugin/touch`. `${CLAUDE_PLUGIN_ROOT}` below is
+*notation* for that directory: it names the same place inside a hook, MCP or
+LSP process the plugin starts, but it is **not** exported into your session
+shell or into `bin/` wrappers (GD-T4, measured empty), so read the path off
+`--json` rather than pasting the variable into a terminal. Both trees below are
+excerpts — the parts this module touches, not a full inventory:
 
 ```
 ${CLAUDE_PLUGIN_ROOT}/
 ├── bin/                             # touch-status, touch-monitor, touch-watcher, …
 │                                    #   on PATH while the plugin is enabled
 ├── shared/monitoring/               # this module — stateless, same for every task
-└── skills/
-    ├── m-orchestrator/SKILL.md      # monitoring integration skill
-    ├── execute-research/            # research -> ONE synthesized plan (read-only)
-    └── implement-plan/              # plan -> implement->test->critique loops
+├── skills/
+│   ├── m-orchestrator/SKILL.md      # monitoring integration skill
+│   ├── execute-research/            # research -> ONE synthesized plan (read-only)
+│   ├── implement-plan/              # plan -> implement->test->critique loops
+│   └── …                            # ten skill directories in all
+└── …                                # .claude-plugin/, aggregator/, docs/,
+                                     #   hooks/, touch-visual/, README.md,
+                                     #   CHANGELOG.md, LICENSE
 ```
 
 Your project, the only place a run writes:
@@ -520,7 +538,9 @@ Your project, the only place a run writes:
         ├── events.jsonl                   # the append-only stream
         ├── orch-config.json               # the run's config
         ├── .watcher-state.json            # the watcher's checkpoint
-        └── orch-scripts/                  # the task's adapted workflow script
+        ├── orch-scripts/                  # the task's adapted workflow script
+        └── …                              # plan/, findings/, report/ — the run's
+                                           #   own documents, served by /artifacts
 ```
 
 `ORCH_STATE_DIR` names one `<task-name>` folder in the second tree; it never

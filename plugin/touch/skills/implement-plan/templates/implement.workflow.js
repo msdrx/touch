@@ -75,6 +75,37 @@ const PARALLEL_MODE = ARGS.parallel === true   // never shadow the parallel() gl
 // loop" is granted — never by editing MAX_ATTEMPTS for everyone.
 const EXTRA_ATTEMPTS = ARGS.extra_attempts || {}
 
+// Infrastructure guard — network-recovery.md layer 2, IN the protocol, not
+// optional prophylaxis. An `agent()` that returns null died on infrastructure
+// (an API outage outlasting the harness's own retries, or a user skip) — that
+// is a STRIKE, never a verdict: it must not spend a gated attempt and must not
+// be laundered into a fabricated "gate died" red. Retry the same work on the
+// SAME attempt up to NET_RETRIES times, then THROW so the run stops cleanly
+// where it stands — attempts unspent, the journal marking the exact spawn, the
+// RESUME.md procedures continuing from here. The appended retry tag makes the
+// prompt distinct so a later resumeFromRunId re-executes the retried call live
+// instead of replaying a cached null; the [monitor] marker is unchanged (same
+// attempt — honest display, one extra agent row). This wrapper used to live
+// only in network-recovery.md as launch-time advice; the run that promoted it
+// here had two loops burn all four attempts in a 2h outage (~3 minutes per
+// death, zero substantive verdicts) and close `failed (retryable)` — a
+// verdict class the gates never issued.
+const NET_RETRIES = 3
+const agentR = async (prompt, opts) => {
+  let r = await agent(prompt, opts)
+  for (let n = 1; r === null && n <= NET_RETRIES; n++) {
+    log(`${opts.label}: agent returned null (infrastructure death) — same-attempt retry ${n}/${NET_RETRIES}`)
+    r = await agent(
+      prompt + `\n(infrastructure retry ${n}: the previous try of this exact task died without returning — outage, not a task failure. Do the task from scratch.)`,
+      { ...opts, label: `${opts.label}~r${n}` })
+  }
+  if (r === null) {
+    throw new Error(`${opts.label}: agent died ${NET_RETRIES + 1}x — infrastructure down; ` +
+      `attempts preserved, resume per plan/RESUME.md (network-recovery.md, manual restart)`)
+  }
+  return r
+}
+
 // Quote every path interpolation so a PROJECT_DIR/TASK path with a space cannot
 // split the env assignment / arg list. Keep agent-filled <summary> text
 // single-line, no double quotes (see m-orchestrator SKILL.md).
@@ -207,6 +238,16 @@ const closeRun = async (state, summary) => {
   }
 }
 
+// The one legitimate response to agentR giving up: close the run's badge as
+// failed WITH the infrastructure cause, then rethrow so the workflow visibly
+// stops. Never convert this into a loop verdict — nothing was rejected, and
+// every unspent attempt is still there for the resume.
+const infraStop = async (e) => {
+  await closeRun('failed',
+    `infrastructure stop: ${e && e.message ? e.message : e}`)
+  throw e
+}
+
 const IMPL_SCHEMA = {
   type: 'object', required: ['done', 'files_changed', 'summary'],
   properties: { done: { type: 'boolean' },
@@ -245,26 +286,12 @@ Working tree may hold unrelated in-flight changes — never revert/commit/stash;
 touch only files owned by THIS sub-plan.
 `
 
-// When a gate/critique agent dies mid-run it writes no findings file; the loop
-// writes a placeholder so the next implementer still gets a (minimal) handoff
-// instead of an empty findings_file the openFindings guard would drop.
-const writePlaceholderFindings = async (file, note) => {
-  try {
-    const fs = await import('node:fs')
-    fs.mkdirSync(FINDINGS, { recursive: true })
-    fs.writeFileSync(file, `# ${note}\n\n` +
-      `The gate agent returned no result (crashed / killed), so nothing was\n` +
-      `recorded. Next implementer: re-run the targeted + full suites yourself,\n` +
-      `treat any new failure as still unaddressed, and re-verify the whole change.\n`)
-  } catch (e) {
-    log(`could not write placeholder findings ${file}: ${e}`)
-  }
-  return file
-}
-
 // Attempt N>1 hands the implementer FILE PATHS, not inlined findings: the fresh
 // agent starts with clean context and reads the durable source of truth itself.
-const implPrompt = (sp, attempt, findingsFiles) => `
+// `notes` is the one inline exception — a refusing implementer (done=false)
+// leaves no findings file, and this runtime has no filesystem to write one, so
+// its reason rides along as prompt text instead of dying with the agent.
+const implPrompt = (sp, attempt, findingsFiles, notes) => `
 [monitor] plan=${sp.id} stage=implement role=impl attempt=${attempt}
 You are the IMPLEMENTER for sub-plan ${sp.id} (${sp.title}), a fresh subagent —
 everything you need is in this prompt and on disk.
@@ -281,10 +308,12 @@ READ FIRST, in order:
    the decided approach; global decisions bind you even where your file is only
    one half of a cross-file item.
 3. The research findings files referenced by those ids (paths in the plan).
-${findingsFiles.length ? `4. A previous attempt failed its gates. READ these gate/critique findings files and
+${(findingsFiles.length || (notes && notes.length)) ? `4. A previous attempt failed its gates.${findingsFiles.length ? ` READ these gate/critique findings files and
 address EVERY item still applicable to the current tree (verify against the tree
 — earlier items may already be fixed):
-${findingsFiles.map(f => '- ' + f).join('\n')}` : ''}
+${findingsFiles.map(f => '- ' + f).join('\n')}` : ''}${notes && notes.length ? `
+Prior-attempt notes (inline — a refusing implementer leaves no findings file):
+${notes.map(n => '- ' + n).join('\n')}` : ''}` : ''}
 
 Then implement the items matching existing repo style, and write/extend tests.
 Sanity-check ONLY your own work (run just the tests you touched; syntax-check the
@@ -370,41 +399,46 @@ const classify = (success, crit) => success ? 'green'
 
 // One full impl->test->critique loop for a single sub-plan. Fresh implementer
 // every attempt; the handoff is ONLY through findings files + the current tree.
+// ATTEMPTS ARE VERDICTS: `attempt` advances only when a spawned agent RETURNED
+// — agentR has already absorbed infrastructure deaths (or thrown), so a null
+// can never reach this loop, spend a cap slot, or be fabricated into a "gate
+// died" red. A `done:false` REFUSAL does spend its attempt — the agent judged
+// the task and that judgment is a result — but the judgment must survive it:
+// the reason rides to the next attempt via openNotes (the refusal that went
+// unread once cost a run its endgame — the next fresh implementer re-derived
+// the blockage from scratch and resolved it the wrong way).
 const runLoop = async (sp) => {
   const cap = MAX_ATTEMPTS + (EXTRA_ATTEMPTS[sp.id] || 0)
   let attempt = 0
   let openFindings = []   // findings-file paths from every failed gate so far
+  let openNotes = []      // inline refusal reasons (no file to point at)
   let impl = null, gate = null, crit = null
   let success = false
   while (!success && attempt < cap) {
     attempt++
     log(`${sp.id} attempt ${attempt}/${cap}${openFindings.length ? ` (open findings: ${openFindings.length})` : ''}`)
 
-    impl = await agent(implPrompt(sp, attempt, openFindings), {
+    impl = await agentR(implPrompt(sp, attempt, openFindings, openNotes), {
       model: 'opus', effort: attempt >= 3 ? 'xhigh' : 'high',
       label: `${sp.id}:impl:${attempt}`, phase: 'Implement', schema: IMPL_SCHEMA,
     })
-    if (!impl || !impl.done) { continue }
+    if (!impl.done) {
+      openNotes.push(`attempt ${attempt} implementer returned done=false: ` +
+        String(impl.summary || '(no reason given)').slice(0, 600))
+      continue
+    }
 
     const gateFile = gateFindingsFile(sp, attempt)
-    gate = await agent(gatePrompt(sp, attempt, impl, gateFile), {
+    gate = await agentR(gatePrompt(sp, attempt, impl, gateFile), {
       model: 'opus', effort: 'medium',
       label: `${sp.id}:gate:${attempt}`, phase: 'Test', schema: GATE_SCHEMA,
     })
-    if (!gate) {
-      gate = { passed: false, summary: 'gate agent died',
-               findings_file: await writePlaceholderFindings(gateFile, `test gate crashed (attempt ${attempt}); rerun suites`) }
-    }
 
     const critFile = critFindingsFile(sp, attempt)
-    crit = await agent(critPrompt(sp, attempt, impl, gate, critFile), {
+    crit = await agentR(critPrompt(sp, attempt, impl, gate, critFile), {
       model: 'opus', effort: 'high',
       label: `${sp.id}:critique:${attempt}`, phase: 'Critique', schema: CRIT_SCHEMA,
     })
-    if (!crit) {
-      crit = { approved: false, summary: 'critique agent died',
-               findings_file: await writePlaceholderFindings(critFile, `critique crashed (attempt ${attempt}); re-review the change`) }
-    }
 
     success = gate.passed && crit.approved
     if (!success) {
@@ -444,6 +478,7 @@ const DIVIDE_SCHEMA = {
           id: { type: 'string' }, title: { type: 'string' },
           files: { type: 'array', items: { type: 'string' } },
           finding_ids: { type: 'array', items: { type: 'string' } },
+          last: { type: 'boolean' },
         },
       },
     },
@@ -468,6 +503,11 @@ feature-sub-plans:
   shared decision so the halves cannot drift.
 - Optimize the cut: cohesive features, minimal cross-sub-plan coupling, no
   sub-plan too broad to implement and review in one gated loop.
+- If the plan ends with an endgame item that must run STRICTLY LAST over the
+  MERGED change-set (the commit, a release dry-run, an aggregate acceptance),
+  make it its own sub-plan marked \`last: true\` (at most one). At run time it
+  is gated on every other loop closing green — a strictly-last loop must never
+  absorb a dead sibling's work — so keep its \`files\` list empty or minimal.
 Write the partition to ${SUBPLANS_FILE} (mkdir -p its dir first): one section
 per sub-plan — id (sp-<slug>), title, owned files, the ordered plan items /
 finding ids it implements, and the shared decisions it must honor.
@@ -477,10 +517,13 @@ Return structured output only: subplans (id/title/files/finding_ids each), subpl
 
 phase('Divide')
 await publishConfig()
-const divide = await agent(dividePrompt(), {
-  model: 'fable', effort: 'high',
-  label: 'divide', phase: 'Divide', schema: DIVIDE_SCHEMA,
-})
+let divide = null
+try {
+  divide = await agentR(dividePrompt(), {
+    model: 'fable', effort: 'high',
+    label: 'divide', phase: 'Divide', schema: DIVIDE_SCHEMA,
+  })
+} catch (e) { await infraStop(e) }
 if (!divide || !Array.isArray(divide.subplans) || !divide.subplans.length) {
   await runStatus('divide', 'plan', 'failed', 'divider produced no sub-plans')
   await closeRun('failed', 'run failed: no partition to implement')
@@ -509,29 +552,63 @@ await runStatus('divide', 'plan', 'done', `${SUBPLANS.length} sub-plans`,
 
 // ---- Drive the sub-plans: SERIAL by default, PARALLEL only when instructed ----
 log(`implementing ${SUBPLANS.length} feature-sub-plans (${PARALLEL_MODE ? 'PARALLEL' : 'SERIAL'}): ${SUBPLANS.map(s => s.id).join(', ')}`)
-let results
+// Strictly-last loops (divider-marked `last: true` — e.g. the endgame that
+// commits the merged change-set) run ONLY over an all-green board, serially,
+// after everything else. A red or missing prerequisite records the loop as
+// `blocked` WITHOUT spawning it: the one run that let an endgame start over
+// red siblings watched a fresh implementer "resolve" the contradiction by
+// taking over the dead loops' files and committing half-reviewed work.
+const NORMAL = SUBPLANS.filter(sp => sp.last !== true)
+const LAST = SUBPLANS.filter(sp => sp.last === true)
+let results = []
 let criticalStop = null   // the red loop whose final critique flagged critical_defect
-if (PARALLEL_MODE) {
-  // Opt-in only, and only for disjoint file ownership. Barrier: the final gate
-  // sweeps the MERGED change-set. (The critical-stop early exit is a serial-mode
-  // behavior — concurrent loops cannot be stopped mid-flight cleanly.)
-  results = (await parallel(SUBPLANS.map(sp => () => runLoop(sp)))).filter(Boolean)
-  criticalStop = results.find(r => r.classification === 'critical-stop') || null
-} else {
-  // Default: one sub-plan at a time. A red loop STAYS failed and the next loop
-  // starts — except a critical-stop, which ends the run before the next loop
-  // so the user decides while the remaining token budget is still unspent.
-  results = []
-  for (const sp of SUBPLANS) {
+let failed = []
+let allFiles = []
+let finalGate = { passed: false, summary: 'final gate not run' }
+try {
+  if (PARALLEL_MODE) {
+    // Opt-in only, and only for disjoint file ownership. Barrier: the final gate
+    // sweeps the MERGED change-set. (The critical-stop early exit is a serial-mode
+    // behavior — concurrent loops cannot be stopped mid-flight cleanly.)
+    results = (await parallel(NORMAL.map(sp => () => runLoop(sp)))).filter(Boolean)
+    // parallel() converts a thrown runLoop (agentR giving up) into a silent
+    // null — never let a loop vanish from the board without a verdict.
+    if (results.length < NORMAL.length) {
+      const missing = NORMAL.filter(sp => !results.find(r => r.id === sp.id)).map(sp => sp.id)
+      throw new Error(`loops ${missing.join(', ')} died without a verdict (infrastructure)`)
+    }
+    criticalStop = results.find(r => r.classification === 'critical-stop') || null
+  } else {
+    // Default: one sub-plan at a time. A red loop STAYS failed and the next loop
+    // starts — except a critical-stop, which ends the run before the next loop
+    // so the user decides while the remaining token budget is still unspent.
+    for (const sp of NORMAL) {
+      const r = await runLoop(sp)
+      results.push(r)
+      if (!r.success) log(`${sp.id} did not close green after ${r.attempts} attempts (${r.classification})`)
+      if (r.classification === 'critical-stop') { criticalStop = r; break }
+    }
+  }
+  for (const sp of LAST) {
+    if (criticalStop) break
+    const notGreen = results.filter(r => !r.success).map(r => r.id)
+    const notRun = NORMAL.filter(s => !results.find(r => r.id === s.id)).map(s => s.id)
+    const holds = [...notGreen, ...notRun]
+    if (holds.length) {
+      log(`${sp.id} BLOCKED (strictly last): ${holds.join(', ')} not green — not started`)
+      results.push({ id: sp.id, success: false, attempts: 0, classification: 'blocked',
+                     next_steps: `close ${holds.join(', ')} green, then run ${sp.id}`,
+                     files_changed: [], gate: null, critique: null, open_findings: [] })
+      continue
+    }
     const r = await runLoop(sp)
     results.push(r)
     if (!r.success) log(`${sp.id} did not close green after ${r.attempts} attempts (${r.classification})`)
     if (r.classification === 'critical-stop') { criticalStop = r; break }
   }
-}
 
-const failed = results.filter(r => !r.success)
-const allFiles = [...new Set(results.flatMap(r => r.files_changed))]
+  failed = results.filter(r => !r.success)
+  allFiles = [...new Set(results.flatMap(r => r.files_changed))]
 
 // ---- Final aggregate gate over the merged change-set (read-only test role) ----
 const finalGateFindings = (a) => `${FINDINGS}/finalgate-attempt-${a}.md`
@@ -569,39 +646,35 @@ LAST run: ${statusCmd('finalgate', 'implement', 'done', `attempt ${attempt}: <on
 Return structured output only: done, files_changed, summary.
 `
 
-let finalGate = { passed: false, summary: 'final gate not run' }
-if (!failed.length) {
-  phase('FinalGate')
-  for (let fga = 1; fga <= FINALGATE_ATTEMPTS; fga++) {
-    const file = finalGateFindings(fga)
-    // The final gate reviewer is the one implement-side agent that runs fable.
-    finalGate = await agent(finalGatePrompt(fga, file), {
-      model: 'fable', effort: 'medium',
-      label: `finalgate:${fga}`, phase: 'FinalGate', schema: GATE_SCHEMA,
-    })
-    if (!finalGate) {
-      finalGate = { passed: false, summary: 'final gate agent died',
-                    findings_file: await writePlaceholderFindings(file, `final gate crashed (attempt ${fga}); rerun full sweep`) }
-    }
-    if (finalGate.passed) break
-    if (fga < FINALGATE_ATTEMPTS) {
-      const fixer = await agent(finalFixPrompt(fga, finalGate.findings_file), {
-        model: 'opus', effort: 'xhigh',
-        label: `finalgate:fix:${fga}`, phase: 'FinalGate', schema: IMPL_SCHEMA,
+  if (!failed.length) {
+    phase('FinalGate')
+    for (let fga = 1; fga <= FINALGATE_ATTEMPTS; fga++) {
+      const file = finalGateFindings(fga)
+      // The final gate reviewer is the one implement-side agent that runs fable.
+      finalGate = await agentR(finalGatePrompt(fga, file), {
+        model: 'fable', effort: 'medium',
+        label: `finalgate:${fga}`, phase: 'FinalGate', schema: GATE_SCHEMA,
       })
-      if (!fixer || !fixer.done) break
+      if (finalGate.passed) break
+      if (fga < FINALGATE_ATTEMPTS) {
+        const fixer = await agentR(finalFixPrompt(fga, finalGate.findings_file), {
+          model: 'opus', effort: 'xhigh',
+          label: `finalgate:fix:${fga}`, phase: 'FinalGate', schema: IMPL_SCHEMA,
+        })
+        if (!fixer.done) break
+      }
     }
-  }
-  // Terminal plan event for the aggregate sweep (R-09).
-  if (finalGate.passed) {
-    await runStatus('finalgate', 'plan', 'done', 'aggregate sweep green')
+    // Terminal plan event for the aggregate sweep (R-09).
+    if (finalGate.passed) {
+      await runStatus('finalgate', 'plan', 'done', 'aggregate sweep green')
+    } else {
+      await runStatus('finalgate', 'plan', 'failed',
+        `sweep not green after ${FINALGATE_ATTEMPTS} attempts`)
+    }
   } else {
-    await runStatus('finalgate', 'plan', 'failed',
-      `sweep not green after ${FINALGATE_ATTEMPTS} attempts`)
+    log(`skipping final gate: ${failed.map(f => f.id).join(', ')} did not close green`)
   }
-} else {
-  log(`skipping final gate: ${failed.map(f => f.id).join(', ')} did not close green`)
-}
+} catch (e) { await infraStop(e) }
 
 // Close the Orchestrator badge and stop this task's daemons (R-09/R-40): the
 // watcher cannot see run completion in the journal. The driver may repeat the
@@ -632,7 +705,7 @@ return { status, subplans: results, final_gate: finalGate,
          decision_needed: criticalStop
            ? (criticalStop.next_steps || 'see the final critique findings file')
            : null,
-         not_started: criticalStop ? SUBPLANS.slice(results.length).map(s => s.id) : [],
+         not_started: SUBPLANS.filter(s => !results.find(r => r.id === s.id)).map(s => s.id),
          failed_loops: failed.map(f => ({ id: f.id, classification: f.classification,
                                           attempts: f.attempts, next_steps: f.next_steps,
                                           open_findings: f.open_findings })),

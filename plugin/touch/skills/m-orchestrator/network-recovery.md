@@ -21,12 +21,23 @@ sketch.
    "gate died" verdict. Guard every spawn with the `agentR` wrapper (below):
    retry the same work up to 3× on the SAME attempt, then THROW so the run
    stops cleanly instead of grinding through attempts.
+   The implement-plan template now carries this wrapper BUILT IN at every
+   spawn site — it stopped being optional after a real fail pass
+   (2026-07-29, a ~2 h outage): an adapted script without it burned all four
+   attempts on two loops back-to-back (~3 minutes per death, zero substantive
+   verdicts), settled them `failed (retryable)`, and the run marched on into
+   its strictly-last endgame, whose fresh implementer then absorbed the dead
+   loops' work and committed half-reviewed prose. Verify an ADAPTED copy kept
+   the wrapper; add it by hand to any other workflow script (research
+   adaptations included).
 3. **Driver/session death** — the workflow stops. All completed work persists
    in the journal + the working tree. Restart manually (below).
 
-## Launch-time prophylaxis (do this when starting any run)
+## Launch-time prophylaxis (verify at every launch)
 
-- Wrap all `agent()` call sites in the workflow script:
+- Every `agent()` call site in the workflow script goes through the wrapper —
+  the implement-plan template ships with it; scripts written or adapted from
+  anything else add it themselves:
 
   ```js
   const NET_RETRIES = 3
@@ -102,7 +113,12 @@ relaunch blindly; the tree already contains completed loops' work.
    cards) to list loops that closed green.
 2. Edit a copy of the workflow script to skip those loops (filter the
    sub-plans array by id), keep everything else byte-identical.
-3. Launch fresh. Implementers verify items against the tree and gates are
+3. Seed interrupted loops honestly: attempts the outage consumed are NOT
+   attempts — only substantive verdicts count (the template's own accounting
+   since `agentR` became built-in). Resume such a loop at its REAL attempt
+   number, handing the fresh implementer only the gate/critique findings
+   files actual verdicts produced.
+4. Launch fresh. Implementers verify items against the tree and gates are
    idempotent, so a loop that half-finished before the outage converges on
    attempt 1 of the new run.
 

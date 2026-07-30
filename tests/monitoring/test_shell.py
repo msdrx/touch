@@ -305,14 +305,22 @@ def test_template_static():
     # text into a shell.
     check('ORCH_STATE_DIR="${TASK}" ${STATUS} "${plan}"' in src,
           "statusCmd quotes ${TASK}/${plan} around the bare writer command")
-    # SHELL-8: died-gate fallback findings_file is NOT the empty string.
+    # SHELL-8, superseded by the infra guard: a dead gate used to be laundered
+    # into a fabricated `{ passed: false, summary: 'gate agent died' }` red via
+    # a placeholder findings file — an attempt spent on infrastructure. The
+    # 2026-07-29 outage run showed where that road goes (whole caps burned with
+    # zero substantive verdicts), so the death paths are GONE: every spawn now
+    # rides `agentR` — same-attempt retries, then a clean run stop with
+    # attempts preserved. These arms pin the replacement and the absence.
     check("findings_file: ''" not in src and 'findings_file: ""' not in src,
           "no empty-string findings_file fallback remains")
-    check("writePlaceholderFindings" in src,
-          "died-gate fallback writes/points at a placeholder findings file")
-    # Both death paths (gate + critique) route through the placeholder helper.
-    check(src.count("await writePlaceholderFindings(") >= 2,
-          "both gate and critique death fallbacks use the placeholder")
+    check("writePlaceholderFindings" not in src,
+          "the fabricated died-gate placeholder path is gone")
+    check("const agentR = async" in src,
+          "the agentR infrastructure guard replaces the death fallbacks")
+    check("summary: 'gate agent died'" not in src
+          and "summary: 'critique agent died'" not in src,
+          "no fabricated 'agent died' verdicts remain in the loop")
 
 
 # --- docs static assertions

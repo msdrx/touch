@@ -400,6 +400,95 @@ def test_sp_loop_close_still_works():
               "the loop still renders its cycle page")
 
 
+# -- scattered transcripts (the /clear rotation) -----------------------------
+# The harness keys the transcript dir to the ACTIVE session id; /clear rotates
+# that id mid-run while the journal stays at its launch-time path, so one run's
+# transcripts scatter across sibling session dirs. The pre-fix reporter looked
+# only in its argv dirs AND cached the miss forever — on the 2026-07-29 run it
+# rendered nothing and emitted no loop close for hours after the first /clear
+# while the watcher (which globs siblings) narrated the same agents fine.
+
+def make_sessions_run(tmp):
+    """make_tree + recording status.sh + a harness-shaped session-dir pair.
+
+    Returns (mod, task, wf_a, wf_b, log). wf_a is the argv/journal dir at
+    <root>/<proj-slug>/<session-a>/subagents/workflows/wf_scatter; wf_b is a
+    sibling session's dir of the SAME run name, reachable only through the
+    glob. `mod.WF_GLOB_ROOT` is pointed at the fixture root — the shipped
+    default reads `ORCH_WF_GLOB_ROOT`, the watcher's own knob.
+    """
+    mod, task, plugin_status, _ = make_tree(tmp)
+    plugin_status.write_text(RECORDING_STATUS_SH, encoding="utf-8")
+    os.chmod(plugin_status, 0o755)
+    (task / "orch-config.json").write_text(
+        json.dumps({"max_plan_attempts": 4, "max_finalgate_attempts": 2}),
+        encoding="utf-8")
+    root = Path(tmp) / "sessions"
+    wf_a = root / "proj-slug" / "session-a" / "subagents" / "workflows" / "wf_scatter"
+    wf_b = root / "proj-slug" / "session-b" / "subagents" / "workflows" / "wf_scatter"
+    wf_a.mkdir(parents=True)
+    wf_b.mkdir(parents=True)
+    mod.WF_GLOB_ROOT = str(root)
+    return mod, task, wf_a, wf_b, plugin_status.parent / "calls.log"
+
+
+def plant_split(journal_wf, transcript_wf, aid, marker, result):
+    """Like plant(), but the transcript and the journal record live apart."""
+    (transcript_wf / f"agent-{aid}.jsonl").write_text(
+        json.dumps({"type": "user", "text": marker}) + "\n", encoding="utf-8")
+    with open(journal_wf / "journal.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "result", "agentId": aid,
+                            "result": result}) + "\n")
+
+
+def test_scattered_transcripts_still_resolve():
+    print("test_scattered_transcripts_still_resolve")
+    check("ORCH_WF_GLOB_ROOT" in REPORTER_SRC.read_text(encoding="utf-8"),
+          "the glob root is env-overridable under the watcher's own knob name")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf_a, wf_b, log = make_sessions_run(tmp)
+        plant_split(wf_a, wf_a, "a1", "[monitor] plan=sp-sc stage=implement role=impl attempt=1",
+                    {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        # the /clear happened here: gate + critique transcripts land in the sibling
+        plant_split(wf_a, wf_b, "a2", "[monitor] plan=sp-sc stage=test role=test attempt=1",
+                    {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant_split(wf_a, wf_b, "a3", "[monitor] plan=sp-sc stage=critique role=critique attempt=1",
+                    {"approved": True, "summary": "ok", "findings_file": "f",
+                     "depth": "in-scope", "critical_defect": False})
+        rep = mod.Reporter(str(task), [str(wf_a)])
+        rep.pass_once()
+        check(calls(log) == ["sp-sc|plan|done|green on attempt 1/4|"],
+              "a loop whose gate/critique transcripts sit in a sibling session dir still closes")
+        check((task / "report" / "cycles" / "sp-sc-cycle-1.html").is_file(),
+              "its cycle page renders from the argv dir's journal alone")
+        check(rep.pending == [], "nothing stays parked once every marker resolves")
+
+
+def test_marker_miss_is_retried_not_cached():
+    print("test_marker_miss_is_retried_not_cached")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf_a, wf_b, log = make_sessions_run(tmp)
+        # journal record lands FIRST; the transcript does not exist anywhere yet
+        with open(wf_a / "journal.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "result", "agentId": "a9",
+                                "result": {"done": True, "files_changed": [],
+                                           "summary": "s"}}) + "\n")
+        rep = mod.Reporter(str(task), [str(wf_a)])
+        rep.pass_once()
+        check(len(rep.pending) == 1 and rep.plan_order == [],
+              "an unresolvable record parks in pending instead of being dropped")
+        # the transcript appears later, in the sibling dir no argv names
+        (wf_b / "agent-a9.jsonl").write_text(
+            json.dumps({"type": "user",
+                        "text": "[monitor] plan=sp-late stage=implement role=impl attempt=1"})
+            + "\n", encoding="utf-8")
+        rep.pass_once()
+        check(rep.pending == [] and "sp-late" in rep.plan_order,
+              "the parked record routes on a later pass — a miss is never cached")
+        check((task / "report" / "cycles" / "sp-late-cycle-1.html").is_file(),
+              "and its cycle page renders then")
+
+
 def main():
     try:
         for t in (test_plugin_copy_wins, test_project_copy_is_never_a_fallback,
@@ -410,7 +499,9 @@ def main():
                   test_divide_closes_done_with_plans_total,
                   test_divide_closes_failed_like_the_template,
                   test_finalgate_closes,
-                  test_sp_loop_close_still_works):
+                  test_sp_loop_close_still_works,
+                  test_scattered_transcripts_still_resolve,
+                  test_marker_miss_is_retried_not_cached):
             t()
     finally:
         # Most fixture modules were loaded out of a TemporaryDirectory that no

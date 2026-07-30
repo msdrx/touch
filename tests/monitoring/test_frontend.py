@@ -319,6 +319,7 @@ def main():
 
     perf_guards(src)
     roster_guards(src)
+    editico_guards(src)
 
     print("test_frontend.py: all assertions passed")
     return 0
@@ -758,6 +759,38 @@ def roster_guards(src):
     assert "snap.roster" in snap_slice, \
         "ROSTER: v2 snapshot hydration must apply the fold's roster (FOLD_GEN 2) — " \
         "without it a hydrated view drops what a full replay shows"
+
+
+def editico_guards(src):
+    """EDITICO: the source-impact icon in the loop-card header. A pencil for
+    loops whose observed roles include an implementer (they edit source), the
+    same pencil struck through for role sets that only ever write .md files.
+    Derived from the role set — never from the plan id — and recomputed only
+    when a NEW role joins, so it stays off the per-event path."""
+    plan_el = _slice(src, "function planEl(", "function render()")
+    assert 'class="editico" hidden' in plan_el, \
+        "EDITICO: the icon is part of planEl's static template, hidden until a role is known"
+    assert 'class="strike"' in plan_el, \
+        "EDITICO: the template carries the strike line the readonly variant reveals"
+    assert 'editIco: id === "orchestrator" ? null' in plan_el, \
+        "EDITICO: the orchestrator card never wears the icon (editIco is null by design)"
+    upd = _slice(src, "function updateEditIcon(", "function upsertAgent(")
+    assert 'role.split(":").pop() === "impl"' in upd, \
+        "EDITICO: classification keys on the impl role, bare or stage-qualified"
+    assert 'classList.toggle("readonly"' in upd, \
+        "EDITICO: the variant flips via classList, never innerHTML"
+    assert "aria-label" in upd and ".title = " in upd, \
+        "EDITICO: color/shape is not the only signal — tooltip + aria-label travel with it"
+    ups = _slice(src, "function upsertAgent(", "const NODE_STATES")
+    assert re.search(r"if \(!node\) \{[^\n]*updateEditIcon\(p\);", ups), \
+        "EDITICO: the live path recomputes only when a NEW role joins the set"
+    hyd = _slice(src, "function hydratePlan(", "// ---- ?snap=verify")
+    assert "updateEditIcon(p);" in hyd, \
+        "EDITICO: snapshot hydration classifies too, or a hydrated view drops the icon"
+    assert ".card h2 .editico .strike { visibility:hidden; }" in src, \
+        "EDITICO: the strike is hidden by default (editor loops show the plain pencil)"
+    assert ".card h2 .editico.readonly .strike" in src, \
+        "EDITICO: the readonly variant reveals the strike"
 
 
 if __name__ == "__main__":

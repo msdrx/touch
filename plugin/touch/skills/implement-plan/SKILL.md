@@ -60,10 +60,25 @@ Run it, keeping the template's invariants:
   tries hard to reject; loop until the gate passes AND critique approves, or
   MAX_ATTEMPTS.
 - **Findings files are the handoff**: every gate writes
-  `findings/<plan>-<gate>-attempt-<N>.md` before returning (the loop writes a
-  placeholder if a gate agent dies); attempt N>1 implementers get FILE PATHS,
-  not inlined findings. The structured return carries only verdict + short
-  summary.
+  `findings/<plan>-<gate>-attempt-<N>.md` before returning; attempt N>1
+  implementers get FILE PATHS, not inlined findings. The structured return
+  carries only verdict + short summary. The one inline exception: an
+  implementer that returns `done:false` (a substantive REFUSAL — it spends its
+  attempt) leaves no findings file, so its reason is forwarded to the next
+  attempt as prompt text instead of dying with the agent.
+- **Infrastructure never spends attempts**: every spawn goes through the
+  template's `agentR` guard — an `agent()` that returns `null` died on the
+  API, not on the work; it is retried on the SAME attempt up to 3×, then the
+  run THROWS and stops where it stands, attempts unspent and the orchestrator
+  badge closed `failed` with the infrastructure cause (m-orchestrator's
+  `network-recovery.md`, layer 2 — in the protocol now, not optional
+  prophylaxis). A dead gate is never fabricated into a red verdict; a stopped
+  run is resumed, not re-judged.
+- **Strictly-last sub-plans**: the divider may mark at most one sub-plan
+  `last: true` (the endgame kind — the commit, the aggregate acceptance over
+  the merged change-set). It runs ONLY when every other loop closed green;
+  otherwise it is recorded `blocked` and never spawned — a strictly-last loop
+  must never absorb a dead sibling's work.
 - **Final aggregate gate** over the MERGED change-set once all loops close
   green; on failure a fresh implementer scoped to the whole change-set, then
   re-gate.
@@ -147,6 +162,15 @@ Loop-failure policy (enforced by the template; acted on by you, the driver):
   each red `retryable` loop gets another attempt — granted by
   relaunching/resuming with `args.extra_attempts = { 'sp-<slug>': N }`, which
   raises only that loop's cap — or whether the red close is accepted.
+- A loop recorded `blocked` (a strictly-last sub-plan whose prerequisites are
+  not green) is not red work and gets no `extra_attempts`: close its
+  prerequisites green, then resume — it runs with its caps untouched.
+- A run that THREW through the `agentR` guard is not `awaiting-user` either:
+  nothing was rejected and every unspent attempt is preserved. When the outage
+  clears, resume per `network-recovery.md` (same-session `resumeFromRunId`
+  replays the green prefix from the journal; cross-session, seed a
+  continuation script from the journal) — never grant `extra_attempts` to pay
+  for infrastructure.
 - `status: 'complete'` (all loops green, aggregate sweep green): nothing to ask;
   do the Completion section.
 

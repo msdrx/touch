@@ -447,6 +447,39 @@ def test_substitution_law_is_respected_in_both_directions():
               f"{directory}/SKILL.md needs no ${{CLAUDE_PLUGIN_ROOT}} (it reads no payload file)")
 
 
+def test_implement_template_guards_every_spawn():
+    """The infra guard (network-recovery.md layer 2) is IN the protocol.
+
+    An `agent()` returning null died on the API, not on the work — it must
+    never spend a gated attempt or be laundered into a fabricated "gate died"
+    red. The 2026-07-29 outage run is why this is pinned: the unguarded loops
+    burned two sub-plans' whole attempt caps (~3 minutes per death, zero
+    substantive verdicts), and the strictly-last endgame then ran over the red
+    board and absorbed the dead loops' work. Every spawn goes through
+    `agentR`; raw `await agent(` appears exactly twice — the wrapper's own
+    first try and its tagged same-attempt retry.
+    """
+    print("test_implement_template_guards_every_spawn")
+    path = SKILLS_DIR / "implement-plan" / "templates" / "implement.workflow.js"
+    if not path.is_file():
+        check(False, "implement.workflow.js is in the payload")
+        return
+    src = path.read_text(encoding="utf-8")
+    check("const agentR = async" in src,
+          "the template defines the agentR infrastructure guard")
+    raw = src.count("await agent(")
+    check(raw == 2,
+          f"raw `await agent(` appears exactly twice, both inside agentR (found {raw})")
+    check(src.count("await agentR(") >= 6,
+          "every spawn site (divide, impl, gate, critique, finalgate, fixer) goes through agentR")
+    check("writePlaceholderFindings" not in src,
+          "no fabricated 'gate died' verdict path remains — a dead gate retries or stops the run")
+    check("last: { type: 'boolean' }" in src,
+          "the divider schema carries the strictly-last marker")
+    check("sp.last === true" in src and "'blocked'" in src,
+          "strictly-last loops are gated on an all-green board and record `blocked` otherwise")
+
+
 # --- item 11: the adopted six say what this repo decided they say
 def test_adopted_skills_dropped_the_retired_tokens():
     """Guidance that collides with settled law, kept out by name.
@@ -553,6 +586,7 @@ def main():
               test_cycle_reporter_is_where_its_wrapper_looks,
               test_tasks_root_is_resolved_not_assumed,
               test_templates_split_the_two_roots,
+              test_implement_template_guards_every_spawn,
               test_substitution_law_is_respected_in_both_directions,
               test_adopted_skills_dropped_the_retired_tokens,
               test_content_skills_cross_reference_by_invocation,
