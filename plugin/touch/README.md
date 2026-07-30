@@ -10,7 +10,7 @@ those loops — deterministic research→plan and plan→implementation drivers
 whose every stage reports to a dashboard Touch renders too (the run dashboard
 below, and the same stream in the session view) — and six engineering-practice
 skills for architecture, testing, refactoring, design patterns and code
-review, which are what those loops apply once they are running. Version 0.3.0
+review, which are what those loops apply once they are running. Version 0.2.1
 renders no button it cannot honestly honour, so nothing here starts, stops or
 restarts anything (see `docs/control-semantics.md` for the verb ladder that a
 later version would implement). It is read-only over your sessions and your

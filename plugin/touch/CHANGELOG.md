@@ -11,7 +11,7 @@ development record of what existed before it; no marketplace ever served it and
 no one could install it, so there is no upgrade path from it to document and
 nothing to migrate. If you installed Touch at all, you installed 0.2.0 or later.
 
-## 0.3.0
+## 0.2.1
 
 Still no session verb — nothing starts, stops, restarts or terminates anything —
 but this release adds Touch's first **write** surface, and it is deliberately a

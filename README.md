@@ -10,7 +10,7 @@ terminal shows you almost nothing about them. Touch puts that run on a local web
 page: which plans are running, what stage each loop is in, what the gates
 decided, and what it all costs in tokens.
 
-> **Alpha — v0.3.0.** Touch is early software: incomplete, moving, and rough in
+> **Alpha — v0.2.1.** Touch is early software: incomplete, moving, and rough in
 > places. Interfaces, layout and command behaviour can change between releases
 > without a migration path.
 
