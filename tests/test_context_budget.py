@@ -113,8 +113,8 @@ CLAUDE_MD_BUDGET_TOKENS = 6000
 #: it is a second CLAUDE.md that nobody is guarding.
 MEMORY_BUDGET_TOKENS = 800
 
-#: The SUM of the ten skills' `description:` values. Measured ~920 tok by this
-#: estimator; `claude plugin details touch` reports ~1,277 for the same set with
+#: The SUM of the ten skills' `description:` values. Measured ~914 tok by this
+#: estimator; `claude plugin details touch` reports ~1,261 for the same set with
 #: the real tokenizer and the per-skill metadata included. Both numbers are
 #: honest about different things — the ceiling is set on THIS estimator, which
 #: is the one every consumer of it uses.

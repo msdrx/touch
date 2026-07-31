@@ -128,7 +128,7 @@ Six more are engineering practice, for the agents inside those loops:
 derived from the books on each one's `Sources:` line, not the works
 themselves.
 
-All ten cost ~1,277 tokens of always-on context between them — a measured
+All ten cost ~1,261 tokens of always-on context between them — a measured
 figure, re-read with `claude --plugin-dir plugin/touch plugin details touch`.
 The two hooks that ship alongside cost no model context at all: a scope guard
 that keeps a run's subagents in their own folder, and an additive recorder

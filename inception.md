@@ -26,8 +26,8 @@ Two components: **aggregator** and **touch-visual**.
 - **Left sidebar**: a list of such terminal sessions; clicking one opens it.
 - **Per-terminal page**: n8n-like UML diagrams/graphs of the run, with controls
   to **pause, restart, start and terminate agent loops**.
-- The "loops" are exactly those defined by the `research` and
-  `implement` skills in `.claude/skills/` — their entities (task, plan,
+- The "loops" are exactly those defined by the `execute-research` and
+  `implement-plan` skills in `.claude/skills/` — their entities (task, plan,
   sub-plan, agent, attempt, gate) are what the UI renders and drives.
 
 ## 2. Repo state
@@ -44,7 +44,7 @@ place to track file counts.
 
 `.claude/` holds the machinery this project was built with:
 
-- `.claude/skills/research/` + `implement/` — the orchestration
+- `.claude/skills/execute-research/` + `implement-plan/` — the orchestration
   skill pair. Research fans out read-only perspective agents (opus) behind a
   barrier, then ONE fable synthesizer writes `plan/<name>-plan.md`.
   Implementation runs a fable divider (file-ownership partitioning, one file =

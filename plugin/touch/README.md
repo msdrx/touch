@@ -139,7 +139,7 @@ switch (the `agent_lifecycle` plugin option, or `TOUCH_AGENT_LIFECYCLE=0`).
   would auto-start one; Touch deliberately does not use it.)
 
 **Context cost — the biggest thing this plugin charges you.**
-`claude plugin details touch` reports **~1,277 tokens always-on** (measured
+`claude plugin details touch` reports **~1,261 tokens always-on** (measured
 2026-07-31 against this payload) — the ten skill descriptions, and nothing
 else — added to every session in which Touch is enabled. Ten, not four:
 0.1.0 shipped the four orchestration skills at ~459 tokens, and 0.2.0 adds six
@@ -148,10 +148,10 @@ on invocation:
 
 | skill | always-on | on invoke |
 |---|---|---|
-| `monitor` | ~150 | ~6.3k |
-| `implement` | ~120 | ~5.7k |
+| `monitor` | ~140 | ~6.2k |
+| `implement` | ~110 | ~5.7k |
 | `orchestrate` | ~120 | ~2.9k |
-| `research` | ~100 | ~3.4k |
+| `research` | ~100 | ~3.3k |
 | `architecture-tradeoffs` | ~170 | ~2.6k |
 | `pattern-selection` | ~140 | ~2.8k |
 | `architecture-boundaries` | ~130 | ~2.4k |

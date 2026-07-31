@@ -325,7 +325,7 @@ the task folder's `orch-scripts/`, never edited, and every per-run value
 arrives through `args` from a run-spec JSON merged over the tracked
 `.touch/run.json`. The scripts emit no events and no prompt mandates a
 self-tracing status call — the watcher, the cycle reporter and `touch-run`
-derive every event from the record. All ten skills cost ~1,277 tokens of
+derive every event from the record. All ten skills cost ~1,261 tokens of
 always-on context between them, a measured figure.
 
 ### The two hooks

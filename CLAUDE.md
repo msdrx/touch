@@ -159,7 +159,7 @@ Four drive the loops (`research`, `implement`, `orchestrate`,
 `monitor`); six are the engineering-practice set adopted under GD-U3
 (architecture, patterns, refactoring, testing, code review — listed in
 `README.md`). The six are advisory and defer to this repo's settled law where
-they disagree, each saying so in its own preamble. All ten cost **~1,277 tok
+they disagree, each saying so in its own preamble. All ten cost **~1,261 tok
 always-on** — measured 2026-07-31 with `claude --plugin-dir plugin/touch plugin
 details touch`, the command to re-run before changing that figure anywhere.
 
@@ -204,11 +204,11 @@ merely tidied:
 
 | source | budget | measured 2026-07-31 |
 |---|---|---|
-| `CLAUDE.md` | ≤ 6,000 tok | ~5,700 |
-| `.touch/memory/MEMORY.md` | ≤ 800 tok | ~220 |
-| Σ ten skill `description:` values | ≤ 1,400 tok | ~920 |
+| `CLAUDE.md` | ≤ 6,000 tok | ~5,851 |
+| `.touch/memory/MEMORY.md` | ≤ 800 tok | ~251 |
+| Σ ten skill `description:` values | ≤ 1,400 tok | ~914 |
 
-The skills row and the ~1,277 quoted above measure the same ten skills
+The skills row and the ~1,261 quoted above measure the same ten skills
 differently — chars/4 over the `description:` bytes here, the real tokenizer
 plus per-skill metadata there. The ceiling is set on this repo's estimator,
 chars/4 over bytes, calibrated once and pinned, because that is the one every

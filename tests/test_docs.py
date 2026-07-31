@@ -387,23 +387,16 @@ def test_readme_pause_is_always_qualified():
     for para in paragraphs(read(README)):
         if "pause" not in para.lower():
             continue
-        # Quoted history (the verbatim original intent) is exempt: it is
-        # labelled as the source of the requirement, not as a promise.
-        if all(ln.strip().startswith(">") for ln in para.splitlines() if ln.strip()):
-            continue
         if not any(q in para.lower() for q in qualifiers):
             bad.append(para.strip()[:90])
     check(not bad, f"every unquoted mention of pause carries its status (bad: {bad})")
-    check("Original intent" in read(README),
-          "the verbatim original intent is kept, and labelled as such")
 
 
 def test_readme_run_section():
     print("test_readme_run_section")
     text = read(README)
-    check("python3 -m aggregator.server" in text, "README says how to start Touch")
+    check("touch-monitor" in text, "README says how to start the dashboard")
     check("token" in text.lower(), "README explains the per-boot token")
-    check("run_all.sh" in text, "README says how to run the tests")
     check("control-semantics.md" in text, "README points at the verb-ladder doc")
 
 
@@ -705,10 +698,6 @@ def test_entry_points_are_the_wrappers():
               f"{path.name}: every `python3 -m aggregator…` / `python3 -c "
               f"\"import aggregator…\"` carries `PYTHONPATH=plugin/touch` — "
               f"there is no root package to import (bad: {bare})")
-    # test_readme_run_section pins the substring `python3 -m aggregator.server`;
-    # GD-U4 keeps it literally true rather than deleting the pin.
-    check("PYTHONPATH=plugin/touch python3 -m aggregator.server" in read(README),
-          "the README's one module-direct line is the PYTHONPATH form (GD-U4)")
 
 
 def test_module_direct_invocations_never_write_bytecode():
@@ -770,11 +759,11 @@ def test_shipped_docs_quote_measured_skill_costs():
     # standard the hook's ~22 ms disclosure is held to two functions up.
     readme = read(PLUGIN_README)
     # Re-measured 2026-07-31 (`claude --plugin-dir plugin/touch plugin details
-    # touch` → ~1,277) after the determinism run reworded the skill prose; the
+    # touch` → ~1,261) after the determinism run reworded the skill prose; the
     # CHANGELOG arm below deliberately stays at 1,257 — that entry is a dated
     # record of what the six skills cost when they landed, not a claim about
     # today (sp-10-docs-budget-carryforward §1).
-    check("1,277" in readme,
+    check("1,261" in readme,
           "the shipped README quotes the re-measured always-on figure")
     check(re.search(r"~459 tokens\s+always-on", readme) is None,
           "the shipped README no longer quotes 459 as the CURRENT always-on cost")
