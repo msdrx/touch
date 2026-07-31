@@ -190,3 +190,70 @@ first" becomes an N-collection scan with every index duplicated.
 - `inception.md` — everything verified about the substrate, summarized
 - `CLAUDE.md` — the session guide and the authority ladder over the full design
   record (whose run folders are local history, absent from a clean checkout)
+
+## Screenshots
+
+<details open>
+<summary><b>1 · Task view</b> — the session timeplan, the orchestrator card, and one card per plan</summary>
+
+<p align="center">
+  <img src="resources/1.task.png" alt="Task view: session timeplan across 16h55m, orchestrator card with session ids and per-plan chips, artifacts, and plan cards showing each agent's token totals and duration" width="820">
+</p>
+
+The timeplan bar is the whole session at a glance — green where agents were
+working, hatched for idle between runs, red where a run was open but the stream
+went silent. Below it, every plan gets a card with its stage chips, its agents,
+and what each one spent.
+
+</details>
+
+<details>
+<summary><b>2 · Statistics</b> — what the run cost and where the time went</summary>
+
+<p align="center">
+  <img src="resources/2.task_stats.png" alt="Statistics view: tokens in 599.67M headline, plus tiles for flow, elapsed, working percentage, dead air, stalls, plans green/red, agents, attempts, tokens out, cache hit, burn rate and event count" width="820">
+</p>
+
+Tokens in and out, cache hit rate, dead air split into idle and stall, retries
+against attempts, and a burn rate per working hour. Same data the token counters
+in the header carry, unrolled.
+
+</details>
+
+<details>
+<summary><b>3 · Artifacts</b> — every file the run produced, served read-only</summary>
+
+<p align="center">
+  <img src="resources/3.generate_files.png" alt="Task artifacts modal listing four plan files and thirty per-cycle HTML reports with sizes and ages" width="820">
+</p>
+
+Plan files and the per-cycle reports `touch-cycle-reporter` writes — one per
+implement → test → critique cycle. Served through the extension-whitelisted,
+realpath-contained `/file` route.
+
+</details>
+
+<details>
+<summary><b>4 · Task index</b> — one card per run folder, done or otherwise</summary>
+
+<p align="center">
+  <img src="resources/4.tasks.png" alt="Task index: twelve run cards with DONE, FAILED or EMPTY badges, token totals, the last event line and time since last activity" width="820">
+</p>
+
+One server serves every task. Finished runs stay — they are the history, and
+they replay on connect.
+
+</details>
+
+<details>
+<summary><b>5 · Project memory</b> — the <code>/memory</code> page, read-only unless you ask otherwise</summary>
+
+<p align="center">
+  <img src="resources/5.claude_memory.png" alt="Project memory page: memory root path, an aligned banner, an explanation of what loads into a session, and a file list where every row is marked read-only because the write plane is off" width="820">
+</p>
+
+Claude Code's auto memory for this project, mapped into `<project>/.touch/memory`
+by `touch-selfcheck --init`. The write plane is off by default: every row says so
+until the server is restarted with `--allow-memory-write`.
+
+</details>
