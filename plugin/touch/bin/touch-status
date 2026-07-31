@@ -39,14 +39,18 @@ command -v python3 >/dev/null 2>&1 || {
 export PYTHONDONTWRITEBYTECODE=1
 
 # The tasks root is deliberately NOT resolved here. status.sh resolves it
-# itself, in the four rungs both daemons use — $ORCH_TASKS_ROOT > the harness's
-# project-directory variable (the one named in prose above, EMPTY here but not
-# in a hook) > a $PWD walk-up to a .claude/ marker > a module-relative legacy
-# path kept only if it already exists (in a payload it does not, so that rung is
-# inert). A wrapper that computed the same answer and exported it would
-# pin the callee's FIRST rung, so every later correction to that resolver would
-# be unreachable for anyone who came in through bin/. One resolver, living in
-# the code that owns it.
+# itself, in the THREE rungs both daemons use — $ORCH_TASKS_ROOT > the
+# harness's project-directory variable (the one named in prose above, EMPTY
+# here but not in a hook) > a $PWD walk-up to a .claude/ marker, then join
+# .touch/local-orchestrators onto it. Rung 4 — a module-relative
+# `../../local-orchestrators` sibling lookup — was DELETED (GD-U1 left it
+# nothing to resolve to, and in a packaged copy it would glob sibling
+# plugins), so do not restore it here by describing it: the owner of that
+# ladder is `shared/monitoring/status.sh` (`resolve_tasks_root`, :43-71), and
+# this comment is only ever a pointer at it. A wrapper that computed the same
+# answer and exported it would pin the callee's FIRST rung, so every later
+# correction to that resolver would be unreachable for anyone who came in
+# through bin/. One resolver, living in the code that owns it.
 
 # `bash <script>` rather than executing it: a copy that lost its exec bit
 # somewhere in a zip/unzip round trip still writes events instead of failing

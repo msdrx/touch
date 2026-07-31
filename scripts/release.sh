@@ -90,6 +90,16 @@
 #                                  contamination and nothing else: a scan that
 #                                  could not complete stays red through it.
 #   RELEASE_REMOTE=<name>          the remote to publish to (default `origin`).
+#   RELEASE_CONTEXT_CEILING=<n>    the always-on context ceiling, in tokens
+#                                  (default 12000). Step 2's (c) half measures
+#                                  CLAUDE.md + the memory index + the ten skill
+#                                  descriptions and fails when their sum exceeds
+#                                  it. Raising this is a deliberate act with a
+#                                  recurring bill attached: the prefix is
+#                                  re-read on every turn of every agent of every
+#                                  future run. Ignored once
+#                                  `tests/test_context_budget.py` declares its
+#                                  own budgets — those win, and the gate says so.
 #
 # exit status: 0 = done / dry run clean, 1 = a gate failed, 2 = bad usage.
 
@@ -491,6 +501,71 @@ for gate in tests/test_package.py tests/test_publish_hygiene.py; do
         fail "$gate is red — the payload leak/hygiene gate is the one gate a release cannot cut around"
     fi
 done
+# The (c) half: the deterministic cost reader (D-21) and the always-on context
+# ceiling it measures (D-22). Neither is about what ships — both are about what
+# every future run PAYS, which is the one release-time quantity nothing else in
+# this file looks at.
+#
+# Why here rather than under a banner of its own: the numbering a run prints is
+# the procedure (see `step()`), steps 9 and 10 are the point of no return, and
+# inserting a new integer between 8 and 9 would renumber the push — which
+# `tests/test_docs.py` reads back out of a real transcript by number. So this
+# rides with the other measure-this-tree gates instead of moving the publish.
+#
+# Both arms run through `PYTHONPATH=$REPO/$PLUGIN python3 -P -m aggregator.costs`
+# — the module-direct form `aggregator/mirror.py` already uses for the same
+# reason (an operator tool is not a program a session runs, so it gets no
+# wrapper and the count stays seven). `-P` because a release may be cut from
+# any cwd; no network is reached by either arm, and neither writes anything.
+#
+# `PYTHONDONTWRITEBYTECODE=1` on both, and it is not decoration: the flag does
+# NOT survive fork/exec, so without it every invocation leaves an
+# `aggregator/__pycache__` inside the payload — a never-ship path that the
+# `test_package.py` gate twelve lines above would flag on the NEXT cut, for a
+# reason the operator did not cause. A release script that poisons the tree it
+# just certified is a defect in the gate. Same rule `bin/`'s seven wrappers are
+# held to by `tests/test_bin_wrappers.py`; the module-direct form is the one
+# entry point that check cannot see.
+#
+# The report arm runs with `$REPO` as its cwd. It resolves the newest run
+# itself (that is the point — a release prices the run that just happened), and
+# that resolution walks UP from the cwd; this script is invoked from anywhere,
+# so without the anchor the number in a release transcript is not necessarily
+# this repo's.
+#
+# An ABSENT reader SKIPS rather than fails, the same bargain the two gates above
+# make: this script is copied into minimal trees to be exercised (the fixture
+# `tests/test_docs.py` builds is one, and it carries no payload modules at all).
+COSTS_REL="$PLUGIN/aggregator/costs.py"
+# The recorded ceiling, and the reason it is a REGRESSION threshold rather than
+# D-22's target. Measured 2026-07-31 on this tree: CLAUDE.md ~8,400 tok +
+# MEMORY.md + the ten skill descriptions ~= 9,500-10,200 tok owned. D-22's
+# BUDGET is lower than that on purpose (6,000 + 800 + 1,400), and the file that
+# declares it — `tests/test_context_budget.py` — is the thing that will make it
+# bite. Until then a gate set at the target would be red on every release for a
+# reason the operator cannot fix in this step, which is how a gate gets
+# bypassed. So: hold the line where the tree is today plus room to breathe, and
+# hand the decision over the moment the budget test exists — the reader prefers
+# that file's numbers and says which source it used.
+CONTEXT_CEILING="${RELEASE_CONTEXT_CEILING:-12000}"
+if [ ! -f "$REPO/$COSTS_REL" ]; then
+    skip "$COSTS_REL is not present in $REPO — no cost reader to run (a minimal tree carries none)"
+else
+    if PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/$PLUGIN" python3 -P -m aggregator.costs \
+            --baseline --repo "$REPO" --ceiling "$CONTEXT_CEILING"; then
+        ok "the always-on context prefix is within the recorded ceiling"
+    else
+        fail "the always-on context prefix is OVER the ceiling printed above — every added kilobyte is re-read once per turn by every agent of every future run, so this is not a documentation nit; trim it, or raise RELEASE_CONTEXT_CEILING deliberately"
+    fi
+    # D-21's own invoke-and-print. A checkout with no run history prints "no
+    # corpus" and exits 0 — a release cut from a clean tree must not go red for
+    # having no history to price.
+    if ( cd "$REPO" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/$PLUGIN" python3 -P -m aggregator.costs --top 5 ); then
+        ok "the cost reader ran (no network; no corpus is a clean skip)"
+    else
+        fail "the cost reader exited non-zero — it reads recorded bytes and nothing else, so this is a defect in the reader, not a property of the release"
+    fi
+fi
 
 # --- 3. the version ---------------------------------------------------------
 # `plugin.json` is the ONLY place Touch declares a version (GD-T9): the

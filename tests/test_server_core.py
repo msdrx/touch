@@ -49,8 +49,10 @@ from _roots import SRC                # noqa: E402  (path juggling first)
 sys.path.insert(0, str(SRC))
 
 from aggregator import server as server_mod                        # noqa: E402
+from aggregator import sessions as sessions_mod                    # noqa: E402
 from aggregator import store as store_mod                          # noqa: E402
 from aggregator import tailer as tailer_mod                        # noqa: E402
+from aggregator import tick as tick_mod                            # noqa: E402
 from aggregator import ws                                          # noqa: E402
 from aggregator.server import (                                    # noqa: E402
     CONTROL_ROUTES,
@@ -76,6 +78,11 @@ from aggregator.server import (                                    # noqa: E402
 
 failures = []
 TMPDIRS = []
+#: The three observations a discovered file's NAME is made of. Kept as
+#: constants because every assertion below is "this string is not in the body".
+OBSERVED_SESSION = "b7c1d2e3-4455-4667-8899-aabbccddeeff"
+OBSERVED_AGENT = "a" + "1" * 16
+OBSERVED_RUN = "wf_secret02-bbb"
 SOURCE = (SRC / "aggregator" / "server.py").read_text()
 TREE = ast.parse(SOURCE)
 
@@ -477,6 +484,112 @@ def test_health_publishes_no_observation_to_an_unauthenticated_caller():
           "stable across restarts, and different targets differ")
     check(payload["store"]["configured"] is True and payload["store"]["streamCount"] == 1,
           "the store reports that it exists and how much it holds, not where or what")
+
+
+def test_the_ingest_block_is_operational_facts_and_nothing_else():
+    print("test_the_ingest_block_is_operational_facts_and_nothing_else")
+    # D-01 put a new block on the OPEN route, so it inherits the rule above:
+    # counts and states are operational, names and paths are observations.
+
+    class Tick:
+        """The shape `/health` reads — a health() and nothing more."""
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def health(self):
+            return dict(self.payload)
+
+    secret = "/home/someone/.claude/projects/-secret-repo/deadbeef.jsonl"
+    model = ReadModel(state={}, store=None, ingest=Tick({
+        "state": "running", "files": 3, "filesSeen": 3, "linesRead": 41,
+        "lastTick": "2026-07-30T00:00:00.000+00:00", "ticks": 9, "ops": 12,
+        "walRecords": 4, "errors": 1, "lastError": "OSError"}))
+    raw = Api(model, auth=Auth("t")).get("/health").body.decode()
+    payload = json.loads(raw)
+    check(payload["ingest"]["state"] == "running" and payload["ingest"]["files"] == 3,
+          "the tick's own block reaches /health verbatim")
+    check(secret not in raw and "-secret-repo" not in raw,
+          "…and no path the tick reads is on it")
+    check(payload["ingest"]["lastError"] == "OSError",
+          "a failure is published as its TYPE — an OSError's message carries the "
+          "filename, which is a home directory, a cwd slug and a session uuid")
+    check(payload["writers"]["customState"] == "none",
+          "the writers block names the stream with no producer, so an empty "
+          "collection is legible as correct rather than as broken")
+
+    absent = ReadModel(state={}, store=None)
+    check(json.loads(Api(absent, auth=Auth("t")).get("/health").body)["ingest"]["state"]
+          == "absent",
+          "with no tick at all the state is `absent` — the pre-D-01 condition, "
+          "which used to be indistinguishable from a running-but-quiet server")
+
+
+def observed_corpus(root, cwd):
+    """A `~/.claude`-shaped tree the tick OWNS: a session, an agent, a run.
+
+    Every name in it is an observation — the session uuid, the 17-hex agent id
+    and the `wf_` run id — which is the whole point: they are what a tailer's
+    basename is made of, and what `/health` may not publish.
+    """
+    slug = os.path.join(root, "projects", sessions_mod.slug_for(cwd))
+    run_dir = os.path.join(slug, OBSERVED_SESSION, "subagents", "workflows",
+                           OBSERVED_RUN)
+    os.makedirs(run_dir)
+    with open(os.path.join(slug, f"{OBSERVED_SESSION}.jsonl"), "w") as fh:
+        fh.write(json.dumps({"type": "user", "uuid": OBSERVED_SESSION,
+                             "sessionId": OBSERVED_SESSION}) + "\n")
+    with open(os.path.join(run_dir, f"agent-{OBSERVED_AGENT}.jsonl"), "w") as fh:
+        fh.write(json.dumps({"type": "assistant", "uuid": OBSERVED_SESSION,
+                             "sessionId": OBSERVED_SESSION}) + "\n")
+    with open(os.path.join(run_dir, "journal.jsonl"), "w") as fh:
+        fh.write(json.dumps({"type": "started", "key": "sp-01/implement",
+                             "agentId": OBSERVED_AGENT}) + "\n")
+    sessions_mod.reset_scope_cache()
+    return slug
+
+
+def test_a_real_ticks_tailer_names_publish_no_observation_either():
+    print("test_a_real_ticks_tailer_names_publish_no_observation_either")
+    # The regression this exists for: the tick registers one tailer per file it
+    # discovers, into `ReadModel.tailers`, whose KEYS `/health` publishes
+    # verbatim on the one unauthenticated route. A name built from the basename
+    # therefore republishes exactly what `target_hash` refuses to — a session
+    # transcript's basename IS the session uuid, an agent transcript's is the
+    # agent id, and a journal's directory is the run id.
+    #
+    # It is asserted over a REAL `IngestTick` that has ticked over a real
+    # corpus, because a stub with no tailers cannot fail for any naming scheme
+    # at all — a tautology guarding the property that actually regressed.
+    cwd = "/home/someone/Projects/secret-repo"
+    root = tmpdir("ticked")
+    observed_corpus(root, cwd)
+    store = store_mod.Store(tmpdir("tickstore"))
+    model = ReadModel(state={}, store=store, claude_root=root)
+    tick = tick_mod.IngestTick(model, claude_root=root, cwd=cwd)
+    model.ingest = tick
+    tick.poll()
+
+    raw = Api(model, auth=Auth("t")).get("/health").body.decode()   # NO token
+    payload = json.loads(raw)
+    check(payload["ingest"]["files"] >= 3 and len(payload["tailers"]) >= 3,
+          f"the tick really did discover and register the corpus "
+          f"({payload['ingest']['files']} files)")
+    check(OBSERVED_SESSION not in raw,
+          "…and the session uuid — which is a transcript's whole basename — is "
+          "nowhere in the open route's body")
+    check(OBSERVED_AGENT not in raw, "nor the agent id an `agent-*.jsonl` is named for")
+    check(OBSERVED_RUN not in raw, "nor the run id its journal's directory is named for")
+    check("secret-repo" not in raw, "nor the cwd slug every one of them sits under")
+    check(all(row["name"].startswith("tick:") for row in payload["tailers"]),
+          "each row is named by the poller that owns it plus an opaque digest")
+    check(all(len(row["name"].split(":", 1)[1]) == 12 for row in payload["tailers"]),
+          "…the same 12-hex digest `target_hash` publishes, so `name` and `target` "
+          "are one function of one path and a reader can pair them")
+    check(len({row["name"] for row in payload["tailers"]}) == len(payload["tailers"]),
+          "…and distinct files still get distinct rows")
+    check(not re.search(r'"[^"]*/[^"]*/[^"]*"', raw),
+          "nothing path-shaped is on the route, exactly as before D-01")
 
 
 def test_the_open_route_counts_requests_without_publishing_the_route_table():
@@ -1070,6 +1183,8 @@ def main():
                   test_the_token_is_injected_into_the_page,
                   test_health_never_carries_a_credential,
                   test_health_publishes_no_observation_to_an_unauthenticated_caller,
+                  test_the_ingest_block_is_operational_facts_and_nothing_else,
+                  test_a_real_ticks_tailer_names_publish_no_observation_either,
                   test_the_open_route_counts_requests_without_publishing_the_route_table,
                   test_a_header_value_can_never_split_the_response,
                   test_the_api_survives_the_state_being_rewritten_under_it,

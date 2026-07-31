@@ -11,6 +11,48 @@ development record of what existed before it; no marketplace ever served it and
 no one could install it, so there is no upgrade path from it to document and
 nothing to migrate. If you installed Touch at all, you installed 0.2.0 or later.
 
+## 0.2.2
+
+Still no session verb, and the memory editor's save side still ships disabled
+until you start the dashboard with `--allow-memory-write`. This release makes
+the run loop deterministic end to end: one wrapper now owns the run-folder
+lifecycle, and the aggregator gains its ingest tick and a cost reader.
+
+**Added**
+
+- **`touch-run` — the seventh wrapper** (`start | bind | close | verify |
+  status`). `start` lays out the task folder under
+  `.touch/local-orchestrators/<task>/` — where run folders live — seeds the
+  plan cards and starts Touch's own daemons; `bind` records the `wf_dir` and
+  renders `plan/RESUME.md`; `close` settles the cards and stops what it
+  started. It acts on Touch's folders and daemons only, so it is not a control
+  verb and the verb table is unchanged (GD-D8).
+- **`.touch/run.json`** — tracked per-project run constants that `touch-run
+  start` merges under a run spec (D-12): configuration, not state, and the
+  second (and last) tracked path under `.touch/`.
+- **The ingest tick** (`aggregator/tick.py`) — drives the tailers, applies the
+  derived operations into the read model and the WAL, and reports itself in
+  `/health`.
+- **A cost reader** (`aggregator/costs.py`) — `--top` prices what a run cost
+  per agent; `--baseline` measures the always-on context prefix this repo
+  charges every session, the number `tests/test_context_budget.py` now caps.
+- **An agent-lifecycle hook** (`hooks/agent_lifecycle.py`) — additive
+  Subagent/PostToolUse recording, registered once in the plugin's
+  `hooks/hooks.json` beside the scope guard.
+- **Three docs** — `docs/dev-loop.md`, `docs/memory-home.md`,
+  `docs/run-folders.md` — the long form the session guide now points at.
+
+**Changed**
+
+- **Three skills renamed** — `execute-research` → `research`,
+  `implement-plan` → `implement`, `m-orchestrator` → `monitor`; invoke as
+  `/touch:research`, `/touch:implement`, `/touch:monitor`. Same skills, shorter
+  names; entries below use the names current at their release.
+- **Terminal events are protocol, emitted deterministically** — by the
+  watcher, the cycle reporter or `touch-run close`, never mandated of an
+  agent. A plan whose agents all returned without a decisive verdict settles
+  `done` ("closed — no verdict"), never `failed` (R-58).
+
 ## 0.2.1
 
 Still no session verb — nothing starts, stops, restarts or terminates anything —

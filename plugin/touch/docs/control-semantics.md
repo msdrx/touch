@@ -51,7 +51,7 @@ Two profiles, ingested into one store (GD-8, as amended):
 
 | | **Workflow profile** | **Agent-tool profile** |
 |---|---|---|
-| produced by | `execute-research`, `implement-plan` | `touch-orchestrate` background spawns |
+| produced by | `research`, `implement` | `touch-orchestrate` background spawns |
 | deterministic event source | `journal.jsonl` (via `decision_watcher.py`) | the spawn ledger + transcripts |
 | node identity | `(runId, key, ordinal)` | full 17-hex `agentId` |
 | **run-level stop** | **available** — the launch `toolUseResult.taskId` (verified `w4hiywrt6`, `www4dk54h`) addresses the whole run | n/a (a spawn is not a run) |

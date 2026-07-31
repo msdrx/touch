@@ -234,6 +234,29 @@ def test_two_markers_on_one_line_both_parse():
           "…and the first one's payload is cut at its own marker, not at end of line")
 
 
+def test_a_prose_mention_inside_the_window_does_not_clobber_the_marker():
+    print("test_a_prose_mention_inside_the_window_does_not_clobber_the_marker")
+    # The real sp-03-templates incident: the sub-plan TITLE names the token on
+    # line 2 — inside the window — and its empty field dict erased the line-1
+    # marker under last-wins, leaving every implementer unclassified. Only a
+    # key=value payload makes a marker; a bare token is prose wherever it sits.
+    poisoned = (
+        "\n[monitor] plan=sp-03-templates stage=implement role=impl attempt=2\n"
+        "You are the IMPLEMENTER for sub-plan sp-03-templates (prompt trims\n"
+        "with the [monitor] marker fenced), a fresh subagent —\n"
+    )
+    monitor, touch = parse_markers(poisoned)
+    check(monitor is not None and monitor.get("plan") == "sp-03-templates"
+          and monitor.get("attempt") == "2",
+          "a payload-less [monitor] mention in the window does not clobber the marker")
+    check(touch is None, "…and no [touch] fields are invented from prose")
+    _, touch2 = parse_markers(
+        "[touch] name=impl-a parent=root root=touch-x\n"
+        "Spawn agents per the [touch] convention.\n")
+    check(touch2 is not None and touch2.get("name") == "impl-a",
+          "…and the [touch] identity marker survives its own prose mention")
+
+
 def test_the_grammar_matches_decision_watchers_on_a_real_prompt():
     print("test_the_grammar_matches_decision_watchers_on_a_real_prompt")
     module = MON / "decision_watcher.py"
@@ -1452,6 +1475,7 @@ def main():
     for test in (
         test_the_marker_window_is_four_lines_and_leading_blanks_are_tolerated,
         test_two_markers_on_one_line_both_parse,
+        test_a_prose_mention_inside_the_window_does_not_clobber_the_marker,
         test_the_grammar_matches_decision_watchers_on_a_real_prompt,
         test_a_node_exists_with_no_marker_at_all,
         test_labels_are_a_layer_never_an_identity,

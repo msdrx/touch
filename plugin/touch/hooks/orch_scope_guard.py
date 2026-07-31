@@ -164,13 +164,47 @@ plane, or through the main terminal agent. This is defense in depth, decided
 rather than inherited; it is not a containment claim (see the last bullet
 below).
 
+Argument shape (D-20). The scan is no longer "every string in `tool_input`".
+`TOOL_KEYS` splits each matched tool's inputs into the keys it RESOLVES as a
+filesystem path (`file_path`, `Glob`'s `pattern`, `Grep`'s `path`/`glob`, …)
+and the keys that are free text (`Bash`'s `command`), and the deny reason says
+which kind matched. Two defects made that necessary, both reproduced:
+
+- `Grep`'s `pattern` is a **regex over file CONTENT**, never a target. A
+  researcher grepping for the literal text `local-orchestrators/[^/]+` was
+  denied for "naming task `[^`" — a task that does not exist, on a call that
+  read nothing (MONITORING-12). That key is no longer scanned at all: it
+  cannot select a file, so refusing it protected nothing and the deny sent the
+  reader hunting a scope problem that was not there. This is the one place the
+  guard was deliberately narrowed; everywhere else over-restriction remains
+  the safe direction, and an unknown tool falls back to `UNKNOWN_TOOL_KEYS`
+  where `pattern` and `command` are scanned as TEXT — still denied, honestly
+  labelled.
+- A `Bash` command string is not a path and cannot be made into one here, so
+  the substring match stays — but the reason now says "an argument … mentions
+  task 'X'" and calls the match textual, never "this call names task 'X'".
+  The guard genuinely does not know whether that command would have touched
+  the folder: `grep -rn "local-orchestrators/task-b" .` reads nothing, and
+  `cd .touch/local-orchestrators && cat task-b/events.jsonl` touches
+  everything while matching nothing (ECONOMICS-10, the bullet below). A deny
+  message that asserts an access the guard cannot observe is a false
+  accusation, and it was costing real retries.
+
 What the guard does NOT promise:
 
-- **Bash coverage is textual.** The hook sees only the command string, so it
-  denies commands that NAME another task's folder. That is the right strength
-  for the actual threat — loop agents drifting into other tasks' state and
-  getting distracted — not an adversarial sandbox.
-- **The match is textual for every tool, and first-segment only**, so
+- **Bash coverage is textual, and it is a name-based speed bump.** The hook
+  sees only the command string, so it denies commands that MENTION another
+  task's folder, and the same access spelled differently walks past it: a
+  `cd .touch/local-orchestrators` followed by bare relative paths
+  (`cat task-b/events.jsonl`) is not matched and runs (ECONOMICS-10, measured,
+  pinned by `test_argument_shape`). Resolving candidate tokens against the
+  command's effective cwd is not possible from the payload — the `cwd` field
+  is the tool call's, not the state a `cd` earlier in the same command line
+  would produce. That is the right strength for the actual threat — loop
+  agents drifting into other tasks' state and getting distracted — not an
+  adversarial sandbox, and the deny wording now says so rather than implying
+  containment.
+- **The match is textual for path arguments too, and first-segment only**, so
   traversal through a permitted segment is not detected. Nothing is
   normalized first, so `task-a/../task-b/findings/f.md` matches on the ACTIVE
   `task-a` and passes, and `task-b/plan/../findings/f.md` satisfies the
@@ -250,9 +284,35 @@ import sys
 # names one task as surely as `task-b` does), not a fuzzy match.
 # Compiled in main(), for the reason above.
 SEG_PATTERN = r"local-orchestrators/+([^/\s\"';|&]+)((?:/[^\s\"';|&]*)?)"
+# Which `tool_input` keys are scanned, per tool, and HOW (D-20): the first
+# tuple is the keys the tool resolves as a filesystem PATH, the second the keys
+# that are free TEXT a path may merely be mentioned in. Both are denied on a
+# match — over-restriction stays the safe direction — but they earn different
+# deny wording, because only the first is evidence that a path was named.
+#
+# `Grep`'s `pattern` is in NEITHER: it is a regex over file content, so it can
+# never select a target, and matching it produced denies for tasks that do not
+# exist on calls that read nothing (MONITORING-12). `Glob`'s `pattern`, by
+# contrast, IS the path expression, so it stays path-shaped. `Grep`'s `glob` is
+# a filename filter and can carry a path prefix, so it is scanned too.
 # `notebook_path` is inert while NotebookEdit is off the matcher; it costs
 # nothing and keeps the guard honest if the matcher ever grows again.
-PATH_KEYS = ("file_path", "path", "pattern", "command", "notebook_path")
+TOOL_KEYS = {
+    "Read":         (("file_path",), ()),
+    "Write":        (("file_path",), ()),
+    "Edit":         (("file_path",), ()),
+    "NotebookEdit": (("notebook_path",), ()),
+    "Glob":         (("pattern", "path"), ()),
+    "Grep":         (("path", "glob"), ()),
+    "Bash":         ((), ("command",)),
+}
+# A tool the matcher grows into later, or a payload naming something unknown:
+# scan everything that has ever been a path key as a path, and the two
+# ambiguous ones as text. The result is the pre-D-20 breadth (nothing new gets
+# through) with the honest wording — the narrowing above is a decision about
+# `Grep` specifically, not a general licence to stop looking.
+UNKNOWN_TOOL_KEYS = (("file_path", "path", "notebook_path"),
+                     ("command", "pattern"))
 READ_TOOLS = {"Read", "Glob", "Grep", "Bash"}
 WILDCARD_TOOLS = {"Read", "Glob", "Grep"}
 # The three structured editors — the tools whose whole job is to put bytes in
@@ -487,6 +547,17 @@ def find_halt_any(roots):
     return None
 
 
+def scan_keys(tool):
+    """The `tool_input` keys to scan for `tool`, as `(key, kind)` pairs with
+    `kind` in `{"path", "text"}` — `TOOL_KEYS`, falling back to
+    `UNKNOWN_TOOL_KEYS`. The ONE place the classification is read, so the
+    memory clause and the scope clause cannot disagree about what a path is.
+    """
+    path_keys, text_keys = TOOL_KEYS.get(tool, UNKNOWN_TOOL_KEYS)
+    return ([(k, "path") for k in path_keys]
+            + [(k, "text") for k in text_keys])
+
+
 def deny(reason):
     import json
     print(json.dumps({"hookSpecificOutput": {
@@ -557,7 +628,7 @@ def main():
     # everything above that.
     if tool in WRITE_TOOLS:
         mem = re.compile(MEMORY_PATTERN)
-        for key in PATH_KEYS:
+        for key, _kind in scan_keys(tool):
             value = tool_input.get(key)
             if not isinstance(value, str):
                 continue
@@ -574,7 +645,7 @@ def main():
     if not active:
         return
     seg = re.compile(SEG_PATTERN)
-    for key in PATH_KEYS:
+    for key, kind in scan_keys(tool):
         value = tool_input.get(key)
         if not isinstance(value, str):
             continue
@@ -587,6 +658,20 @@ def main():
             if tool in WILDCARD_TOOLS and any(c in task for c in GLOB_CHARS):
                 continue  # a read-only glob over the runs is not a scope breach
             names = ", ".join(f"'{t}'" for t in sorted(active))
+            # The claim is scoped to what the guard can actually observe
+            # (D-20). A path argument really does name the task. A free-text
+            # argument only MENTIONS it: the guard cannot tell `cat
+            # …/task-b/x` from `grep "…/task-b" .`, denies both, and must say
+            # so — asserting an access it never saw sent readers hunting scope
+            # problems that did not exist (MONITORING-12, ECONOMICS-10).
+            if kind == "path":
+                claim = (f"The path argument '{key}' of this call names task "
+                         f"'{task}', which is not one of them")
+            else:
+                claim = (f"An argument of this call ('{key}') mentions task "
+                         f"'{task}', which is not one of them — the match is "
+                         "TEXTUAL, so the guard cannot tell a path from a "
+                         "mention and denies either way")
             # The matched TEXT, not a path built from it: `os.path.join(tasks,
             # task) + rest` used to present a synthesised path the caller
             # never typed (and which often did not exist, since the match is
@@ -596,11 +681,10 @@ def main():
             # act on — and after the tasks-root move there are two plausible
             # ones, so naming it is the difference between a debuggable deny
             # and a guess (PROTOCOL-13).
-            deny(f"Run scope: the active task(s): {names}. This call names "
-                 f"task '{task}', which is not one of them; during this run "
-                 "only active tasks' folders and other tasks' plan/ files are "
-                 f"accessible. (matched '{m.group(0)}'; resolved tasks root: "
-                 f"{tasks})")
+            deny(f"Run scope: the active task(s): {names}. {claim}; during "
+                 "this run only active tasks' folders and other tasks' plan/ "
+                 f"files are accessible. (matched '{m.group(0)}'; resolved "
+                 f"tasks root: {tasks})")
             return
 
 

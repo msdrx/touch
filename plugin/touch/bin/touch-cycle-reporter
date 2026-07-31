@@ -4,9 +4,9 @@
 #   ORCH_STATE_DIR=<task-dir> touch-cycle-reporter <wf_dir> [...] \
 #       [--once] [--no-status] [--interval=N]
 #
-# Front for the implement-plan skill's cycle_reporter.py: the deterministic
+# Front for the implement skill's cycle_reporter.py: the deterministic
 # per-cycle renderer that also emits each loop-terminal verdict. It lives with
-# the skill it serves (skills/implement-plan/templates/), and this wrapper is
+# the skill it serves (skills/implement/templates/), and this wrapper is
 # how anything outside that directory reaches it by name.
 #
 # WHY THERE IS NO ENVIRONMENT LOOKUP HERE
@@ -31,17 +31,19 @@ command -v python3 >/dev/null 2>&1 || {
 }
 export PYTHONDONTWRITEBYTECODE=1
 
-REPORTER="$ROOT/skills/implement-plan/templates/cycle_reporter.py"
+REPORTER="$ROOT/skills/implement/templates/cycle_reporter.py"
 [ -f "$REPORTER" ] || {
-    echo "touch-cycle-reporter: $REPORTER is missing; it ships with the implement-plan skill" >&2
+    echo "touch-cycle-reporter: $REPORTER is missing; it ships with the implement skill" >&2
     exit 1
 }
 
 # No tasks-root resolution here, and none is wanted: cycle_reporter.py works
 # from $ORCH_STATE_DIR — the one task folder it reports on — which the caller
 # names, exactly as it does for touch-status and touch-watcher. Exporting a
-# guessed tasks root would pin the FIRST rung of the resolver in every status.sh
-# the reporter spawns, for no gain here at all.
+# guessed tasks root would pin the FIRST rung of the THREE-rung ladder that
+# `shared/monitoring/status.sh` owns (`resolve_tasks_root`, :43-71) in every
+# status.sh the reporter spawns, for no gain here at all. That ladder has three
+# rungs, not four: the module-relative sibling lookup was deleted with GD-U1.
 #
 # `${1+"$@"}`, never a bare `"$@"`: bash before 4.4 treats `"$@"` as an unset
 # variable under `set -u` when there are no positional parameters, and stock

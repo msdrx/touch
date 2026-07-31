@@ -259,6 +259,9 @@ __all__ = [
     "PERSISTED_PATH_RE",
     "USAGE_FIELDS",
     "USAGE_IDENTITY",
+    "SNAPSHOT_MAX_FIELDS",
+    "PROGRESS_MAX_FIELDS",
+    "STATUS_COMPANIONS",
     "RecordObservation",
     "StreamMetaObservation",
     "UsageObservation",
@@ -285,7 +288,10 @@ __all__ = [
     "read_transcript",
     "read_journal",
     "read_snapshot",
+    "read_snapshots",
+    "fold_snapshots",
     "find_snapshot",
+    "find_snapshots",
     "read_run",
     "scan_tool_results",
     "link_spills",
@@ -417,6 +423,8 @@ def _skips() -> dict:
         "unmatched_result": 0,    # a journal `result` naming no started node
         "unkeyed_progress": 0,    # a snapshot row whose agentId has no node
         "no_snapshot": 0,         # a run with no <runId>.json (normal!)
+        "duplicate_snapshot": 0,  # a resumed run's extra <runId>.json copies (D-02)
+        "snapshot_times": 0,      # nodes whose clock came from the snapshot, not a scan
         "unkeyable_positional": 0,  # a uuid-less line in a NON-session file
     }
 
@@ -877,7 +885,18 @@ class RunObservation:
 
 @dataclass(frozen=True)
 class RunNodeObservation:
-    """One `(runId, key, ordinal)` node (R-49). `state` is deliberately absent."""
+    """One `(runId, key, ordinal)` node (R-49). `state` is deliberately absent.
+
+    The five `harness_*`/`last_*`/`queued_at` fields are D-03's widening: they
+    are the snapshot's OWN liveness statement about the agent
+    (`workflowProgress[].state`, `queuedAt`, `lastProgressAt`, `lastToolName`,
+    `lastToolSummary`). They are observations like every other field here —
+    `harness_state` is what the harness *said*, never a verdict, and the one
+    reducer still computes running/finished/unknown from `result_seen` and the
+    clocks (GD-23/R-54). `last_tool_summary` is **truncated at the source** and
+    is display text only: nothing may parse a marker out of it (GD-D4/
+    SUBSTRATE-10).
+    """
 
     run_id: str
     key: str
@@ -894,6 +913,11 @@ class RunNodeObservation:
     phase_index: object = None
     phase_title: object = None
     harness_totals: object = None
+    harness_state: object = None
+    queued_at: object = None
+    last_progress_at: object = None
+    last_tool_name: object = None
+    last_tool_summary: object = None
     source_path: object = None
 
 
@@ -1415,8 +1439,8 @@ def _within_scope(path, scope) -> bool:
     return _scope_anchor(path) in scope
 
 
-def find_snapshot(run_id, root, *, scope=None):
-    """`glob(<root>/projects/*/*/workflows/<runId>.json)`, first match or None.
+def find_snapshots(run_id, root, *, scope=None) -> tuple:
+    """EVERY `<root>/projects/*/*/workflows/<runId>.json`, in path order (D-02).
 
     Globbed across *every session* directory on purpose (R-26): the snapshot
     lands under whichever session was current when the run **ended**, which for
@@ -1430,11 +1454,33 @@ def find_snapshot(run_id, root, *, scope=None):
     the slug directories this project owns keeps R-26's cross-session reach
     intact and drops the cross-project reach nothing asked for. ``scope``
     carries those directories; :func:`read_run` always supplies it.
+
+    **Why the plural is the primary function now.** A *resumed* run writes one
+    snapshot per observing session, and the two disagree: `wf_617adbe5-42a` is
+    recorded `failed`/37 agents/3.66 M tokens by the earlier copy and
+    `killed`/59/4.32 M by the authoritative later one. Picking `sorted()[0]` —
+    which is an ordering on session UUID, a value with no relation to time —
+    served the wrong one. One of 27 on-disk run ids is duplicated today (the
+    run-2 census; run-1's "7 of 27" was a miscount), and the *mechanism* recurs
+    on every resume, so the count is a floor and not a corner case.
+    :func:`fold_snapshots` is the answer; this function only finds them.
     """
     pattern = os.path.join(globmod.escape(os.fspath(root)), "projects", "*", "*",
                            WORKFLOWS_DIR, globmod.escape(run_id) + ".json")
-    matches = sorted(path for path in globmod.glob(pattern)
-                     if _within_scope(path, scope))
+    return tuple(sorted(path for path in globmod.glob(pattern)
+                        if _within_scope(path, scope)))
+
+
+def find_snapshot(run_id, root, *, scope=None):
+    """The FIRST matching snapshot path, or None — a locator, never a choice.
+
+    Kept because "where does this run's snapshot live" is a real question with
+    a path-shaped answer (a test naming the cross-session directory asks it).
+    It is deliberately NOT what :func:`read_run` calls any more: with two
+    snapshots on disk the first path is an arbitrary one, and choosing between
+    their *contents* is :func:`fold_snapshots`' job.
+    """
+    matches = find_snapshots(run_id, root, scope=scope)
     return matches[0] if matches else None
 
 
@@ -1582,6 +1628,147 @@ def read_snapshot(path):
     return value if isinstance(value, dict) else None
 
 
+#: The snapshot totals folded with `$max` (D-02). Monotonic by construction —
+#: a resumed run only ever did *more* work than the copy written before it —
+#: so the later copy losing a race with a bigger earlier one is impossible and
+#: an earlier copy that saw more is still the truth.
+SNAPSHOT_MAX_FIELDS = ("totalTokens", "totalToolCalls", "agentCount", "durationMs")
+
+#: Per-`workflowProgress`-row numbers, same reasoning one level down.
+PROGRESS_MAX_FIELDS = ("tokens", "toolCalls", "durationMs", "attempt")
+
+#: Scalars that are companions of `status` and mean nothing without the copy
+#: that produced them. A run recorded `failed` + `error: "…"` by its first
+#: observing session and `completed` (no `error`) by the authoritative later
+#: one must NOT fold to `completed` with the earlier error string still
+#: attached — that is D-02's own defect, one field over. So when the winning
+#: copy carries `status` and not the companion, the companion is dropped.
+STATUS_COMPANIONS = ("error", "summary", "failureReason")
+
+
+def _snapshot_order(snapshot, index):
+    """The sort key that decides "later" for :func:`fold_snapshots`.
+
+    `timestamp` first (the snapshot's own clock, the only recorded statement
+    about when it was written), then the two totals D-02 names as the
+    tie-break, then the caller's own order so the result is deterministic when
+    a snapshot carries no timestamp at all.
+    """
+    raw = snapshot.get("timestamp")
+    stamp = raw if isinstance(raw, str) else ""
+    return (stamp,
+            _int_or_none(snapshot.get("agentCount")) or 0,
+            _int_or_none(snapshot.get("durationMs")) or 0,
+            index)
+
+
+def _fold_progress_rows(older, newer):
+    """Merge two `workflowProgress` lists: latest-wins per row, `$max` on counts.
+
+    Keyed by `agentId` where there is one (R-26: never by `index`, which is a
+    display position that restarts per phase), and by `(type, index)` for the
+    `workflow_phase` rows that have no agent. A row only the older snapshot
+    knows about is KEPT: a resume can drop an agent from the live board, and
+    losing its record would be the same defect as picking the wrong file.
+    """
+    def key_of(row):
+        agent = _str_or_none(row.get("agentId"))
+        if agent:
+            return ("agent", agent)
+        # `(type, index)` and NOT the row's position in its own list: the two
+        # copies of a resumed run hold different numbers of agent rows (37 vs
+        # 59 in the frozen fixture), so one phase row sits at different
+        # positions in the two lists and a position-bearing key would merge it
+        # as two. `fold_snapshots` is exported and its result IS `scan.snapshot`,
+        # so those duplicates would outlive `_progress_by_agent`'s type filter.
+        return ("row", row.get("type"), row.get("index"))
+
+    merged = {}
+    for source in (older, newer):
+        rows = source if isinstance(source, list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = key_of(row)
+            prior = merged.get(key)
+            if prior is None:
+                merged[key] = dict(row)
+                continue
+            folded = dict(prior)
+            folded.update(row)
+            for name in PROGRESS_MAX_FIELDS:
+                left, right = _int_or_none(prior.get(name)), _int_or_none(row.get(name))
+                if left is not None and right is not None:
+                    folded[name] = max(left, right)
+                elif left is not None and name in row:
+                    # `row` CARRIES the field and it did not parse as an int
+                    # (`null`, a string, a float NaN) — `folded.update(row)`
+                    # above has already replaced a good earlier number with it,
+                    # so restoring is not redundant. A field simply absent from
+                    # `row` needs no branch: the update leaves `prior`'s value.
+                    folded[name] = left
+            merged[key] = folded
+    return list(merged.values())
+
+
+def fold_snapshots(snapshots):
+    """Several `<runId>.json` copies ⇒ ONE snapshot document (D-02).
+
+    The rule, decided by the item and applied here and nowhere else: sort by
+    :func:`_snapshot_order`, let the **latest** copy win every scalar (`status`
+    above all — `killed` must not be overwritten by an earlier `failed`), and
+    take `$max` over :data:`SNAPSHOT_MAX_FIELDS` so a later copy that was
+    written before some accounting landed cannot shrink a total.
+
+    Returns the single dict unchanged when there is one (so the common path is
+    provably untouched), and `None` when there is nothing to fold — a run with
+    no snapshot is normal, never an error (R-26's fourth amendment).
+    """
+    usable = [s for s in (snapshots or ()) if isinstance(s, dict)]
+    if not usable:
+        return None
+    if len(usable) == 1:
+        return usable[0]
+    ordered = sorted(enumerate(usable), key=lambda pair: _snapshot_order(pair[1], pair[0]))
+    folded = {}
+    for _index, snapshot in ordered:
+        progress = _fold_progress_rows(folded.get("workflowProgress"),
+                                       snapshot.get("workflowProgress"))
+        maxima = {}
+        for name in SNAPSHOT_MAX_FIELDS:
+            left, right = _int_or_none(folded.get(name)), _int_or_none(snapshot.get(name))
+            if left is not None and right is not None:
+                maxima[name] = max(left, right)
+            elif left is not None and name in snapshot:
+                # Present but unparseable in the later copy — see the same
+                # branch in :func:`_fold_progress_rows`.
+                maxima[name] = left
+        # A `status` that CHANGED takes its companions with it: whatever the
+        # winning copy says about `error`/`summary` is the whole truth about
+        # them, including saying nothing (:data:`STATUS_COMPANIONS`).
+        restated = ("status" in snapshot
+                    and _str_or_none(snapshot.get("status")) != _str_or_none(folded.get("status")))
+        folded.update(snapshot)
+        folded.update(maxima)
+        if restated:
+            for name in STATUS_COMPANIONS:
+                if name not in snapshot:
+                    folded.pop(name, None)
+        if progress:
+            folded["workflowProgress"] = progress
+    return folded
+
+
+def read_snapshots(paths):
+    """`[dict, …]` for the paths that parsed — the unparsable ones drop out."""
+    out = []
+    for path in paths or ():
+        parsed = read_snapshot(path)
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
 def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
              cwd=None, env=None) -> RunScan:
     """One run directory ⇒ a `runs` document and its `run_nodes` (R-49).
@@ -1615,8 +1802,11 @@ def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
     The run's top-level `$set` fields (`status`, `summary`, `phases`, `taskId`,
     `harnessTotals`) have exactly ONE writer whatever the journal count is: they
     all come from the snapshot (:func:`_run_observation`), and both journals of a
-    runId resolve the same `<runId>.json` through the same scoped
-    :func:`find_snapshot`. What the journal contributes to `runs` is
+    runId resolve the same `<runId>.json` **copies** through the same scoped
+    :func:`find_snapshots` + :func:`fold_snapshots`. (D-02 made the plural the
+    reader: `find_snapshot` is a locator this path deliberately no longer
+    calls, because with two copies on disk the first path is an arbitrary
+    one.) What the journal contributes to `runs` is
     `sessionIds` (`$addToSet`, sorted by `fingerprint`) and the node-derived
     `startedAt`/`endedAt` (`$min`/`$max`) — order-free operators, all three.
     """
@@ -1628,8 +1818,13 @@ def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
     scope = _run_scope(run_dir, root, cwd, env)
 
     if snapshot is None and root is not None:
-        found = find_snapshot(run_id, root, scope=scope)
-        snapshot = read_snapshot(found) if found else None
+        # D-02: every copy, folded — never `matches[0]`, which orders on a
+        # session UUID and so answers "which session observed the end first"
+        # rather than "which copy is the truth".
+        found = find_snapshots(run_id, root, scope=scope)
+        if len(found) > 1:
+            scan.skipped["duplicate_snapshot"] += len(found) - 1
+        snapshot = fold_snapshots(read_snapshots(found))
     if snapshot is None:
         scan.skipped["no_snapshot"] += 1
     scan.snapshot = snapshot
@@ -1646,8 +1841,26 @@ def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
         if sid and sid not in session_ids:
             session_ids.append(sid)
 
+    progress = _progress_by_agent(snapshot)
+    # D-03: a snapshot states each agent's `startedAt`/`lastProgressAt` itself,
+    # so when it covers every node the O(run) transcript scan buys nothing but
+    # I/O. It is skipped only when the cover is TOTAL — one uncovered node
+    # would otherwise silently lose its clock, and "cheaper" is not a reason to
+    # publish a node with no `endedAt`. A live run has no snapshot at all,
+    # which is why `agent_times` stays the live path (GD-D4) rather than
+    # becoming a fallback nobody exercises.
+    #
+    # **Both** clocks are required, because the scan supplies both: `first` is
+    # the only source of `started_at` when a `workflowProgress` row carries no
+    # `startedAt`, so gating on `lastProgressAt` alone would publish a node
+    # with `startedAt: null` where the pre-D-03 code had the transcript's
+    # first-seen time. No live row has one without the other today; the
+    # predicate does not depend on that staying true.
+    covered = bool(progress) and all(
+        _snapshot_clocks_cover(progress.get(node["agent_id"]))
+        for node in journal.nodes)
     times_by_agent = {}
-    if times:
+    if times and not covered:
         for directory in directories:
             for agent_id, (first, last) in agent_times(directory).items():
                 known_first, known_last = times_by_agent.get(agent_id, (None, None))
@@ -1656,7 +1869,8 @@ def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
                 if last is not None and (known_last is None or last > known_last):
                     known_last = last
                 times_by_agent[agent_id] = (known_first, known_last)
-    progress = _progress_by_agent(snapshot)
+    elif times and covered:
+        scan.skipped["snapshot_times"] += len(journal.nodes)
 
     nodes = []
     for node in journal.nodes:
@@ -1666,6 +1880,9 @@ def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
         started = _epoch_ms(row.get("startedAt"))
         if first is not None and (started is None or first < started):
             started = first
+        progressed = _epoch_ms(row.get("lastProgressAt"))
+        if progressed is not None and (last is None or progressed > last):
+            last = progressed
         totals = _node_totals(row)
         nodes.append(RunNodeObservation(
             run_id=run_id,
@@ -1687,6 +1904,15 @@ def read_run(run_dir, *, root=None, run_id=None, snapshot=None, times=True,
             phase_index=_int_or_none(row.get("phaseIndex")),
             phase_title=_str_or_none(row.get("phaseTitle")),
             harness_totals=totals,
+            # D-03. `harness_state` is the snapshot's own word, stored beside
+            # the observations and never in place of them; the two `last_*`
+            # fields are the free deterministic replacement for a hand-typed
+            # detail string, and `last_tool_summary` is truncated at the source.
+            harness_state=_str_or_none(row.get("state")),
+            queued_at=_epoch_ms(row.get("queuedAt")),
+            last_progress_at=progressed,
+            last_tool_name=_str_or_none(row.get("lastToolName")),
+            last_tool_summary=_str_or_none(row.get("lastToolSummary")),
             source_path=_rel(root, journal_path),
         ))
     for agent_id in progress:
@@ -1725,6 +1951,21 @@ def _progress_by_agent(snapshot) -> dict:
         if agent_id:
             out[agent_id] = row
     return out
+
+
+def _snapshot_clocks_cover(row) -> bool:
+    """Does one `workflowProgress` row state BOTH clocks the transcript scan gives?
+
+    D-03's short-circuit replaces `agent_times`, and that scan supplies two
+    values per agent — `first` (the node's `started_at` whenever the row has no
+    `startedAt` of its own) and `last` (its `ended_at`). A row that states only
+    `lastProgressAt` covers one of them, so skipping the scan for it trades a
+    real `startedAt` for `null`. Both, or the scan runs.
+    """
+    if not isinstance(row, dict):
+        return False
+    return (_epoch_ms(row.get("startedAt")) is not None
+            and _epoch_ms(row.get("lastProgressAt")) is not None)
 
 
 def _node_totals(row):
@@ -2347,6 +2588,15 @@ def map_run_node(observation):
         "harnessTotals": obs.harness_totals,
         "startedAt": obs.started_at,
         "endedAt": obs.ended_at,
+        # D-03's five. `$set`, not accumulators: they are absolute statements
+        # of the snapshot that produced them, and the snapshot itself is
+        # already folded newest-wins (D-02) before it gets here — a second
+        # `$max` at this level would be folding a fold.
+        "harnessState": obs.harness_state,
+        "queuedAt": obs.queued_at,
+        "lastProgressAt": obs.last_progress_at,
+        "lastToolName": obs.last_tool_name,
+        "lastToolSummary": obs.last_tool_summary,
     }
     if obs.result is not None:
         doc["result"] = obs.result

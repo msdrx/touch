@@ -454,6 +454,22 @@ PENDING_TTL_SECONDS = 300
 #: marker is the orchestrator's own statement inside the prompt, the ledger line
 #: is written immediately after the spawn, the Agent-tool `description` is the
 #: only channel left when neither survived.
+#:
+#: **`ledger` is vestigial as a HAND-written channel (D-19): the orchestrate
+#: skill mandated a ledger append for months and zero ledger lines were ever
+#: written, so the mandate is deleted rather than restated.** The constant and
+#: every reader below stay exactly as they are, because the channel now has a
+#: DETERMINISTIC producer instead of an instructed one: the `SubagentStart` arm
+#: of `plugin/touch/hooks/agent_lifecycle.py` (D-18(c), gated green by the D-17
+#: probe) appends the line from the harness's own payload — `[touch]` marker
+#: fields for `name`/`root`/`parent`/`role`/`attempt`, `<pid>-<procStart>` read
+#: out of `/proc` for a STATED `sessionKey` (hence `ledger` topping
+#: `SESSION_KEY_SOURCE_RANK` rather than the `path` derivation), and `taskId`
+#: only for the Agent-tool profile, where the task id IS the 17-hex agentId. A
+#: Workflow agent gets no ledger line at all: its prompt carries `[monitor]`,
+#: which has no `name`/`root`, and :func:`read_ledger_file` would drop the line
+#: as `skipped_unaddressable` — which is why `marker` still outranks `ledger`
+#: and why nothing here treats a missing ledger as an error.
 BIND_CHANNELS = ("marker", "ledger", "description")
 
 #: The `slots` fields this module builds with `$addToSet` — i.e. **sets**, whose
@@ -516,6 +532,13 @@ ATTEMPT_SOURCES = ("stated", "resolved")
 #: path: the skill file and the base plan already disagree about where the
 #: control file lives, and a third statement here would make it three
 #: (CUSTOMSTATE-11).
+#:
+#: **DORMANT until a control verb ships (D-19).** The control file this reader
+#: parses has no producer: `server.CONTROL_ROUTES` is `{}` (GD-4), so nothing
+#: writes an intent and the orchestrate skill's polling loop is marked dormant
+#: rather than deleted. The reader is kept because the file genre is a real one
+#: a human may write by hand, and because deleting a working parser to re-derive
+#: it when the verb lands is how a shipped verb arrives untested.
 CONTROL_PATHS_ENV = "TOUCH_CONTROL_PATHS"
 
 #: The same override for spawn ledgers. Unlike control files, ledgers *do* have

@@ -188,6 +188,13 @@ __all__ = [
     "reduce_events",
     "reduce_task",
     "scan",
+    "SYNTHETIC_RUN_PREFIX",
+    "PLAN_CARD_OVERHEAD",
+    "is_synthetic_run_id",
+    "subplan_count",
+    "derive_plans_total",
+    "fold_plans_total",
+    "reconcile_plans_total",
     "artifact_kind_of",
     "artifact_stream",
     "task_of_artifact_stream",
@@ -1453,6 +1460,102 @@ def scan(root=None, *, env=None, token_window=DEFAULT_TOKEN_WINDOW) -> tuple:
     """
     return tuple(reduce_task(folder, token_window=token_window)
                  for folder in discover_tasks(root, env=env))
+
+
+# --- the harness join (D-04 / GD-D12) -------------------------------------
+#
+# `events.jsonl` is DEMOTED, never deleted. Once a task's `wf_dir` resolves to
+# a run the ingest tick has observed, the harness-derived node set is the
+# authoritative one and these lines — which an LLM was instructed to write, and
+# could forget, mistype or aim at the wrong folder — render as `asserted`
+# annotation beside it. A task with no `wf_dir` keeps the legacy reduction as
+# the only honest answer, and no finished folder is ever rewritten: the Mongo
+# `legacy:` key space is positional (`legacy:<task>#<line>`) and depends on it.
+
+#: A run id this module SYNTHESIZED because the folder named no `wf_dir`
+#: (`task_folder`'s RUNSTATE-2 arm). It can never join a harness run, and the
+#: prefix is how a caller tells the two apart without re-reading the config.
+SYNTHETIC_RUN_PREFIX = "legacy:"
+
+#: The two plan cards an implement run always has beyond its sub-plans: the
+#: divide that produced them and the final aggregate gate over the merged
+#: change-set. `cycle_reporter` declares the same `N + 2` at the divide close
+#: (GD-D11), and the two numbers must agree or the denominator flickers.
+PLAN_CARD_OVERHEAD = 2
+
+
+def is_synthetic_run_id(run_id) -> bool:
+    """True for the `legacy:<task>` id a folder with no `wf_dir` gets."""
+    return isinstance(run_id, str) and run_id.startswith(SYNTHETIC_RUN_PREFIX)
+
+
+def subplan_count(result):
+    """`len(result["subplans"])` for a divider's journal result, else None.
+
+    The divider is the one agent whose *result* states how many sub-plans the
+    run has, which makes it the deterministic source for a denominator that is
+    otherwise typed by hand into `ORCH_PLANS_TOTAL` (GD-D11). Tolerant by
+    design: any other agent's result, a string result, a `subplans` that is not
+    a list — all of them answer None rather than raising, because "this result
+    is not a divider's" is the ordinary case, not an error.
+    """
+    if not isinstance(result, dict):
+        return None
+    for name in ("subplans", "sub_plans", "subPlans"):
+        value = result.get(name)
+        if isinstance(value, list) and value:
+            return len(value)
+    return None
+
+
+def derive_plans_total(results):
+    """The plans denominator from the divider's own result, or None (GD-D11).
+
+    `N + 2` — the sub-plans plus the divide card and the final gate. Returns
+    None when no result in the run states a sub-plan list, which is the answer
+    for a research run and for any run whose divider has not returned yet; the
+    wire's `ORCH_PLANS_TOTAL` hint then remains the only number, exactly as it
+    is today.
+    """
+    counts = [n for n in (subplan_count(r) for r in (results or ())) if n]
+    if not counts:
+        return None
+    return max(counts) + PLAN_CARD_OVERHEAD
+
+
+def fold_plans_total(*values):
+    """The monotonic max `monitoring.md` already specifies, over any sources.
+
+    The wire value stays an **early hint**: a driver that declares 5 before the
+    divider has decided 7 is not wrong, it is early, and a fold that let the
+    later, larger number win is the whole reason the rule is `max` and not
+    last-wins. A stray *smaller* value can therefore never shrink a
+    denominator, whether it came from `events.jsonl` or from a journal.
+    """
+    known = [v for v in values if isinstance(v, int) and not isinstance(v, bool) and v > 0]
+    return max(known) if known else None
+
+
+def reconcile_plans_total(reduction, declared):
+    """Fold a harness-derived denominator into a reduction's cards. Returns it.
+
+    D-04's denominator lands **here**, in the module that owns the reduction,
+    and not in the API's projection: GD-D10 keeps derivation in one home, and a
+    fold applied while a response is being built is a fold every other reader
+    of the same reduction silently does without. The rule is `reduce_events`'
+    own monotonic max, one line up from where the wire's `plans_total` events
+    are folded — the same rule, reached from the other source.
+
+    The reduction is mutated in place, which is safe for exactly one reason:
+    a `Reduction` is derived at read time and never written back (its own
+    docstring), so there is no stored document here to corrupt.
+    """
+    folded = fold_plans_total(declared)
+    if folded is None:
+        return None
+    for plan in (getattr(reduction, "plans", None) or {}).values():
+        plan.plans_total = fold_plans_total(getattr(plan, "plans_total", None), folded)
+    return folded
 
 
 # --- the artifact registry ------------------------------------------------

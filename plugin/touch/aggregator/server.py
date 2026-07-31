@@ -173,11 +173,14 @@ could not do themselves. Stated plainly rather than left to be discovered:
   (it holds no `Backend`, runs no ingest loop, and GD-21 keeps the driver out
   of every module but two). Putting a write path here would also break GD-22's
   direction of travel — the API reads the memory model, it does not feed it.
-  The handoff therefore stands open for whichever sub-plan owns the ingest
-  tick, exactly as `custom_state.py` records it: until then `custom_state` is
-  written by nothing, every slot stays `pending`, and this API serves that
-  honestly (`/api/query?collection=slots` returns what is there, which is
-  nothing) rather than presenting an unwritten head as fact.
+  The handoff is still open after D-01. The ingest tick (`tick.py`) exists and
+  is the writer of `ReadModel.state` and of the `run:`/`session:` streams, but
+  it holds no `Backend` either, so `custom_state` is *read* and not written:
+  every slot stays `pending`, and this API serves that honestly
+  (`/api/query?collection=slots` returns what is there, which is nothing)
+  rather than presenting an unwritten head as fact. `/health.writers` and the
+  same block on `/api/query` say `customState: "none"` out loud, so an empty
+  collection is legible as correct rather than as lost.
 
 Composition
 -----------
@@ -214,6 +217,7 @@ from . import mongo_store as ms
 from . import paths
 from . import refs
 from . import store as store_mod
+from . import tick as tick_mod
 from . import ws
 
 __all__ = [
@@ -900,9 +904,11 @@ SNAPSHOT_ATTEMPTS = 8
 def _snapshot(mapping) -> dict:
     """A shallow copy of a dict another thread may be writing to.
 
-    Every handler runs on a `to_thread` worker while the ingest tick writes the
-    same state on the event loop, so a plain `.values()` walk races
-    `dict.__setitem__` and raises *"dict changed size during iteration"* — a
+    Every handler runs on a `to_thread` worker and so does the ingest tick's
+    `poll()` (`tick.run` is `await asyncio.to_thread(self.poll)` — blocking
+    file I/O never belongs on the loop), so two workers touch this state
+    concurrently: a plain `.values()` walk races `dict.__setitem__` and raises
+    *"dict changed size during iteration"* — a
     500 on the sidebar under exactly the load GD-22 promises to survive. A
     copy is the cheapest fix that needs no cooperation from the writer:
     `dict(d)` on an exact dict is one C-level copy that cannot observe a
@@ -949,6 +955,12 @@ class ReadModel:
     state: dict = field(default_factory=dict)
     store: object = None
     mirror: object = None
+    #: The D-01 ingest tick (anything with `health()`), or None. It is the ONE
+    #: writer of ``state`` and of the store's streams; this file still writes
+    #: neither. `None` is published as `ingest: {state: "absent"}` rather than
+    #: as silence, because "no tick" is exactly the pre-D-01 condition an
+    #: operator has to be able to see.
+    ingest: object = None
     tailers: dict = field(default_factory=dict)
     claude_root: str = None
     tasks_root: str = None
@@ -1160,6 +1172,48 @@ class ReadModel:
                     "counters": {}}
         return payload if isinstance(payload, dict) else {"state": "unknown"}
 
+    def ingest_health(self) -> dict:
+        """`/health.ingest` — the D-01 tick's own block, or `absent`.
+
+        `absent` is a real answer and the reason this is an enum: before D-01
+        the server ran no ingest at all and `/health` said nothing about it, so
+        "the tick is not running" and "the tick is running over an empty
+        corpus" were the same zeros. They are now different words.
+        """
+        tick = self.ingest
+        if tick is None:
+            return {"state": "absent", "files": 0, "filesSeen": 0, "linesRead": 0,
+                    "lastTick": None, "ticks": 0, "ops": 0, "walRecords": 0,
+                    "errors": 0, "lastError": None}
+        try:
+            payload = tick.health()
+        except Exception as exc:                                    # noqa: BLE001
+            return {"state": "unknown", "files": 0, "filesSeen": 0, "linesRead": 0,
+                    "lastTick": None, "ticks": 0, "ops": 0, "walRecords": 0,
+                    "errors": 1, "lastError": type(exc).__name__}
+        return payload if isinstance(payload, dict) else {"state": "unknown"}
+
+    def writers(self) -> dict:
+        """Who writes each reserved `.touch/` stream — including "nobody".
+
+        Published on `/health` and repeated on `/api/query` because the honest
+        answer changed with D-01 and will change again: the tick is now the
+        writer of `run:<runId>` and `session:<pid>-<procStart>`, while
+        `custom-state` still has **no producer at all** (its head/slot driver
+        needs a database handle and a write tick — `custom_state.py` records
+        the handoff and `tick.py`'s docstring repeats it). Saying so is the
+        difference between an empty collection and a broken one: with no
+        writer, `/api/query?collection=slots` returning nothing is correct.
+        """
+        tick = self.ingest
+        return {
+            "customState": "none",
+            "run": "tick" if tick is not None else "none",
+            "session": "tick" if tick is not None else "none",
+            "note": ("the tick appends run and session streams; `custom-state` has no "
+                     "producer until a control verb or the file plane ships one"),
+        }
+
 
 # --- projections ----------------------------------------------------------
 
@@ -1211,12 +1265,22 @@ def _node_payload(doc, derived) -> dict:
     The observation and the conclusion stay in separate sub-objects on purpose:
     sp-13 renders `derived` and shows `observed` on demand, and a page that
     cannot tell the two apart is the one that eventually re-derives (GD-23).
+
+    The projection is a whitelist, so D-03's five liveness fields are named
+    here or they are stored and then dropped on the way out. They belong under
+    `observed` and nowhere else: `harnessState` is what the harness *said*
+    about an agent, never a verdict — the reducer's word for the same node is
+    `derived.state`, and the two are deliberately not merged (GD-23/R-58).
+    `lastToolSummary` is truncated at the source: display text, never parsed
+    (GD-D4/SUBSTRATE-10).
     """
     return {
         "id": doc.get("_id"),
         "observed": _project(doc, ("_id", "runId", "key", "ordinal", "journalSeq",
                                    "agentId", "resultSeen", "result", "startedAt",
-                                   "endedAt", "attempt", "label", "provenance")),
+                                   "endedAt", "attempt", "label", "provenance",
+                                   "harnessState", "queuedAt", "lastProgressAt",
+                                   "lastToolName", "lastToolSummary")),
         "derived": derived,
     }
 
@@ -1240,15 +1304,81 @@ def _agent_payload(doc, derived) -> dict:
     return payload
 
 
-def _task_payload(reduction) -> dict:
+def _harness_node_row(doc, derived) -> dict:
+    """One `run_nodes` document in the shape the task panel already renders.
+
+    Deliberately the SAME keys the legacy node rows use — `key`, `plan`,
+    `stage`, `state`, `detail`, `started`, `ended` — so the demotion is a
+    change of *source*, not a change of contract the page has to learn twice.
+    What is added is `source: "harness"` and the observation the state came
+    from, because a row whose provenance is invisible is a row that will be
+    re-derived by somebody downstream (GD-23).
+
+    `detail` is the snapshot's `lastToolSummary`: display text, truncated at
+    the source, never parsed (GD-D4/SUBSTRATE-10). It is the free deterministic
+    replacement for the hand-typed detail strings the legacy stream carries.
+    """
+    key = doc.get("key") or ""
+    plan, _sep, stage = key.partition("/")
+    derived = derived if isinstance(derived, dict) else {}
+    totals = doc.get("harnessTotals") if isinstance(doc.get("harnessTotals"), dict) else {}
+    return {
+        "key": key,
+        "plan": plan or key,
+        "stage": stage,
+        "ordinal": doc.get("ordinal"),
+        "agentId": doc.get("agentId"),
+        "label": derived.get("display") or doc.get("label"),
+        # The reducer's verdict and ONLY the reducer's (GD-23/R-54). The
+        # harness's own `state` is right there in `harnessState` and it is
+        # deliberately not used as a fallback: it says `done` for a node the
+        # reducer would call `unknown`, and quietly promoting it here is how a
+        # verdict nobody derived reaches a badge (R-58's discipline).
+        "state": derived.get("state"),
+        "detail": doc.get("lastToolSummary"),
+        "started": doc.get("startedAt"),
+        "ended": doc.get("endedAt"),
+        "tokens": totals.get("tokens"),
+        "attempt": doc.get("attempt"),
+        "harnessState": doc.get("harnessState"),
+        "lastToolName": doc.get("lastToolName"),
+        "resultSeen": bool(doc.get("resultSeen")),
+        "source": "harness",
+        "derivedFromLegacy": False,
+        "flags": [],
+    }
+
+
+def _asserted_node_row(row) -> dict:
+    """A legacy node row, labelled for what it is: an assertion, not an observation."""
+    out = dict(row)
+    out["source"] = "asserted"
+    return out
+
+
+def _task_payload(reduction, harness=None) -> dict:
     """One legacy task folder (GD-14 kinds), from `legacy.Reduction`.
 
     Every re-label the legacy reducer applied travels with the row
     (`derivedFromLegacy`, the relabel reason, "closed — no verdict"), because
     D13 is satisfied by *rendering* the derivation, and a row that lost its
     provenance on the way through the API cannot render it.
+
+    ``harness`` is D-04's join, when the task's `wf_dir` named a run the tick
+    has observed: `{runId, wfDir, nodes, plansTotal}`. With it, `nodes` is the
+    harness-derived set and the `events.jsonl` rows move to `assertedNodes`
+    — kept, labelled and rendered as annotation (GD-D12), never deleted.
+    Without it the payload is byte-for-byte what it was, which is what makes a
+    task with no `wf_dir` an honest fallback rather than a degraded case.
     """
     archive = reduction.archive
+    if harness:
+        # The denominator is folded into the REDUCTION, by the module that owns
+        # it, before anything is projected (GD-D10: derivation has one home and
+        # it is not the API layer). This call mutates the reduction, which is
+        # correct precisely because a reduction is derived per read and never
+        # written back.
+        legacy_mod.reconcile_plans_total(reduction, harness.get("plansTotal"))
     plans = {}
     for name, plan in (reduction.plans or {}).items():
         plans[name] = {
@@ -1268,19 +1398,124 @@ def _task_payload(reduction) -> dict:
         "derivedFromLegacy": bool(node.derived_from_legacy),
         "relabel": node.relabel, "unconventional": bool(node.unconventional),
         "flags": list(node.flags or ()),
+        # ONE site sets this: the reduction's own rows are `legacy` here, and
+        # the demotion below relabels them through `_asserted_node_row`. Two
+        # sites setting one field is two things to read before a row's
+        # provenance is known.
+        "source": "legacy",
     } for node in (reduction.nodes or ())]
-    return {
+
+    asserted = []
+    node_source = "legacy"
+    if harness:
+        # GD-D12: the harness set becomes THE node set and the stream's own
+        # rows survive beside it, labelled. Kept in file order, unmodified.
+        asserted = [_asserted_node_row(row) for row in nodes]
+        nodes = list(harness.get("nodes") or ())
+        node_source = "harness"
+
+    payload = {
         "task": reduction.task, "taskId": reduction.task_id,
         "runId": reduction.run_id, "kind": reduction.kind,
         "archive": ({"label": archive.label, "state": archive.state,
                      "path": archive.path} if archive is not None else None),
         "plans": plans, "nodes": nodes,
+        "nodeSource": node_source,
+        "assertedNodes": asserted,
         "tokens": [{"plan": t.plan, "stage": t.stage, "agentId": t.agent_id,
                     "label": t.label, "ts": t.ts, "tokens": t.tokens,
                     "folded": t.folded} for t in (reduction.tokens or ())],
         "stats": dict(reduction.stats or {}),
         "notes": list(reduction.notes or ()),
     }
+    if harness:
+        payload["harness"] = {
+            "runId": harness.get("runId"),
+            # The join key itself, published because "why did these rows
+            # change source" has to be answerable from the response.
+            "wfDir": harness.get("wfDir"),
+            "nodeCount": len(nodes),
+            "assertedCount": len(asserted),
+            "plansTotal": harness.get("plansTotal"),
+        }
+    return payload
+
+
+def _nodes_by_run(model) -> dict:
+    """`{runId: [doc, …]}` over the whole `run_nodes` collection, once.
+
+    `ReadModel.nodes_of` filters a fresh shallow COPY of the collection per
+    call (`bucket()` snapshots, by design — a reader must not iterate a mapping
+    the tick is writing). One call per task folder is therefore one
+    whole-collection copy per task on every `/api/tasks` request, which is
+    O(tasks x run_nodes). The grouping is O(run_nodes) once and every join
+    below is then a dict lookup.
+    """
+    groups = {}
+    for doc in model.bucket("run_nodes").values():
+        if not isinstance(doc, dict):
+            continue
+        run_id = doc.get("runId")
+        if isinstance(run_id, str) and run_id:
+            groups.setdefault(run_id, []).append(doc)
+    return groups
+
+
+def _harness_join(model, reduction, groups=None):
+    """D-04's join: a task folder ⇒ the run the tick observed, or None.
+
+    The key is `wf_dir`, which Touch already computes — `legacy.task_folder`
+    reads it out of `orch-config.json` and synthesizes `legacy:<task>` when it
+    is absent, so a run id that is not synthetic IS the basename of a `wf_dir`
+    and needs no second grammar.
+
+    None is returned for the three honest cases, and they are not failures:
+    no `wf_dir` (a folder that names no run), a `wf_dir` naming a run this
+    installation has not ingested (an archived run whose transcripts are gone),
+    and a plan-only folder. Each keeps the legacy reduction as the answer.
+
+    ``groups`` is :func:`_nodes_by_run`'s index when the caller has one folder
+    per task to join; without it the single-row read is `model.nodes_of`.
+    """
+    run_id = getattr(reduction, "run_id", None)
+    if not isinstance(run_id, str) or legacy_mod.is_synthetic_run_id(run_id):
+        return None
+    docs = groups.get(run_id) if isinstance(groups, dict) else model.nodes_of(run_id)
+    if not docs:
+        return None
+    derived = model.reduction()
+    ordered = sorted(docs, key=lambda d: (_int_or(d.get("journalSeq"), 0), str(d.get("_id"))))
+    rows = [_harness_node_row(doc, derived.nodes.get(doc.get("_id"))) for doc in ordered]
+    archive = getattr(reduction, "archive", None)
+    return {
+        "runId": run_id,
+        "wfDir": getattr(archive, "path", None),
+        "nodes": rows,
+        "plansTotal": legacy_mod.derive_plans_total(_node_results(ordered)),
+    }
+
+
+def _node_results(docs):
+    """Each node's journal `result`, unwrapped — the divider's is the one that counts.
+
+    `run_nodes.result` is a declared `raw_path`, so what is stored is always
+    `mongo_store`'s `_raw` wrapper (that is the point of declaring it: the
+    field's stored shape does not depend on whether one instance happened to
+    carry a dotted key). Unwrapping is therefore the normal read, and a wrapper
+    that does not decode is skipped rather than raised — a truncated stored
+    subtree must not take `/api/tasks` down.
+    """
+    out = []
+    for doc in docs:
+        result = doc.get("result")
+        if ms.is_raw_wrapper(result):
+            try:
+                result = ms.unwrap_raw(result)
+            except ms.MongoStoreError:
+                continue
+        if isinstance(result, dict):
+            out.append(result)
+    return out
 
 
 # --- the wire (R-55) ------------------------------------------------------
@@ -1948,6 +2183,8 @@ def h_health(api, query, headers) -> Response:
         "store": {"configured": model.store is not None,
                   "streamCount": len(model.store.streams()) if model.store else 0,
                   "stats": dict(getattr(model.store, "stats", {}) or {})},
+        "ingest": model.ingest_health(),
+        "writers": model.writers(),
         "collections": model.sizes(),
         "counters": dict(model.counters),
         "mirror": model.mirror_health(),
@@ -2302,6 +2539,11 @@ def h_tasks(api, query, headers) -> Response:
     run an orchestration) is ordinary. `legacy.scan` answers `()` for a missing
     root, correctly and silently, which is precisely why the note has to be here
     and not inferred from the count.
+
+    Since D-04 each row is additionally joined to the harness run its `wf_dir`
+    names (:func:`_harness_join`). Where that join lands, the observed nodes
+    are the row's node set and the `events.jsonl` ones become `assertedNodes`
+    (GD-D12) — a demotion, never a deletion, and never a rewrite of the folder.
     """
     model = api.model
     if not model.tasks_root:
@@ -2316,7 +2558,9 @@ def h_tasks(api, query, headers) -> Response:
                               "exists": False,
                               "note": "local-orchestrators root does not exist yet"})
     reductions = legacy_mod.scan(model.tasks_root)
-    rows = [_task_payload(r) for r in reductions]
+    groups = _nodes_by_run(model)
+    rows = [_task_payload(r, harness=_harness_join(model, r, groups))
+            for r in reductions]
     rows.sort(key=lambda r: r["task"])
     return Response.json({"tasks": rows, "count": len(rows), "root": model.tasks_root})
 
@@ -2435,6 +2679,11 @@ def h_query(api, query, headers) -> Response:
     return Response.json({"collection": collection, "filter": criteria,
                           "documents": docs, "count": len(docs),
                           "source": origin,
+                          # The same note `/health` publishes, repeated here
+                          # because this is the route where "the collection is
+                          # empty" is most easily read as "the data is missing":
+                          # a collection with no writer is correctly empty.
+                          "writers": model.writers(),
                           "note": None if origin == "mongo" else
                           "served from the in-memory reduction (GD-22); "
                           "Mongo is a rebuildable mirror and is never on this path"})
@@ -2961,6 +3210,9 @@ def _usage() -> str:
         "                   never from source).\n"
         "  --allow-origin   add an allowed Origin for the WS upgrade (repeatable)\n"
         "  --allow-host     add an allowed Host header value (repeatable)\n"
+        "\n"
+        "  The PROJECT the ingest tick reads is not a flag: it is\n"
+        "  $TOUCH_PROJECT_CWD, or the directory the server was started in.\n"
     )
 
 
@@ -2972,6 +3224,11 @@ def main(argv=None) -> int:
     types) is a token that gets reused. It is also written to
     `.touch/server.json` (0600) so a local client can find it without scraping
     a log.
+
+    The ingest scope (D-01) is deliberately not an argument: the tick reads the
+    project `sessions.project_cwd(None, None)` names — `$TOUCH_PROJECT_CWD`, or
+    the process's own cwd — so a server started in the wrong directory serves
+    an empty corpus rather than a different project's transcripts.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     host, port = DEFAULT_HOST, DEFAULT_PORT
@@ -3015,6 +3272,19 @@ def main(argv=None) -> int:
         tasks_root=tasks_root or default_tasks_root(),
         claude_root=claude_root,
     )
+    # D-01: the composition that was missing. The tick is constructed here and
+    # started on the loop below, so `ReadModel.state` — the dict every route
+    # reads — has a writer for the first time. Constructing it cannot fail on a
+    # machine with no corpus: discovery answers `()` and `/health` says `idle`.
+    #
+    # No `cwd=` on purpose: the ingest scope is `sessions.project_cwd(None,
+    # None)` — `$TOUCH_PROJECT_CWD` if set, else the process cwd — which is
+    # already the ONE resolver, documented in `main`'s usage. `--claude-root`
+    # and `--tasks-root` are flags because they name trees a caller may put
+    # anywhere; the project a server serves is the directory it was started
+    # in, and a second way to say it would be a second answer to disagree with.
+    tick = tick_mod.IngestTick(model, claude_root=claude_root)
+    model.ingest = tick
     server = HttpServer(model, host=host, port=port,
                         policy=OriginPolicy.default(host, port, origins=origins, hosts=hosts),
                         assets=assets or default_assets())
@@ -3025,6 +3295,7 @@ def main(argv=None) -> int:
         except OSError as exc:
             print(f"cannot bind {host}:{port} ({exc})", file=sys.stderr)
             return 1
+        tick.start()
         url = f"{server.url}?token={server.auth.token}"
         print(f"touch aggregator listening on {host}:{server.port}")
         print(f"open: {url}")
@@ -3042,6 +3313,7 @@ def main(argv=None) -> int:
         except asyncio.CancelledError:
             pass
         finally:
+            tick.stop()
             await server.close()
         return 0
 

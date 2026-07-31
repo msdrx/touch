@@ -533,8 +533,16 @@ def test_plugin_details():
           f"claude --plugin-dir ... plugin details touch loads the payload "
           f"(rc={res.returncode}, {(res.stdout + res.stderr).strip()[-300:]})")
     out = res.stdout
-    check("Hooks (1)" in out,
-          f"the payload registers exactly one hook (inventory: "
+    # FOUR hook EVENTS, still exactly TWO scripts and exactly ONE registration
+    # file (`hooks/hooks.json`) — GD-U5's rule is about registration sites, not
+    # event count, and `test_scope_guard.py` / `test_agent_lifecycle.py` own the
+    # per-event shape. The count moved 1 -> 4 when D-18's lifecycle/bind/
+    # provenance pack landed on the back of the D-17 probe: `PreToolUse` (the
+    # scope guard) plus `SubagentStart`, `SubagentStop` and `PostToolUse` (the
+    # agent-lifecycle hook). It is asserted as an exact number on purpose — a
+    # fifth event appearing is a decision, not a diff.
+    check("Hooks (4)" in out,
+          f"the payload registers exactly four hook events (inventory: "
           f"{[l.strip() for l in out.splitlines() if 'Hooks (' in l]})")
     # Skills are NOT asserted here: they arrive with item 09. When they do,
     # this file keeps working and the skills test owns that count.

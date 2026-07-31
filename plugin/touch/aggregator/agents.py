@@ -409,6 +409,12 @@ def parse_markers(text) -> tuple:
     monitor = touch = None
     for kind, rest in marker_records(marker_window(text)):
         fields = dict(MARKER_KV.findall(rest))
+        if not fields:
+            # Payload-less mention — prose quoting the token (e.g. a sub-plan
+            # title naming "[monitor]"), not a marker; it must not clobber a
+            # real marker's fields. Same rule touch_marker_misplaced applies
+            # below the window.
+            continue
         if kind == "monitor":
             monitor = fields
         else:

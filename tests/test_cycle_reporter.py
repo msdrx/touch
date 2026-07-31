@@ -39,7 +39,9 @@ import inspect
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -52,7 +54,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _roots  # noqa: E402
 
-REPORTER_SRC = (_roots.PAYLOAD / "skills" / "implement-plan" / "templates"
+REPORTER_SRC = (_roots.PAYLOAD / "skills" / "implement" / "templates"
                 / "cycle_reporter.py")
 
 #: Banned in any file under `plugin/touch/skills/` — kept in sync with
@@ -125,7 +127,7 @@ def make_tree(tmp, plugin_copy=True, project_copy=True):
     red instead of silently passing.
     """
     tmp = Path(tmp)
-    templates = tmp / "plugin" / "touch" / "skills" / "implement-plan" / "templates"
+    templates = tmp / "plugin" / "touch" / "skills" / "implement" / "templates"
     templates.mkdir(parents=True)
     shutil.copy2(REPORTER_SRC, templates / "cycle_reporter.py")
 
@@ -273,9 +275,34 @@ def test_real_payload_resolves_to_its_own_copy():
 
 RECORDING_STATUS_SH = (
     '#!/usr/bin/env bash\n'
-    '# recording stub: plan|stage|state|msg|ORCH_PLANS_TOTAL\n'
+    '# recording stub: plan|stage|state|msg|ORCH_PLANS_TOTAL in calls.log, and\n'
+    '# — separately, so the arms above keep their five-field equality checks —\n'
+    '# plan|ORCH_ROSTER in roster.log whenever a roster travels.\n'
     'printf \'%s|%s|%s|%s|%s\\n\' "$1" "$2" "$3" "$4" "${ORCH_PLANS_TOTAL:-}" '
-    '>> "$(dirname "$0")/calls.log"\n')
+    '>> "$(dirname "$0")/calls.log"\n'
+    'if [ -n "${ORCH_ROSTER:-}" ]; then\n'
+    '  printf \'%s|%s\\n\' "$1" "$ORCH_ROSTER" >> "$(dirname "$0")/roster.log"\n'
+    'fi\n'
+    '# ...and it APPENDS THE LINE IT STANDS FOR to events.jsonl. A writer that\n'
+    '# records its arguments but leaves no stream is not a writer: the reporter\n'
+    '# is stream-authoritative (settle() re-emits whatever events.jsonl does not\n'
+    '# carry), so a streamless stub would make it re-emit forever and every arm\n'
+    '# built on it would be measuring a fiction. No caps and no flock here —\n'
+    '# those are the real writer\'s job, and make_real_run() is what tests them.\n'
+    'python3 - "$@" <<\'PY\'\n'
+    'import json, os, sys\n'
+    'ev = {"ts": "2026-01-01T00:00:00.000+00:00", "plan": sys.argv[1],\n'
+    '      "stage": sys.argv[2], "state": sys.argv[3], "detail": sys.argv[4],\n'
+    '      "w": "agent"}\n'
+    'roster = os.environ.get("ORCH_ROSTER")\n'
+    'if roster and os.path.isfile(roster):\n'
+    '    with open(roster, encoding="utf-8", errors="replace") as f:\n'
+    '        ev["roster"] = [ln for ln in f.read().splitlines() if ln]\n'
+    'with open(os.path.join(os.environ["ORCH_STATE_DIR"], "events.jsonl"), "a",\n'
+    '          encoding="utf-8") as f:\n'
+    '    f.write(json.dumps(ev) + "\\n")\n'
+    'PY\n'
+    'exit 0\n')
 
 
 def make_run(tmp):
@@ -291,6 +318,26 @@ def make_run(tmp):
     return mod, task, wf, plugin_status.parent / "calls.log"
 
 
+def make_real_run(tmp):
+    """make_run, but with the REAL payload status.sh as the writer.
+
+    The stub above is right for equality-checking a close's four arguments; it
+    is wrong for anything that has to observe the STREAM, because it never
+    writes one. `--settle`'s whole idempotency claim is against events.jsonl,
+    and the roster bounds are enforced inside the real writer, so those arms
+    run the shipped script and read the JSON it appends.
+    """
+    mod, task, plugin_status, _ = make_tree(tmp)
+    shutil.copy2(_roots.MON / "status.sh", plugin_status)
+    os.chmod(plugin_status, 0o755)
+    wf = Path(tmp) / "wf_fixture"
+    wf.mkdir()
+    (task / "orch-config.json").write_text(
+        json.dumps({"max_plan_attempts": 4, "max_finalgate_attempts": 2}),
+        encoding="utf-8")
+    return mod, task, wf
+
+
 def plant(wf, aid, marker, result):
     """One agent transcript carrying `marker` + its journal result record."""
     (wf / f"agent-{aid}.jsonl").write_text(
@@ -300,8 +347,50 @@ def plant(wf, aid, marker, result):
                             "result": result}) + "\n")
 
 
+def spawn(wf, aid, marker):
+    """The transcript + a `started` journal record and NO result.
+
+    This is what "zero returns" looks like on disk: agents that went out and
+    never came back. Without the `started` records the reporter cannot tell
+    that apart from a plan that never ran, which is exactly why it reads them.
+    """
+    (wf / f"agent-{aid}.jsonl").write_text(
+        json.dumps({"type": "user", "text": marker}) + "\n", encoding="utf-8")
+    with open(wf / "journal.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "started", "agentId": aid,
+                            "key": aid}) + "\n")
+
+
 def calls(log):
     return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@contextlib.contextmanager
+def exported(**kv):
+    """Run the block with `kv` in this process's environment, then restore.
+
+    The reporter builds its child env from `os.environ`, so the only honest way
+    to prove it drops the seed variables is to actually export them here.
+    """
+    saved = {k: os.environ.get(k) for k in kv}
+    os.environ.update(kv)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def events(task):
+    """events.jsonl as parsed dicts (the real writer's own record)."""
+    path = Path(task) / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def test_divide_closes_done_with_plans_total():
@@ -316,8 +405,10 @@ def test_divide_closes_done_with_plans_total():
         rep = mod.Reporter(str(task), [str(wf)])
         rep.pass_once()
         got = calls(log)
-        check(got == ["divide|plan|done|3 sub-plans|5"],
-              f"divide close emitted once, template message + N+2 total (got {got})")
+        check(got == ["divide|plan|done|3 sub-plans|5",
+                      "orchestrator|divide|info|roster: 3 sub-plans|5"],
+              f"divide close emitted once with the template message + N+2 total, "
+              f"and the roster follows it on the ORCHESTRATOR card (got {got})")
         rep.pass_once()
         check(calls(log) == got, "a second pass emits nothing new")
         rep2 = mod.Reporter(str(task), [str(wf)])   # daemon restart
@@ -327,6 +418,18 @@ def test_divide_closes_done_with_plans_total():
         pages = os.listdir(task / "report" / "cycles")
         check(not any(p.startswith("divide") for p in pages),
               "protocol plans render no cycle pages")
+        # GD-D11: the roster travels as a FILE PATH, never env-inlined JSON.
+        roster_file = task / "roster.txt"
+        check(roster_file.is_file(),
+              "the reporter materialises the roster as a file")
+        if roster_file.is_file():
+            check(roster_file.read_text(encoding="utf-8").splitlines()
+                  == ["sp-a", "sp-b", "sp-c"],
+                  "one entry per line, in touch-run start's own roster.txt shape")
+        rlog = calls(log.parent / "roster.log")
+        check(rlog == [f"orchestrator|{roster_file}"],
+              f"ORCH_ROSTER carried the PATH, and only on the orchestrator "
+              f"event ({rlog})")
 
 
 def test_divide_closes_failed_like_the_template():
@@ -489,6 +592,885 @@ def test_marker_miss_is_retried_not_cached():
               "and its cycle page renders then")
 
 
+# -- the research protocol (D-14) -------------------------------------------
+# research's two plans have no impl->test->critique cycle, so the loops
+# pass cannot see them, and the template cannot close them itself for the same
+# R-09 reason `divide`/`finalgate` cannot. The rule is R-58's: `done` on the
+# first result that carries what the plan produces, `failed` ONLY on zero
+# returns — and zero returns is a terminal fact, so it is settle's to state.
+
+RESEARCH_KEYS = ("prior-art", "data-model", "economics")
+
+
+def plant_research_board(wf, returning=3, synth=True):
+    """`returning` of three researchers come back; optionally the synthesizer."""
+    for i, key in enumerate(RESEARCH_KEYS):
+        aid = f"r{i}"
+        marker = f"[monitor] plan=research stage={key} role=research attempt=1"
+        spawn(wf, aid, marker)
+        if i < returning:
+            plant(wf, aid, marker,
+                  {"findings": [{"id": f"{key}-1"}],
+                   "findings_file": f"/t/findings/research-{key}-attempt-1.md",
+                   "summary": "s"})
+    if synth:
+        marker = "[monitor] plan=synthesis stage=synthesize role=synth attempt=1"
+        spawn(wf, "s0", marker)
+        plant(wf, "s0", marker,
+              {"plan_file": "/t/plan/x-plan.md", "item_count": 26, "summary": "s"})
+
+
+def test_research_plans_close_done_with_two():
+    print("test_research_plans_close_done_with_two")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant_research_board(wf)
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        got = calls(log)
+        check(got == ["research|plan|done|3 of 3 research reports in when the card closed|2",
+                      "synthesis|plan|done|plan written: 26 items|2"],
+              f"both research cards close done, with ORCH_PLANS_TOTAL=2 at the "
+              f"barrier (got {got})")
+        check(not (task / "report" / "cycles").exists()
+              or not any(p.startswith(("research", "synthesis"))
+                         for p in os.listdir(task / "report" / "cycles")),
+              "neither renders a cycle page — they have no cycle")
+
+
+def test_research_close_wording_survives_the_late_reports():
+    print("test_research_close_wording_survives_the_late_reports")
+    # The card closes on the FIRST report (D-14) and its detail is then
+    # terminal, but on a real run the six researchers return minutes apart and
+    # the 2 s poll fires on the first one. The permanent badge therefore has to
+    # be a sentence that is still true after the other five land.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        markers = [f"[monitor] plan=research stage={key} role=research attempt=1"
+                   for key in RESEARCH_KEYS]
+        for i, marker in enumerate(markers):
+            spawn(wf, f"r{i}", marker)
+
+        def report(i):
+            plant(wf, f"r{i}", markers[i],
+                  {"findings": [{"id": f"{RESEARCH_KEYS[i]}-1"}],
+                   "findings_file": f"/t/findings/research-{RESEARCH_KEYS[i]}.md",
+                   "summary": "s"})
+
+        report(0)
+        rep = mod.Reporter(str(task), [str(wf)])
+        rep.pass_once()                       # the poll that catches the first
+        report(1)
+        report(2)
+        rep.pass_once()                       # the other two, minutes later
+        got = calls(log)
+        check(got == ["research|plan|done|1 of 3 research reports in when the "
+                      "card closed|2"],
+              f"one close, worded for the instant it was taken — still true "
+              f"once all three are in ({got})")
+        check(len(rep.research["research"]["returned"]) == 3,
+              "…and the later reports were ingested, not dropped")
+
+
+def test_partial_board_is_never_a_fabricated_failure():
+    print("test_partial_board_is_never_a_fabricated_failure")
+    # research.workflow.js REFUSES to synthesize from a partial board and
+    # throws; the honest close for that stop is the watcher's layered run close
+    # (D-07). A card whose agents did return must never wear `failed` here.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant_research_board(wf, returning=1, synth=False)
+        rep = mod.Reporter(str(task), [str(wf)])
+        rep.pass_once()
+        check(calls(log) == ["research|plan|done|1 of 3 research reports in when the card closed|2"],
+              f"one report of three closes the card DONE, with truthful counts "
+              f"({calls(log)})")
+        rep.settle()
+        check(calls(log) == ["research|plan|done|1 of 3 research reports in when the card closed|2"],
+              f"and settle adds nothing: `synthesis` never spawned, so no rule "
+              f"implies a close for it ({calls(log)})")
+
+
+def test_zero_returns_close_failed_only_at_settle():
+    print("test_zero_returns_close_failed_only_at_settle")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant_research_board(wf, returning=0, synth=False)
+        rep = mod.Reporter(str(task), [str(wf)])
+        rep.pass_once()
+        check(calls(log) == [],
+              f"a live pass over three spawned-but-silent researchers says "
+              f"NOTHING — 'not yet' and 'never' look the same ({calls(log)})")
+        rep.settle()
+        check(calls(log) == ["research|plan|failed|no research report returned "
+                             "(0 of 3 spawned)|2"],
+              f"settle — where the run is declared over — states the zero-return "
+              f"failure, with the count it is claiming ({calls(log)})")
+
+
+# -- --settle: gap-fill, diffed against the STREAM ---------------------------
+
+def test_settle_emits_only_the_missing_closes_and_is_idempotent():
+    print("test_settle_emits_only_the_missing_closes_and_is_idempotent")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "title": "the first", "files": ["a.py"]},
+                            {"id": "sp-b", "files": ["b.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        plant(wf, "a2", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        plant(wf, "a3", "[monitor] plan=sp-a stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "a4", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        # The GAP: `divide` was already closed on the stream by another writer
+        # (the watcher's run-end pass, a human, a previous close-out). Settle
+        # must leave that one alone and write only what is missing.
+        (task / "events.jsonl").write_text(json.dumps(
+            {"ts": "2026-01-01T00:00:00.000+00:00", "plan": "divide",
+             "stage": "plan", "state": "done", "detail": "3 sub-plans",
+             "w": "watcher"}) + "\n", encoding="utf-8")
+
+        wrote = mod.Reporter(str(task), [str(wf)]).settle()
+        got = [(e["plan"], e["stage"], e["state"]) for e in events(task)]
+        check(got == [("divide", "plan", "done"),
+                      ("sp-a", "plan", "done"),
+                      ("orchestrator", "divide", "info")],
+              f"settle wrote the missing loop close and the missing roster, and "
+              f"did NOT re-close divide ({got})")
+        check("sp-a" in wrote and "divide" not in wrote,
+              f"...and says so ({wrote})")
+        written = events(task)[1]
+        check(written.get("w") == "agent" and written.get("detail")
+              == "green on attempt 1/4",
+              f"the close went through status.sh — w:agent, writer-formatted "
+              f"detail ({written})")
+
+        # Twice-run emits nothing — and the checkpoint is DELETED first, so the
+        # only thing standing between this run and a duplicate close is the
+        # stream itself (stream_plan_closes).
+        (task / ".cycle-reporter-state.json").unlink()
+        again = mod.Reporter(str(task), [str(wf)]).settle()
+        check(again == [] and len(events(task)) == 3,
+              f"a second settle emits nothing, checkpoint or no checkpoint "
+              f"({again}, {len(events(task))} events)")
+
+
+def test_settle_never_invents_a_verdict_for_an_open_loop():
+    print("test_settle_never_invents_a_verdict_for_an_open_loop")
+    # A loop that stopped mid-attempt — implementer returned, gate never did —
+    # implies no close at all. R-58: the watcher's run-end pass owns that card,
+    # and a fabricated FAILED badge was a real defect once.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=sp-open stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        wrote = mod.Reporter(str(task), [str(wf)]).settle()
+        check(wrote == [] and events(task) == [],
+              f"nothing implied, nothing written ({wrote}, {events(task)})")
+
+
+# -- the roster on the wire (GD-D11) ----------------------------------------
+
+def test_roster_event_is_bounded_at_the_writer():
+    print("test_roster_event_is_bounded_at_the_writer")
+    # monitor.html bounds the roster on the way IN (200 entries, 300 chars).
+    # status.sh now bounds it on the way OUT, so an oversized roster never
+    # reaches the append-only file at all.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        task = Path(tmp) / "task"
+        task.mkdir()
+        roster = Path(tmp) / "roster.txt"
+        roster.write_text("".join(f"sp-{i:03d} — {'t' * 500}\n"
+                                  for i in range(250)), encoding="utf-8")
+        env = {**os.environ, "ORCH_STATE_DIR": str(task),
+               "ORCH_ROSTER": str(roster)}
+        rc = subprocess.run(["bash", str(_roots.MON / "status.sh"),
+                             "orchestrator", "divide", "info", "roster: 250"],
+                            env=env, capture_output=True, text=True)
+        check(rc.returncode == 0, f"status.sh still exits 0 (rc={rc.returncode})")
+        evs = events(task)
+        check(len(evs) == 1, f"one line was appended ({len(evs)})")
+        if evs:
+            got = evs[0].get("roster")
+            check(isinstance(got, list) and len(got) == 200,
+                  f"250 entries are capped at 200 at the writer "
+                  f"({len(got) if isinstance(got, list) else got})")
+            check(isinstance(got, list) and got
+                  and all(len(e) <= 300 for e in got),
+                  "every entry is capped at 300 chars")
+            check(evs[0].get("w") == "agent",
+                  f"the roster line is attributed like every status.sh line "
+                  f"({evs[0].get('w')})")
+    # An ORCH_ROSTER naming nothing readable warns and omits the key; a
+    # monitoring call must never break an agent.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        task = Path(tmp) / "task"
+        task.mkdir()
+        env = {**os.environ, "ORCH_STATE_DIR": str(task),
+               "ORCH_ROSTER": str(Path(tmp) / "nope.txt")}
+        rc = subprocess.run(["bash", str(_roots.MON / "status.sh"),
+                             "sp-x", "plan", "done", "ok"],
+                            env=env, capture_output=True, text=True)
+        evs = events(task)
+        check(rc.returncode == 0 and len(evs) == 1 and "roster" not in evs[0],
+              f"an unreadable ORCH_ROSTER omits the key and still writes the "
+              f"event (rc={rc.returncode}, {evs})")
+        check("ORCH_ROSTER" in rc.stderr,
+              f"...and says so on stderr ({rc.stderr.strip()[:120]!r})")
+
+
+def roster_event(tmp, body):
+    """Run the SHIPPED status.sh over a roster file of exactly `body`."""
+    task = Path(tmp) / "task"
+    task.mkdir()
+    roster = Path(tmp) / "roster.txt"
+    roster.write_text(body, encoding="utf-8")
+    rc = subprocess.run(
+        ["bash", str(_roots.MON / "status.sh"), "orchestrator", "divide",
+         "info", "roster"],
+        env={**os.environ, "ORCH_STATE_DIR": str(task),
+             "ORCH_ROSTER": str(roster)},
+        capture_output=True, text=True)
+    evs = events(task)
+    return rc, (evs[0] if evs else {})
+
+
+def test_roster_file_cap_counts_bytes_and_keeps_whole_entries():
+    print("test_roster_file_cap_counts_bytes_and_keeps_whole_entries")
+    # The file ceiling is a READ ceiling, so it has to count what it reads:
+    # bytes. Every entry this repo writes carries an em dash (3 bytes, one
+    # character), so a character count under-reports the read by a third and
+    # the ceiling has to clear the largest roster the entry caps allow.
+    cap = int(re.search(r"ROSTER_FILE_CAP = (\d+) \* 1024",
+                        (_roots.MON / "status.sh").read_text(encoding="utf-8"))
+              .group(1)) * 1024
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        # A MAXIMAL legitimate roster: 200 entries of 300 characters, em dashes
+        # throughout — 60 K characters, ~180 KB. Not one entry may be lost.
+        body = "".join(f"sp-{i:03d} — {'—' * 292}\n" for i in range(200))
+        check(len(body.encode("utf-8")) > 128 * 1024,
+              f"the fixture really is bigger than a naive ceiling would be "
+              f"({len(body.encode('utf-8'))} bytes)")
+        rc, ev = roster_event(tmp, body)
+        check(rc.returncode == 0 and len(ev.get("roster") or []) == 200,
+              f"a maximal 200x300 roster survives the byte ceiling whole "
+              f"({len(ev.get('roster') or [])} entries)")
+        check("larger than" not in rc.stderr,
+              f"…and is not reported as oversized ({rc.stderr.strip()[:120]!r})")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        # The boundary: a file whose LAST entry ends exactly one byte past the
+        # ceiling — i.e. its newline is the (cap+1)th byte. Every entry read is
+        # complete, so nothing may be dropped for being at the edge.
+        line = "x" * 2047 + "\n"
+        full = (cap + 1) // len(line) - 1
+        rest = (cap + 1) - full * len(line)
+        body = line * full + "y" * (rest - 1) + "\n"
+        check(len(body.encode("utf-8")) == cap + 1, "the fixture sits on the edge")
+        rc, ev = roster_event(tmp, body)
+        check(rc.returncode == 0 and len(ev.get("roster") or []) == full + 1,
+              f"an entry that ends ON the boundary is kept, not dropped as a "
+              f"fragment ({len(ev.get('roster') or [])} of {full + 1})")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        # And a genuinely truncated read still drops its half-entry.
+        body = "z" * (cap + 10) + "\n"
+        rc, ev = roster_event(tmp, body)
+        check(rc.returncode == 0 and "roster" not in ev
+              and "larger than" in rc.stderr,
+              f"a file cut mid-entry ships nothing rather than half a title "
+              f"({ev.get('roster')}, {rc.stderr.strip()[:80]!r})")
+
+
+def test_reporter_roster_reaches_the_stream_bounded():
+    print("test_reporter_roster_reaches_the_stream_bounded")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": f"sp-{i:03d}", "title": "t" * 500,
+                             "files": [f"{i}.py"]} for i in range(250)],
+               "subplans_file": "x", "summary": "s"})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        evs = [e for e in events(task) if e.get("roster")]
+        check(len(evs) == 1, f"exactly one roster line reached the stream ({len(evs)})")
+        if evs:
+            check(evs[0]["plan"] == "orchestrator",
+                  f"on the reserved orchestrator card, where readers honor it "
+                  f"({evs[0]['plan']})")
+            check(len(evs[0]["roster"]) == 200
+                  and all(len(e) <= 300 for e in evs[0]["roster"]),
+                  f"bounded end to end ({len(evs[0]['roster'])} entries)")
+            check(evs[0].get("plans_total") == 252,
+                  f"and re-declares the denominator, N+2 (got "
+                  f"{evs[0].get('plans_total')})")
+
+
+def test_seed_env_never_leaks_into_the_stream():
+    print("test_seed_env_never_leaks_into_the_stream")
+    # `status.sh` folds ORCH_TITLE / ORCH_PLANS_TOTAL / ORCH_ROSTER into every
+    # line it writes, and this daemon inherits the shell that started it. The
+    # other two writers of those keys drop them by name
+    # (decision_watcher.STATUS_ENV_DROP, touch-run's emit); this one must too.
+    # plans_total is the sharp end: readers fold it MONOTONIC-MAX, so a leaked
+    # 99 is irreversible on that stream and on every replay of it.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        check(mod.STATUS_ENV_DROP
+              == ("ORCH_TITLE", "ORCH_PLANS_TOTAL", "ORCH_ROSTER"),
+              f"the three seed variables are named as a constant, like the "
+              f"watcher's ({mod.STATUS_ENV_DROP})")
+        leak = Path(tmp) / "leak-roster.txt"
+        leak.write_text("zz-leak — not this run\n", encoding="utf-8")
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "title": "the only one",
+                             "files": ["a.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        plant(wf, "a2", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        plant(wf, "a3", "[monitor] plan=sp-a stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "a4", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        with exported(ORCH_TITLE="LEAKED TITLE", ORCH_PLANS_TOTAL="99",
+                      ORCH_ROSTER=str(leak)):
+            mod.Reporter(str(task), [str(wf)]).pass_once()
+        evs = events(task)
+        by = {(e.get("plan"), e.get("stage")): e for e in evs}
+        check(evs and not any("title" in e for e in evs),
+              f"no line wears the inherited title ({[e.get('title') for e in evs]})")
+        loop = by.get(("sp-a", "plan"))
+        check(loop is not None and "plans_total" not in loop
+              and "roster" not in loop,
+              f"an ordinary loop close declares neither key ({loop})")
+        divide = by.get(("divide", "plan"))
+        check(divide is not None and divide.get("plans_total") == 3,
+              f"the divide close carries ITS OWN N+2, not the leaked 99 "
+              f"({divide.get('plans_total') if divide else None})")
+        roster = by.get(("orchestrator", "divide"))
+        check(roster is not None and roster.get("roster") == ["sp-a — the only one"],
+              f"and the roster is the divider's partition, not the exported "
+              f"file ({roster.get('roster') if roster else None})")
+
+
+def test_settle_replaces_a_seeded_roster_with_the_dividers():
+    print("test_settle_replaces_a_seeded_roster_with_the_dividers")
+    # `touch-run start` seeds a roster from the run SPEC. The divider's
+    # partition is the later and truer of the two, so "some roster exists" must
+    # not suppress it — which is what settle's boolean did, on exactly the
+    # recovery path settle exists for.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-real", "title": "the real one",
+                             "files": ["a.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        (task / "events.jsonl").write_text(json.dumps(
+            {"ts": "2026-01-01T00:00:00.000+00:00", "plan": "orchestrator",
+             "stage": "launch", "state": "running",
+             "detail": "launched by touch-run start", "w": "agent",
+             "roster": ["guess-1 — from the spec"]}) + "\n", encoding="utf-8")
+
+        wrote = mod.Reporter(str(task), [str(wf)]).settle()
+        rosters = [e["roster"] for e in events(task) if e.get("roster")]
+        check(rosters[-1:] == [["sp-real — the real one"]],
+              f"settle emits the divider's roster over the seeded guess ({rosters})")
+        check(mod.ROSTER_SENTINEL in wrote, f"...and says it wrote one ({wrote})")
+
+        # Now the last roster on the stream IS this reporter's: a second
+        # close-out — checkpoint deleted, so only the stream can stop it —
+        # writes nothing.
+        (task / ".cycle-reporter-state.json").unlink()
+        again = mod.Reporter(str(task), [str(wf)]).settle()
+        rosters = [e["roster"] for e in events(task) if e.get("roster")]
+        check(again == [] and len(rosters) == 2,
+              f"a settle whose roster is already the last one on the stream "
+              f"emits nothing ({again}, {len(rosters)} roster lines)")
+
+
+def test_settle_repairs_a_checkpoint_that_claims_an_unwritten_close():
+    print("test_settle_repairs_a_checkpoint_that_claims_an_unwritten_close")
+    # An emission can be RECORDED and still fail: status.sh can exit non-zero
+    # (its own mkdir failed, the append failed) or time out under flock
+    # contention, after which the checkpoint claims a line the stream does not
+    # carry. `--settle` is the one mechanism that repairs that loss, so the
+    # stream has to be what it believes — in BOTH directions. A checkpoint that
+    # merely agrees with the stream cannot tell the two apart, which is why the
+    # fixture below makes them DISAGREE.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "title": "the first", "files": ["a.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        plant(wf, "a2", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        plant(wf, "a3", "[monitor] plan=sp-a stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "a4", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        # events.jsonl does not exist; the checkpoint claims all three went out.
+        (task / ".cycle-reporter-state.json").write_text(
+            json.dumps({"emitted": ["sp-a", "divide", mod.ROSTER_SENTINEL]}),
+            encoding="utf-8")
+
+        wrote = mod.Reporter(str(task), [str(wf)]).settle()
+        got = [(e["plan"], e["stage"], e["state"]) for e in events(task)]
+        check(sorted(got) == [("divide", "plan", "done"),
+                              ("orchestrator", "divide", "info"),
+                              ("sp-a", "plan", "done")],
+              f"both closes AND the roster are re-written: the checkpoint's "
+              f"claim loses to an events.jsonl that does not carry them ({got})")
+        check(sorted(wrote) == sorted(["divide", "sp-a", mod.ROSTER_SENTINEL]),
+              f"...and settle names every one of them ({wrote})")
+        check(any(e.get("roster") == ["sp-a — the first"] for e in events(task)),
+              f"the re-written roster is the divider's own ({events(task)})")
+
+        # The repair does not become a duplicate machine: now that the stream
+        # carries them, a second close-out writes nothing.
+        again = mod.Reporter(str(task), [str(wf)]).settle()
+        check(again == [] and len(events(task)) == 3,
+              f"a settle after the repair emits nothing ({again}, "
+              f"{len(events(task))} events)")
+
+
+def test_a_failed_write_stays_due_and_the_next_poll_retries_it():
+    print("test_a_failed_write_stays_due_and_the_next_poll_retries_it")
+    # The live daemon used to mark a plan emitted on the failing poll and never
+    # revisit it, so ONE bad write left the card "running" for the rest of the
+    # run — the MONITORING-7 symptom D-14 exists to remove — and persisted that
+    # claim into the checkpoint. `emitted` records writes, not intentions.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        status = log.parent / "status.sh"
+        status.write_text("#!/usr/bin/env bash\nexit 9\n", encoding="utf-8")
+        os.chmod(status, 0o755)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "files": ["a.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        rep = mod.Reporter(str(task), [str(wf)])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rep.pass_once()
+        check(calls(log) == [] and events(task) == [],
+              f"a writer that exits non-zero appends nothing ({calls(log)})")
+        state = json.loads((task / ".cycle-reporter-state.json")
+                           .read_text(encoding="utf-8"))
+        check(state.get("emitted") == [],
+              f"...and the checkpoint does not claim otherwise ({state})")
+
+        # Same process, same (unchanged) journal: the next poll retries.
+        status.write_text(RECORDING_STATUS_SH, encoding="utf-8")
+        os.chmod(status, 0o755)
+        with contextlib.redirect_stderr(err):
+            rep.pass_once()
+        check(calls(log) == ["divide|plan|done|1 sub-plans|3",
+                             "orchestrator|divide|info|roster: 1 sub-plans|3"],
+              f"the close and the roster land on the poll after the writer "
+              f"comes back ({calls(log)})")
+        with contextlib.redirect_stderr(err):
+            rep.pass_once()
+        check(len(calls(log)) == 2,
+              f"...exactly once: a landed write is checkpointed ({calls(log)})")
+
+
+def test_a_retry_asks_the_stream_before_it_doubles_a_line():
+    print("test_a_retry_asks_the_stream_before_it_doubles_a_line")
+    # The other half of the retry: a writer that APPENDED and then failed —
+    # what a status.sh killed by its 30 s timeout under flock contention looks
+    # like from here. Indistinguishable from a write that never happened, so
+    # the retry path reads events.jsonl before it writes, and self-healing
+    # never turns into a doubled close.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        status = log.parent / "status.sh"
+        status.write_text(RECORDING_STATUS_SH.replace("exit 0\n", "exit 9\n"),
+                          encoding="utf-8")
+        os.chmod(status, 0o755)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "files": ["a.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        rep = mod.Reporter(str(task), [str(wf)])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rep.pass_once()
+        got = [(e["plan"], e["stage"]) for e in events(task)]
+        check(got == [("divide", "plan"), ("orchestrator", "divide")],
+              f"both lines DID reach the stream before the writer failed ({got})")
+        state = json.loads((task / ".cycle-reporter-state.json")
+                           .read_text(encoding="utf-8"))
+        check(state.get("emitted") == [],
+              f"...and the reporter, told they failed, checkpointed neither "
+              f"({state})")
+
+        status.write_text(RECORDING_STATUS_SH, encoding="utf-8")
+        os.chmod(status, 0o755)
+        with contextlib.redirect_stderr(err):
+            rep.pass_once()
+        check(len(events(task)) == 2 and len(calls(log)) == 2,
+              f"the retry found its own close and its own roster already on "
+              f"the stream and wrote neither again ({calls(log)})")
+
+
+def test_settle_reports_only_what_it_actually_wrote():
+    print("test_settle_reports_only_what_it_actually_wrote")
+    # `touch-run close` prints settle's return value to a human. A run whose
+    # payload has no status.sh writes NOTHING, and must not claim otherwise.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        plant(wf, "a2", "[monitor] plan=sp-a stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "a3", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        (Path(tmp) / "plugin" / "touch" / "shared" / "monitoring"
+         / "status.sh").unlink()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            wrote = mod.Reporter(str(task), [str(wf)]).settle()
+        check(wrote == [] and events(task) == [],
+              f"a close nothing could write is not reported as written "
+              f"({wrote}, {events(task)})")
+        # ...and the operator line names which kind of nothing it was. "every
+        # implied close is already on the stream" is a claim ABOUT the stream,
+        # and this invocation never had a writer to consult one with.
+        r = subprocess.run([sys.executable, "-B", str(Path(mod.__file__)),
+                            str(wf), "--settle"],
+                           env={**os.environ, "ORCH_STATE_DIR": str(task)},
+                           capture_output=True, text=True)
+        check("no status.sh" in r.stdout and "already on the stream" not in r.stdout,
+              f"the operator line names the reason nothing was written "
+              f"({r.stdout.strip()!r})")
+
+
+def test_settle_only_claims_the_stream_when_it_could_write_one():
+    print("test_settle_only_claims_the_stream_when_it_could_write_one")
+    # `touch-run close` prints this line and a human reads it to decide whether
+    # a run closed cleanly. Under --no-status (and --final, which forces the
+    # same) settle returns [] because it was FORBIDDEN to write, which is a
+    # different fact from "everything was already closed".
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf = make_real_run(tmp)
+        plant(wf, "a1", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s"})
+        plant(wf, "a2", "[monitor] plan=sp-a stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "a3", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        env = {**os.environ, "ORCH_STATE_DIR": str(task)}
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-B", str(Path(mod.__file__)),
+                                   str(wf), *argv], env=env,
+                                  capture_output=True, text=True)
+
+        r = run("--settle", "--no-status")
+        check("nothing written" in r.stdout
+              and "already on the stream" not in r.stdout,
+              f"a settle that was forbidden to write says so, and claims "
+              f"nothing about the stream ({r.stdout.strip()!r})")
+        check(events(task) == [], f"...truthfully ({events(task)})")
+
+        r = run("--settle")
+        check("sp-a" in r.stdout and len(events(task)) == 1,
+              f"a settle that CAN write names what it wrote ({r.stdout.strip()!r})")
+        r = run("--settle")
+        check("already on the stream" in r.stdout and len(events(task)) == 1,
+              f"...and only then does the stream claim get made "
+              f"({r.stdout.strip()!r})")
+
+        # A writer that is PRESENT and refuses is a third kind of nothing, and
+        # the one most worth naming: the close is implied, was attempted, and
+        # did not land.
+        plant(wf, "b1", "[monitor] plan=sp-b stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["b.py"], "summary": "s"})
+        plant(wf, "b2", "[monitor] plan=sp-b stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f"})
+        plant(wf, "b3", "[monitor] plan=sp-b stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False})
+        status = (Path(tmp) / "plugin" / "touch" / "shared" / "monitoring"
+                  / "status.sh")
+        status.write_text("#!/usr/bin/env bash\nexit 9\n", encoding="utf-8")
+        os.chmod(status, 0o755)
+        r = run("--settle")
+        check("FAILED to write" in r.stdout and "sp-b" in r.stdout
+              and "already on the stream" not in r.stdout,
+              f"a refused write is reported as a failure, not as silence "
+              f"({r.stdout.strip()!r})")
+        check(r.returncode == 0 and len(events(task)) == 1,
+              f"...and it still exits 0: monitoring never breaks a close-out "
+              f"(rc={r.returncode}, {len(events(task))} events)")
+
+
+def test_no_status_leaves_the_checkpoint_untouched():
+    print("test_no_status_leaves_the_checkpoint_untouched")
+    # `--once --no-status` is documented as keeping history untouched. The
+    # checkpoint IS history — it records which closes have already fired — so a
+    # render-only backfill must not be able to cost a later live daemon its
+    # events.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "files": ["a.py"]},
+                            {"id": "sp-b", "files": ["b.py"]}],
+               "subplans_file": "x", "summary": "s"})
+        mod.Reporter(str(task), [str(wf)], emit_status=False).pass_once()
+        check(calls(log) == [], "a --no-status pass emits nothing")
+        check(not (task / ".cycle-reporter-state.json").exists(),
+              "...and writes no checkpoint at all")
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["divide|plan|done|2 sub-plans|4",
+                             "orchestrator|divide|info|roster: 2 sub-plans|4"],
+              f"so a later live daemon still emits both lines ({calls(log)})")
+
+
+# -- the final report (D-15) -------------------------------------------------
+# A deterministic skeleton over three named sources with ONE authored slot.
+
+FINAL_STREAM = [
+    {"ts": "2026-01-01T00:00:00.000+00:00", "plan": "orchestrator",
+     "stage": "launch", "state": "running", "detail": "launched",
+     "title": "a run", "w": "agent"},
+    {"ts": "2026-01-01T00:01:00.000+00:00", "plan": "sp-a", "stage": "tokens",
+     "state": "info", "detail": "", "w": "watcher", "quiet": True,
+     "tokens": {"in": 10, "out": 1, "cached": 0, "cache_write": 0},
+     "agent": {"id": "a" * 17, "shortId": "aaaaaaaa", "state": "running",
+               "tokens": {"in": 10, "out": 1, "cached": 5, "cache_write": 2}}},
+    # The SAME agent, later and higher: agent.tokens is an absolute running
+    # total, so the fold must last-win it, never add it to the line above.
+    {"ts": "2026-01-01T00:03:00.000+00:00", "plan": "sp-a", "stage": "tokens",
+     "state": "info", "detail": "", "w": "watcher", "quiet": True,
+     "tokens": {"in": 90, "out": 9, "cached": 0, "cache_write": 0},
+     "agent": {"id": "a" * 17, "shortId": "aaaaaaaa", "state": "done",
+               "tokens": {"in": 100, "out": 10, "cached": 50, "cache_write": 20}}},
+    {"ts": "2026-01-01T00:04:00.000+00:00", "plan": "sp-a", "stage": "tokens",
+     "state": "info", "detail": "", "w": "watcher", "quiet": True,
+     "agent": {"id": "b" * 17, "shortId": "bbbbbbbb", "state": "done",
+               "tokens": {"in": 7, "out": 3, "cached": 1, "cache_write": 0}}},
+    {"ts": "2026-01-01T00:05:00.000+00:00", "plan": "sp-a", "stage": "plan",
+     "state": "done", "detail": "green on attempt 1/4", "w": "agent"},
+]
+
+
+def fold_expected(stream):
+    """The stats fold, computed independently: agent.tokens, LAST-WINS.
+
+    Deliberately a second implementation rather than a call into the module —
+    a page that agrees with the code that rendered it proves nothing. Summing
+    the top-level `tokens` deltas here would give 100/10 by coincidence on this
+    fixture and the WRONG answer on any stream with a gap, which is exactly the
+    trap monitoring.md documents.
+    """
+    per = {}
+    for ev in stream:
+        ag = ev.get("agent") or {}
+        if ag.get("id") and isinstance(ag.get("tokens"), dict):
+            per[(ev["plan"], ag["id"])] = ag["tokens"]
+    out = {"in": 0, "out": 0, "cached": 0, "cache_write": 0}
+    for tok in per.values():
+        for k in out:
+            out[k] += int(tok.get(k) or 0)
+    return out
+
+
+def make_final_run(tmp):
+    """A finished implement run: journal results + a hand-written stream."""
+    mod, task, wf, log = make_run(tmp)
+    plant(wf, "a1", "[monitor] plan=divide stage=partition role=synth attempt=1",
+          {"subplans": [{"id": "sp-a", "title": "the only one", "files": ["a.py"],
+                         "slice_file": "/t/plan/slice-a.md"}],
+           "subplans_file": "/t/plan/x-subplans.md", "summary": "one sub-plan"})
+    plant(wf, "a2", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+          {"done": True, "files_changed": ["a.py"], "summary": "did it"})
+    plant(wf, "a3", "[monitor] plan=sp-a stage=test role=test attempt=1",
+          {"passed": True, "summary": "suite green",
+           "findings_file": "/t/findings/sp-a-test-attempt-1.md"})
+    plant(wf, "a4", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+          {"approved": True, "summary": "no defects",
+           "findings_file": "/t/findings/sp-a-critique-attempt-1.md",
+           "depth": "in-scope", "critical_defect": False})
+    (task / "events.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in FINAL_STREAM), encoding="utf-8")
+    return mod, task, wf, log
+
+
+def render_final(mod, task, wf, narrative=None):
+    """Exactly what `--final` does: ingest, render, nothing else."""
+    rep = mod.Reporter(str(task), [str(wf)], emit_status=False)
+    rep.ingest()
+    return Path(rep.render_final(narrative))
+
+
+def test_final_report_is_deterministic_and_sourced():
+    print("test_final_report_is_deterministic_and_sourced")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        out = render_final(mod, task, wf)
+        check(out == task / "report" / "final-report.html",
+              f"the report lands in report/ BY CONSTRUCTION ({out})")
+        first = out.read_bytes()
+        again = render_final(mod, task, wf)
+        check(again.read_bytes() == first,
+              "re-rendering the same inputs is byte-identical (no render stamp)")
+        text = first.decode("utf-8")
+
+        want = fold_expected(FINAL_STREAM)
+        check(f"{want['in']:,} in" in text and f"{want['out']:,} out" in text,
+              f"the page carries the STREAM's own totals ({want})")
+        check("117" not in text,
+              "…and never the sum of the wire deltas, which double-counts an "
+              "agent's absolute total")
+        check("touch:narrative:start" in text and "touch:narrative:end" in text,
+              "the named narrative slot is present in the rendered page")
+        placeholders = ("TASK_SPECIFIC", "/ABS/PATH/TO", "TODO", "FIXME",
+                        "lorem ipsum", "<fill")
+        left = [p for p in placeholders if p in text]
+        check(not left, f"no LLM-era placeholder survives into the report ({left})")
+
+        # Every number's source is named, and the artifacts are linked.
+        for probe in ("journal.jsonl", "events.jsonl", "the run snapshot"):
+            check(probe in text, f"the sources table names {probe}")
+        for probe in ("x-subplans.md", "sp-a-test-attempt-1.md",
+                      "sp-a-critique-attempt-1.md", "slice-a.md"):
+            check(probe in text, f"the report links {probe}")
+        check("PASS" in text and "APPROVED" in text and "1 SUB-PLANS" in text,
+              "per-plan detail carries each attempt's verdict word")
+        check("No run snapshot on disk" in text,
+              "a missing snapshot is stated as normal, never as an error")
+
+
+def test_final_report_names_a_research_run_for_what_it_is():
+    print("test_final_report_names_a_research_run_for_what_it_is")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_run(tmp)
+        plant_research_board(wf)
+        out = render_final(mod, task, wf)
+        check(out == task / "report" / "research-report.html",
+              f"a research run renders research-report.html ({out.name})")
+        text = out.read_text(encoding="utf-8")
+        check("PLAN WRITTEN (26 items)" in text and "1 FINDINGS" in text,
+              "research verdict words are rendered from the results' own shapes")
+
+
+def test_narrative_is_the_only_authored_region():
+    print("test_narrative_is_the_only_authored_region")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        frag = Path(tmp) / "narrative.html"
+        frag.write_text("<section id=\"narrative\"><h2>Why</h2>"
+                        "<p>Because the plan said so.</p></section>",
+                        encoding="utf-8")
+        out = render_final(mod, task, wf, str(frag))
+        text = out.read_text(encoding="utf-8")
+        body = text.split("touch:narrative:start -->")[1] \
+                   .split("<!-- touch:narrative:end")[0]
+        check("Because the plan said so." in body,
+              "the fragment is injected into the slot, verbatim")
+        check(render_final(mod, task, wf, str(frag)).read_bytes()
+              == out.read_bytes(),
+              "…and the injected render is byte-identical too")
+
+        # Active content is refused; the page falls back to the empty slot.
+        # Not only `<script>`: a handler after a SLASH is the commonest XSS
+        # spelling there is, and a guard that a report cites as protection has
+        # no business missing it by one character.
+        shapes = (("script tag", "<script>alert(1)</script>"),
+                  ("slash-separated handler", "<img/onerror=alert(1) src=x>"),
+                  ("space-separated handler", '<div onmouseover="x()">hi</div>'),
+                  ("iframe srcdoc", '<iframe srcdoc="&lt;b&gt;x"></iframe>'),
+                  ("style block", "<style>body{display:none}</style>"),
+                  ("form", '<form action="https://example.invalid/x"></form>'),
+                  ("javascript: uri", '<a href="javascript:alert(1)">x</a>'))
+        for label, fragment in shapes:
+            bad = Path(tmp) / "bad.html"
+            bad.write_text(f"<section><p>prose</p>{fragment}</section>",
+                           encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                text2 = render_final(mod, task, wf,
+                                     str(bad)).read_text(encoding="utf-8")
+            check(fragment not in text2 and "No narrative was supplied" in text2,
+                  f"a narrative carrying a {label} is refused, not rendered")
+            check("active content" in err.getvalue(),
+                  f"…loudly, for the {label} "
+                  f"({err.getvalue().strip()[:80]!r})")
+
+        # An OVER-CAP fragment is refused whole for the same reason, not sliced
+        # at the cap and injected: a cut lands inside a `<details>` as easily as
+        # between two paragraphs, and one unbalanced tag swallows every section
+        # below it on a page whose whole job is to be read off disk.
+        big = Path(tmp) / "big.html"
+        big.write_text("<section><details><summary>s</summary>"
+                       + "z" * (mod.NARRATIVE_CAP + 10)
+                       + "</details></section>", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            text3 = render_final(mod, task, wf,
+                                 str(big)).read_text(encoding="utf-8")
+        check("No narrative was supplied" in text3 and "zzzzzzzzzz" not in text3,
+              "an over-cap narrative is refused whole, never truncated into "
+              "the page")
+        check("cap" in err.getvalue(),
+              f"…loudly, like every other refusal here "
+              f"({err.getvalue().strip()[:80]!r})")
+
+
+def test_value_flags_take_both_spellings():
+    print("test_value_flags_take_both_spellings")
+    # `--narrative FILE` used to leave narrative=None AND leave the path in
+    # argv as a wf_dir: the page rendered "No narrative was supplied" and the
+    # process exited 0. sp-09's prose is about to tell an LLM to run this
+    # renderer and pass a narrative, so the space form has to work — or say so.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        script = Path(mod.__file__)
+        frag = Path(tmp) / "n.html"
+        frag.write_text('<section id="narrative"><p>Because the plan said so.'
+                        "</p></section>", encoding="utf-8")
+        env = {**os.environ, "ORCH_STATE_DIR": str(task)}
+
+        def run(*argv):
+            # -B: a by-hand invocation must not drop a .pyc in the payload tree.
+            return subprocess.run([sys.executable, "-B", str(script), str(wf),
+                                   *argv], env=env, capture_output=True,
+                                  text=True)
+
+        r = run("--final", "--narrative", str(frag))
+        page = task / "report" / "final-report.html"
+        check(r.returncode == 0 and page.is_file(),
+              f"the space form renders (rc={r.returncode}, {r.stderr[:120]!r})")
+        check(page.is_file() and "Because the plan said so."
+              in page.read_text(encoding="utf-8"),
+              "…and the narrative it names is actually injected")
+        page.unlink()
+
+        r = run("--final", "--narrative=" + str(frag))
+        check(r.returncode == 0 and page.is_file()
+              and "Because the plan said so." in page.read_text(encoding="utf-8"),
+              "the `=` form is unchanged")
+
+        r = run("--final", "--narrative")
+        check(r.returncode == 2 and "needs a value" in r.stderr,
+              f"a value-less --narrative is refused, loudly, instead of "
+              f"rendering the empty slot (rc={r.returncode}, {r.stderr[:120]!r})")
+
+        r = run("--once", "--no-status", "--interval", "0.5")
+        check(r.returncode == 0,
+              f"--interval takes a space too (rc={r.returncode}, "
+              f"{r.stderr[:120]!r})")
+        # `inf` and `nan` parse as floats and then wedge the poll loop, so they
+        # are refused with the out-of-range numbers rather than accepted.
+        for bad in ("nope", "0", "-1", "inf", "nan"):
+            r = run("--once", "--interval", bad)
+            check(r.returncode == 2 and "--interval" in r.stderr,
+                  f"--interval {bad} is refused, not silently defaulted "
+                  f"(rc={r.returncode})")
+
+
 def main():
     try:
         for t in (test_plugin_copy_wins, test_project_copy_is_never_a_fallback,
@@ -501,7 +1483,28 @@ def main():
                   test_finalgate_closes,
                   test_sp_loop_close_still_works,
                   test_scattered_transcripts_still_resolve,
-                  test_marker_miss_is_retried_not_cached):
+                  test_marker_miss_is_retried_not_cached,
+                  test_research_plans_close_done_with_two,
+                  test_research_close_wording_survives_the_late_reports,
+                  test_partial_board_is_never_a_fabricated_failure,
+                  test_zero_returns_close_failed_only_at_settle,
+                  test_settle_emits_only_the_missing_closes_and_is_idempotent,
+                  test_settle_never_invents_a_verdict_for_an_open_loop,
+                  test_roster_event_is_bounded_at_the_writer,
+                  test_roster_file_cap_counts_bytes_and_keeps_whole_entries,
+                  test_reporter_roster_reaches_the_stream_bounded,
+                  test_seed_env_never_leaks_into_the_stream,
+                  test_settle_replaces_a_seeded_roster_with_the_dividers,
+                  test_settle_repairs_a_checkpoint_that_claims_an_unwritten_close,
+                  test_a_failed_write_stays_due_and_the_next_poll_retries_it,
+                  test_a_retry_asks_the_stream_before_it_doubles_a_line,
+                  test_settle_reports_only_what_it_actually_wrote,
+                  test_settle_only_claims_the_stream_when_it_could_write_one,
+                  test_no_status_leaves_the_checkpoint_untouched,
+                  test_final_report_is_deterministic_and_sourced,
+                  test_final_report_names_a_research_run_for_what_it_is,
+                  test_narrative_is_the_only_authored_region,
+                  test_value_flags_take_both_spellings):
             t()
     finally:
         # Most fixture modules were loaded out of a TemporaryDirectory that no

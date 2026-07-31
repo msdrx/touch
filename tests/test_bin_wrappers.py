@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The six `plugin/touch/bin/` wrappers: self-location, posture, dispatch.
+"""The seven `plugin/touch/bin/` wrappers: self-location, posture, dispatch.
 
 Item 08 (CM-5 / probe C2, PLUGIN-SPEC-5, DISTRIBUTION-4, CM-13). Run as
 `python3 test_bin_wrappers.py`; exits non-zero on failure. No pytest, no
@@ -114,6 +114,18 @@ every assertion below.
    because a payload installed from an archive is exactly the machine with no
    `git` to shell out to.
 
+7. **A verifier may warn, and warning is not failing (D-26).** `--init` moves
+   where the CLI WRITES memory; it does not move what was already written, and
+   nothing in the CLI ever mentions the tree it left behind. So the report grew
+   a tenth check and a third verdict: `WARN`, which is counted, printed and
+   summarised, and which leaves the exit code at 0 because a stale directory
+   under the configuration tree is not a broken install. Both halves are
+   asserted against fixtures — identical/diverged/absent give PASS/WARN/PASS,
+   the warning names the files that differ and only those, the removal command
+   is printed rather than run, and the legacy tree is byte-for-byte untouched
+   afterwards. `~/.claude` stays a read-only tap: the fixtures reach the probe
+   through `$CLAUDE_CONFIG_DIR`, the variable the CLI itself honours.
+
 Platform assumptions the wrappers make, pinned here as source text because no
 CI in this sandbox can execute them: `#!/usr/bin/env bash` (bash is not at
 `/bin/bash` everywhere) and `${1+"$@"}` in place of a bare `"$@"` — bash before
@@ -153,9 +165,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 BIN = REPO / "plugin" / "touch" / "bin"
 
-#: The six, in the order the plan names them.
+#: The seven, in the order the plans name them. `touch-run` is the seventh and
+#: it arrived as an explicit amendment (GD-D8 amends GD-U4's "the six"), which
+#: is why the count is asserted rather than the directory merely enumerated: a
+#: seventh wrapper that nobody wrote down is the same defect as a missing one.
+#: It is NOT a control verb — it starts and stops Touch's own daemons and
+#: touches no Claude Code session, so `CONTROL_ROUTES` is unaffected (GD-4).
 WRAPPERS = ("touch-serve", "touch-status", "touch-monitor", "touch-watcher",
-            "touch-cycle-reporter", "touch-selfcheck")
+            "touch-cycle-reporter", "touch-selfcheck", "touch-run")
 
 #: GD-T4's measured-empty set. Zero tolerance, comments included — see the
 #: module docstring. `CLAUDE_PLUGIN_OPTION_*` is deliberately absent: that one
@@ -294,9 +311,11 @@ def test_files_and_modes():
     strays = sorted(p.name for p in BIN.iterdir() if p.name not in WRAPPERS)
     # A non-executable helper in bin/ would break item 10's "everything under
     # bin/ is executable" rule, and a shared prelude file is exactly the thing
-    # someone reaches for when six wrappers repeat four lines. They repeat them
-    # on purpose: each wrapper must be independently runnable.
-    check(not strays, f"bin/ holds only the six wrappers (strays: {strays})")
+    # someone reaches for when seven wrappers repeat four lines. They repeat
+    # them on purpose: each wrapper must be independently runnable — which is
+    # also why `touch-run` carries its program in a heredoc instead of adding a
+    # module to a payload tree that is pinned to an exact file set elsewhere.
+    check(not strays, f"bin/ holds only the seven wrappers (strays: {strays})")
 
 
 def test_no_plugin_environment():
@@ -387,10 +406,13 @@ def test_no_duplicated_resolution():
 
 def test_open_is_never_passed_through():
     print("test_open_is_never_passed_through")
-    # The two that front a listener refuse it; the other four have no reason to
+    # The two that front a listener refuse it; the other five have no reason to
     # know the flag exists, so its literal absence is the assertion.
+    # `touch-run` is in the second group even though it STARTS `touch-monitor`:
+    # it has a closed option set and refuses anything it does not recognise, so
+    # `--open` cannot reach the daemon through it either.
     for name in ("touch-status", "touch-watcher", "touch-cycle-reporter",
-                 "touch-selfcheck"):
+                 "touch-selfcheck", "touch-run"):
         check("--open" not in source(name), f"bin/{name} never mentions --open")
     for name in ("touch-serve", "touch-monitor"):
         code = "\n".join(code_lines(name))
@@ -726,7 +748,7 @@ def test_daemons_are_dispatched(tmp):
 
 def test_cycle_reporter_target(tmp):
     print("test_cycle_reporter_target")
-    target = REPO / "plugin/touch/skills/implement-plan/templates/cycle_reporter.py"
+    target = REPO / "plugin/touch/skills/implement/templates/cycle_reporter.py"
     res = run([BIN / "touch-cycle-reporter"], cwd=tmp)
     if res is None:
         return
@@ -817,14 +839,23 @@ def test_selfcheck(tmp):
               if ln.startswith("FAIL") and not LADDER_MIGRATION.match(ln)]
     check(not failed, f"no other check reports FAIL ({failed})")
     passed = [ln for ln in out.splitlines() if ln.startswith("PASS")]
-    reported = passed + [ln for ln in out.splitlines() if ln.startswith("FAIL")]
+    warned = [ln for ln in out.splitlines() if ln.startswith("WARN")]
+    reported = passed + warned + [ln for ln in out.splitlines()
+                                  if ln.startswith("FAIL")]
     # DISTRIBUTION-4's list: python floor, import, assets, project root, task
-    # root, the memory mapping, port bind, plus the exec bits and the status
-    # round trip. EXACTLY nine, not "at least": a lower bound is satisfied by a
-    # duplicated line and by a report that grew a tenth check nobody wrote down,
-    # so it cannot detect the regression this arm exists for.
-    check(len(reported) == 9, f"all nine checks are reported ({len(reported)} "
-                              f"report lines: {reported})")
+    # root, the memory mapping, the legacy memory tree (D-26), port bind, plus
+    # the exec bits and the status round trip. EXACTLY ten, not "at least": a
+    # lower bound is satisfied by a duplicated line and by a report that grew an
+    # eleventh check nobody wrote down, so it cannot detect the regression this
+    # arm exists for.
+    check(len(reported) == 10, f"all ten checks are reported ({len(reported)} "
+                               f"report lines: {reported})")
+    # A fresh project has no mapping at all, so the D-26 check has nothing to
+    # compare and must be GREEN — the warning shape gets its own arm below,
+    # against fixtures. A verdict that could only ever be green here would be
+    # decoration; a verdict that went yellow here would cry wolf on every clean
+    # install.
+    check(not warned, f"nothing warns in a fresh project ({warned})")
     # And the summary the user actually reads agrees with the lines above it —
     # the count is kept by a separate variable, so the two can drift.
     if transitional:
@@ -837,8 +868,8 @@ def test_selfcheck(tmp):
         check(summary == [f"{len(passed)} checks: all passed"],
               f"the summary counts the same checks it printed ({summary})")
     for want in ("python3", "aggregator", "assets", "project root",
-                 "task state", "auto memory", "loopback", "executable",
-                 "read back"):
+                 "task state", "auto memory", LEGACY_PREFIX, "loopback",
+                 "executable", "read back"):
         check(any(want in ln for ln in reported),
               f"selfcheck covers {want!r}")
     # It ends in something the user can paste (DISTRIBUTION-4/7) — printed only
@@ -908,13 +939,27 @@ def test_selfcheck(tmp):
 
 
 def report_of(res):
-    """The PASS/FAIL lines of a selfcheck run, in order."""
+    """The PASS/WARN/FAIL lines of a selfcheck run, in order."""
     return [ln for ln in res.stdout.splitlines()
-            if ln.startswith("PASS") or ln.startswith("FAIL")]
+            if ln[:5] in ("PASS ", "WARN ", "FAIL ")]
+
+
+#: The prefix check 7 (D-26) owns. It exists so `memory_lines` can stay a
+#: one-line filter: check 7 reports on the same plane as check 6 and its text
+#: necessarily says "auto memory", so without an anchor the arms below that
+#: assert `len(...) == 1` would go red over a correct report.
+LEGACY_PREFIX = "legacy auto-memory:"
 
 
 def memory_lines(res):
-    return [ln for ln in report_of(res) if "auto memory" in ln]
+    """Check 6's line — the MAPPING — never check 7's legacy-tree line."""
+    return [ln for ln in report_of(res)
+            if "auto memory" in ln and LEGACY_PREFIX not in ln]
+
+
+def legacy_lines(res):
+    """Check 7's line — the tree the mapping left behind (D-26)."""
+    return [ln for ln in report_of(res) if LEGACY_PREFIX in ln]
 
 
 #: `--init`s refusal line, and the default report's version of the same thing.
@@ -972,6 +1017,125 @@ def one_rule(what, init_res, check_res):
                 if "--init` maps it to" in ln or "--init` aligns them" in ln]
         check(not bare,
               f"and never offers the bare hint in {what} ({bare})")
+
+
+def legacy_project(tmp, name, shape):
+    """A project with a mapping plus a legacy memory tree in one of three shapes.
+
+    Built at runtime rather than committed under `tests/fixtures/`, for the same
+    reason every other selfcheck fixture in this file is: the mapping value has
+    to be an ABSOLUTE path into the temporary directory (the CLI drops a
+    relative one in silence, which is the whole point of the feature), so a
+    frozen tree could not carry a settings file that means anything. The shapes
+    are the three D-26 names: `identical`, `diverged`, `absent`.
+
+    `$CLAUDE_CONFIG_DIR` is what points the probe at the fake legacy tree —
+    the same variable the CLI itself honours, so this exercises the real
+    resolution rather than a test hook. `~/.claude` is never touched.
+    """
+    project = tmp / name
+    (project / ".claude").mkdir(parents=True)
+    memory = project / ".touch" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    (memory / "topic.md").write_text("note body\n", encoding="utf-8")
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"autoMemoryDirectory": str(memory)}) + "\n", encoding="utf-8")
+
+    config = tmp / (name + "-config")
+    # The project key the CLI slugifies its `projects/` directory to: every
+    # character outside [A-Za-z0-9] becomes `-`. Spelled here rather than
+    # imported, because the assertion is that the WRAPPER computes it.
+    key = re.sub(r"[^A-Za-z0-9]", "-", str(project.resolve()))
+    legacy = config / "projects" / key / "memory"
+    if shape != "absent":
+        legacy.mkdir(parents=True)
+        (legacy / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+        (legacy / "topic.md").write_text(
+            "note body\n" if shape == "identical" else "a LONGER, edited body\n",
+            encoding="utf-8")
+        if shape == "diverged":
+            (legacy / "orphan.md").write_text("only in the old tree\n",
+                                              encoding="utf-8")
+    return project, config, legacy
+
+
+def test_selfcheck_legacy_memory(tmp):
+    print("test_selfcheck_legacy_memory")
+    # D-26/SUBSTRATE-13. `autoMemoryDirectory` moves where the CLI WRITES; it
+    # does not move what is already written, and the CLI never mentions the tree
+    # it left behind again. Three files diverged that way on the development
+    # machine with no output anywhere, which is why an install verifier is where
+    # this belongs.
+    verdicts = {}
+    for shape in ("identical", "diverged", "absent"):
+        project, config, legacy = legacy_project(tmp, "legacy-" + shape, shape)
+        res = run([BIN / "touch-selfcheck"], cwd=project, timeout=120,
+                  env={"CLAUDE_CONFIG_DIR": str(config)})
+        if res is None:
+            return
+        lines = legacy_lines(res)
+        check(len(lines) == 1,
+              f"[{shape}] exactly one line reports the legacy tree ({lines})")
+        if not lines:
+            continue
+        verdicts[shape] = lines[0]
+        check(res.returncode == 0,
+              f"[{shape}] the run still exits 0 — a stale directory is not a "
+              f"broken install (rc={res.returncode}, "
+              f"{res.stdout.strip()[-200:]})")
+        # Nothing under the configuration directory may be touched, whatever the
+        # verdict: it is a read-only tap (PROTOCOL-7) and these particular files
+        # are model instructions. Asserted on the filesystem, because "never
+        # auto-delete" is a claim and this is where it gets checked.
+        if shape != "absent":
+            check(sorted(p.name for p in legacy.iterdir())
+                  == (["MEMORY.md", "orphan.md", "topic.md"] if shape == "diverged"
+                      else ["MEMORY.md", "topic.md"]),
+                  f"[{shape}] the legacy tree was left exactly as it was "
+                  f"({sorted(p.name for p in legacy.iterdir())})")
+
+    identical = verdicts.get("identical", "")
+    check(identical.startswith("PASS"),
+          f"a legacy tree matching the mapped one PASSes ({identical[:160]})")
+    check("rm -rf" in identical,
+          f"...and still names the removal the USER runs ({identical[:160]})")
+
+    diverged = verdicts.get("diverged", "")
+    check(diverged.startswith("WARN"),
+          f"a DIVERGED legacy tree WARNs — never FAILs, never silence "
+          f"({diverged[:200]})")
+    check("orphan.md" in diverged and "topic.md" in diverged,
+          f"...naming the files that differ ({diverged[:240]})")
+    check("MEMORY.md" not in diverged,
+          f"...and only those: a file that matches is not listed ({diverged[:240]})")
+    check("rm -rf" in diverged and "Nothing was deleted" in diverged,
+          f"...with the manual removal, and the promise that nothing was "
+          f"deleted for you ({diverged[:240]})")
+
+    absent = verdicts.get("absent", "")
+    check(absent.startswith("PASS"),
+          f"no legacy tree at all PASSes ({absent[:160]})")
+
+    # The summary must count a warning as a reported check rather than swallow
+    # it: the shell keeps CHECKS, FAILS and WARNS in three separate variables,
+    # so all three can drift from the lines actually printed. And a warned
+    # check is not a passed one — the clean branch has to spell the arithmetic
+    # the way the failure branch does, or a ten-check run with one WARN reads
+    # "all passed, 1 warned" and says two contradictory things in one line.
+    project, config, _ = legacy_project(tmp, "legacy-summary", "diverged")
+    res = run([BIN / "touch-selfcheck"], cwd=project, timeout=120,
+              env={"CLAUDE_CONFIG_DIR": str(config)})
+    if res is None:
+        return
+    out = res.stdout
+    reported = [ln for ln in out.splitlines()
+                if ln[:5] in ("PASS ", "WARN ", "FAIL ")]
+    summary = [ln for ln in out.splitlines() if "checks: " in ln]
+    check(summary == [f"{len(reported)} checks: {len(reported) - 1} passed, "
+                      f"1 warned"],
+          f"the summary counts the warning as a check it printed, and does not "
+          f"count it as passed too ({summary}, {len(reported)} report lines)")
 
 
 def test_selfcheck_arguments(tmp):
@@ -1959,6 +2123,7 @@ def main():
             test_daemons_are_dispatched(tmp)
             test_cycle_reporter_target(tmp)
             test_selfcheck(tmp)
+            test_selfcheck_legacy_memory(tmp)
             test_selfcheck_arguments(tmp)
             test_selfcheck_init_maps_memory(tmp)
             test_selfcheck_init_refuses_outside_a_project(tmp)

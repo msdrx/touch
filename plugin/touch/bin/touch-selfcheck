@@ -5,7 +5,7 @@
 #
 # This is the consumer-facing half of "does it work here". The plugin ships no
 # test suite (GD-T6): the dev repo's tests need fixtures, a git checkout and a
-# runner, none of which belong in a payload — but the nine things that actually
+# runner, none of which belong in a payload — but the ten things that actually
 # break on someone else's machine are cheap to check, so they are checked here:
 #
 #   1. python3 clears the 3.11 floor (its absence is not a check but a refusal:
@@ -19,14 +19,23 @@
 #      the monitoring one and the aggregator one, which must agree
 #   6. auto memory goes where Touch serves it — or is honestly reported as
 #      unmapped (see the next block; this is the check the CLI cannot give you)
-#   7. a loopback port can be bound
-#   8. every wrapper in bin/ kept its exec bit — the one thing a zip round trip
+#   7. the LEGACY auto-memory tree the mapping left behind has not diverged
+#      from the mapped one (D-26/SUBSTRATE-13 — the only check that can WARN)
+#   8. a loopback port can be bound
+#   9. every wrapper in bin/ kept its exec bit — the one thing a zip round trip
 #      silently destroys (CM-13)
-#   9. one event survives a real write/read round trip through touch-status
+#  10. one event survives a real write/read round trip through touch-status
 #
 # Exits 0 when every check passes, 1 otherwise. Writes nothing except one
 # throwaway event in a temporary directory that it removes on the way out —
 # `--init`, below, is the one mode that writes, and it says so in its name.
+#
+# THREE VERDICTS, NOT TWO. Check 7 can come back `WARN`, and that is the whole
+# reason the vocabulary grew: a stale directory under the CLI configuration
+# directory is not a broken install, so failing an install verifier over one
+# would be a lie in the other direction — but leaving it unsaid is how three
+# files silently diverged on the development machine in the first place. A WARN
+# is counted, printed and summarised, and it does not change the exit code.
 #
 # WHY A MEMORY CHECK IS IN AN INSTALL VERIFIER
 # --------------------------------------------
@@ -77,7 +86,7 @@
 #
 # A REPORT IS ONLY BELIEVABLE IF IT IS COMPLETE
 # ---------------------------------------------
-# Checks 1-7 all come out of ONE python3 process, so "the probe crashed at
+# Checks 1-8 all come out of ONE python3 process, so "the probe crashed at
 # check 3" and "the probe only had three checks in it" look identical from
 # here unless the probe says which it was. It says: it ends its report with an
 # `END <n>` sentinel written in a `finally`, and the loop below refuses to
@@ -160,10 +169,18 @@ export PYTHONDONTWRITEBYTECODE=1
 
 CHECKS=0
 FAILS=0
+WARNS=0
 
-report() {  # report PASS|FAIL <text>
+report() {  # report PASS|WARN|FAIL <text>
     CHECKS=$((CHECKS + 1))
-    [ "$1" = "PASS" ] || FAILS=$((FAILS + 1))
+    case "$1" in
+        FAIL) FAILS=$((FAILS + 1)) ;;
+        # A WARN is a REPORTED check that does not fail the run (check 7): a
+        # leftover directory under the CLI configuration tree is stale data,
+        # not a broken install, and an install verifier that exits non-zero
+        # over one teaches people to ignore its exit code.
+        WARN) WARNS=$((WARNS + 1)) ;;
+    esac
     printf '%s  %s\n' "$1" "$2"
 }
 
@@ -182,7 +199,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/touch-selfcheck.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/scratch"
 
-# --- checks 1-7 (and, under `--init`, the whole of the init mode) run inside
+# --- checks 1-8 (and, under `--init`, the whole of the init mode) run inside
 # ONE interpreter: everything after the floor check depends on the import, and
 # re-launching python3 per check would make the report slower than the server it
 # is checking. One program, one mode argument — the memory ladder that `--init`
@@ -198,10 +215,12 @@ import sys
 import tempfile
 import unicodedata
 
-#: How many PASS/FAIL lines a COMPLETE run emits. Declared to the caller in the
-#: END sentinel below, because the caller cannot otherwise tell a short report
-#: from a short list of checks. `--init` has its own, shorter list.
-EXPECTED = 7
+#: How many PASS/WARN/FAIL lines a COMPLETE run emits. Declared to the caller
+#: in the END sentinel below, because the caller cannot otherwise tell a short
+#: report from a short list of checks. `--init` has its own, shorter list — the
+#: legacy-tree check is deliberately not in it: that mode was asked to configure
+#: one thing and its report is about that one thing.
+EXPECTED = 8
 INIT_EXPECTED = 4
 
 DONE = []
@@ -210,6 +229,17 @@ DONE = []
 def report(ok, text):
     DONE.append(text)
     sys.stdout.write(("PASS " if ok else "FAIL ") + text + "\n")
+
+
+def warn(text):
+    """The third verdict: reported and counted, but it fails nothing.
+
+    Used by exactly one check (the diverged legacy memory tree). It goes through
+    `DONE` like the other two so the END sentinel keeps counting every line that
+    was promised, which is the property the caller refuses a short report on.
+    """
+    DONE.append(text)
+    sys.stdout.write("WARN " + text + "\n")
 
 
 def stop_early():
@@ -813,6 +843,114 @@ def check_memory(root, project, memory_rel, served, in_project=True):
                    "%s%s" % (effective, label, intended, shared, fix, note))
 
 
+def legacy_memory_dir(project):
+    """The CLI DEFAULT auto-memory directory for `project` (D-26).
+
+    `<config dir>/projects/<project key>/memory`, where the project key is the
+    slug the CLI keys `projects/` on. That slug rule is NOT re-implemented here:
+    `aggregator.sessions.slug_for` already owns it for the whole read side, and
+    a private second copy is the one failure this particular check could not
+    survive — a warning that goes silently green forever because the CLI
+    changed a rule this file kept its own opinion about. It raises rather than
+    falling back for the same reason; the caller reports the skip out loud.
+
+    The path is RESOLVED here and never read: everything under the
+    configuration directory is a read-only tap (PROTOCOL-7), and the files in
+    that particular directory are model instructions besides. The check below
+    stats them and opens nothing.
+    """
+    from aggregator import sessions
+    key = sessions.slug_for(os.path.abspath(project))
+    return os.path.join(config_dir(), "projects", key, "memory")
+
+
+def tree_sizes(root):
+    """`{relative path: size}` for every file under `root`.
+
+    `os.walk` + `stat`, never `open`. That is the reason the comparison below
+    is by NAME and SIZE and the report says so in as many words: an edit that
+    happened to preserve a file size would read as "matching" here, and a check
+    whose sentence over-claims is worse than one whose sentence is narrow.
+    An unreadable entry is recorded as -1, which can only ever make two trees
+    compare as DIFFERENT — the safe direction for a warning.
+    """
+    sizes = {}
+    for base, _dirs, names in os.walk(root):
+        for name in names:
+            full = os.path.join(base, name)
+            try:
+                size = os.stat(full).st_size
+            except OSError:
+                size = -1
+            sizes[os.path.relpath(full, root)] = size
+    return sizes
+
+
+def check_legacy_memory(project):
+    """(verdict, text) for check 7 — the tree the mapping left behind (D-26).
+
+    `autoMemoryDirectory` MOVES where the CLI writes; it does not move what was
+    already written. So a project that adopted `.touch/memory` keeps a full copy
+    of its old notes under the configuration directory, the CLI never mentions
+    it again, and on this development machine three files diverged that way
+    without a single line of output anywhere.
+
+    The verdict is `True` for every state in which there is nothing for a person
+    to decide, and the string `"WARN"` for the one state where there is:
+
+    * memory is UNMAPPED — then the legacy directory *is* the live tree, not a
+      leftover, and calling it stale would be exactly backwards;
+    * the mapping resolves to that same default directory — one tree, nothing
+      to compare;
+    * the legacy directory is absent or empty — the ordinary state after a
+      clean `--init` on a project that had no notes yet;
+    * every file in it matches the mapped tree by name and size — a leftover
+      COPY, safe to delete, and the line says how;
+    * anything else — WARN, naming the files that differ and printing the
+      `rm -rf` the user runs THEMSELVES. Nothing here deletes anything: these
+      are notes somebody wrote, under a directory this program is not allowed
+      to write to, and an install verifier that removes files is a different
+      and much worse program.
+    """
+    try:
+        legacy = legacy_memory_dir(project)
+    except Exception as exc:                 # the package did not import (check 2)
+        return True, ("legacy auto-memory: not checked — the project key comes "
+                      "from aggregator.sessions.slug_for and that import failed "
+                      "(%s: %s); the aggregator check above says why"
+                      % (type(exc).__name__, oneline(exc)))
+    _label, effective, _complaints = effective_memory(project)
+    if effective is None:
+        return True, ("legacy auto-memory: nothing to reconcile — auto memory is "
+                      "unmapped, so %s is the live tree, not a leftover" % legacy)
+    if same_dir(effective, legacy):
+        return True, ("legacy auto-memory: the mapping resolves to the CLI "
+                      "default %s, so there is only one tree" % legacy)
+    if not os.path.isdir(legacy):
+        return True, "legacy auto-memory: no tree at %s" % legacy
+    old = tree_sizes(legacy)
+    if not old:
+        return True, "legacy auto-memory: the tree at %s is empty" % legacy
+    new = tree_sizes(effective) if os.path.isdir(effective) else {}
+    differing = sorted(name for name, size in old.items()
+                       if name not in new or new[name] != size)
+    # Printed, never run. The quoting is part of the message: a memory tree
+    # under a home directory with a space in it is a path a reader pastes.
+    removal = "rm -rf \"%s\"" % legacy
+    if not differing:
+        return True, ("legacy auto-memory: %s holds %d file(s) and all of them "
+                      "match %s by name and size — remove it yourself when you "
+                      "are ready: %s" % (legacy, len(old), effective, removal))
+    shown = differing[:6]
+    more = "" if len(differing) <= 6 else " (+%d more)" % (len(differing) - 6)
+    return "WARN", ("legacy auto-memory: %s has DIVERGED from the mapped tree "
+                    "%s — %s%s differ by name or size (compared without reading "
+                    "them). Nothing was deleted — rescue what you want from it, "
+                    "then remove it yourself: %s"
+                    % (legacy, effective, oneline(", ".join(shown), 240), more,
+                       removal))
+
+
 def merge_setting(path, key, value):
     """Merge ONE key into a JSON settings file, atomically; say what it did.
 
@@ -1126,6 +1264,16 @@ def run_checks(root, scratch):
                          memory_root_of(paths, project, memory_rel),
                          in_project=in_project))
 
+    # Check 7: what the mapping LEFT BEHIND. Immediately after check 6 because
+    # it is the second half of the same question — check 6 asks where memory
+    # goes now, this one asks whether the place it used to go still holds
+    # something nobody will ever read again.
+    verdict, text = check_legacy_memory(project)
+    if verdict == "WARN":
+        warn(text)
+    else:
+        report(verdict, text)
+
     sock = socket.socket()
     try:
         sock.bind(("127.0.0.1", 0))
@@ -1164,6 +1312,7 @@ GOT=0
 while IFS= read -r line; do
     case "$line" in
         "PASS "*) report PASS "${line#* }"; GOT=$((GOT + 1)) ;;
+        "WARN "*) report WARN "${line#* }"; GOT=$((GOT + 1)) ;;
         "FAIL "*) report FAIL "${line#* }"; GOT=$((GOT + 1)) ;;
         "END "*)  WANT="${line#* }" ;;
         *) ;;   # not part of the report (a chatty import, a warning) — ignored
@@ -1171,8 +1320,9 @@ while IFS= read -r line; do
 done < "$TMP/py.out"
 
 # The expected count is the probe's to declare (it owns the checks), so it is
-# read out of the sentinel rather than duplicated here — a second copy of "6" in
-# this file is a second thing to forget when a seventh check is added.
+# read out of the sentinel rather than duplicated here — a second copy of the
+# probe's own EXPECTED in this file is a second thing to forget when an
+# eleventh check is added.
 if [ -z "$WANT" ]; then
     WHY="the report never ended, so it died during check $((GOT + 1))"
 elif [ "$GOT" != "$WANT" ]; then
@@ -1188,12 +1338,12 @@ if [ "$GOT" != "$WANT" ] || [ "$PY_RC" -ne 0 ]; then
     report FAIL "the python probe reported every check ($WHY${ERR1:+; $ERR1})"
 fi
 
-# --- checks 8 and 9 are about THIS INSTALLATION, not about the project, so
+# --- checks 9 and 10 are about THIS INSTALLATION, not about the project, so
 # `--init` skips them: it was asked to configure one thing and its report has to
 # be about that one thing. `touch-selfcheck` with no argument is still the
 # install proof, and it runs everything.
 if [ "$MODE" = check ]; then
-    # --- check 8: exec bits. git records the bit and `git archive` preserves it,
+    # --- check 9: exec bits. git records the bit and `git archive` preserves it,
     # but a zip built without -X, or any copy through a mode-dropping filter,
     # produces a bin/ nobody can run — and status.sh failures are stderr-only, so
     # the dashboard would just stay empty. The loop reads the directory instead of
@@ -1215,7 +1365,7 @@ if [ "$MODE" = check ]; then
         report PASS "every wrapper in bin/ is executable ($NWRAP checked)"
     fi
 
-    # --- check 9: the full write path, end to end, into a throwaway task folder.
+    # --- check 10: the full write path, end to end, into a throwaway task folder.
     mkdir -p "$TMP/task"
     if ORCH_STATE_DIR="$TMP/task" "$ROOT/bin/touch-status" \
             touch-selfcheck check info "selfcheck probe" >/dev/null 2>"$TMP/status.err" \
@@ -1261,7 +1411,16 @@ if [ "$MODE" = check ]; then
 fi
 
 if [ "$FAILS" -eq 0 ]; then
-    echo "$CHECKS checks: all passed"
+    # The warned clause appears ONLY when something warned, so the sentence a
+    # clean install has printed since this file was written is byte-for-byte
+    # what it printed before check 7 existed. When one DID warn, the arithmetic
+    # is spelled the same way the failure branch below spells it: a warned check
+    # is not a passed one, and "all passed, 1 warned" says it twice, wrongly.
+    if [ "$WARNS" -gt 0 ]; then
+        echo "$CHECKS checks: $((CHECKS - WARNS)) passed, $WARNS warned"
+    else
+        echo "$CHECKS checks: all passed"
+    fi
     echo
     if [ "$MODE" = init ]; then
         # The resolution is memoized per cwd for the life of a session, so the
@@ -1283,5 +1442,9 @@ if [ "$FAILS" -eq 0 ]; then
     exit 0
 fi
 
-echo "$CHECKS checks: $((CHECKS - FAILS)) passed, $FAILS failed"
+if [ "$WARNS" -gt 0 ]; then
+    echo "$CHECKS checks: $((CHECKS - FAILS - WARNS)) passed, $WARNS warned, $FAILS failed"
+else
+    echo "$CHECKS checks: $((CHECKS - FAILS)) passed, $FAILS failed"
+fi
 exit 1

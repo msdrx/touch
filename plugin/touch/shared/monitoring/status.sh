@@ -6,6 +6,16 @@
 #   Optional: ORCH_PLANS_TOTAL env var declares the run's expected TOTAL number
 #             of plan cards (integer), so dashboards can show progress over all
 #             plans instead of only the cards already seen in the stream.
+#   Optional: ORCH_ROSTER env var names a FILE holding the run's planned
+#             sub-plan list, one `<id> — <title>` entry per line, which is
+#             attached to the event as the `roster` array (GD-D11). It is a
+#             PATH, never inlined JSON: a roster is unbounded in principle and
+#             an argv is not the place to discover that. Bounded HERE, at the
+#             writer — ROSTER_MAX entries, ROSTER_ENTRY_CAP chars each, the same
+#             bounds monitor.html applies on the way in — so no reader has to be
+#             the first line of defence. Readers honor `roster` only on an
+#             `orchestrator`-card event; this writer attaches what it is told to
+#             attach and never inspects the plan id.
 # Appends one JSON event line to $ORCH_STATE_DIR/events.jsonl. ORCH_STATE_DIR
 # MUST point at the task's state folder. When it is unset this resolves the
 # project's tasks root ($ORCH_TASKS_ROOT > $CLAUDE_PROJECT_DIR > cwd walk-up to
@@ -129,6 +139,20 @@ except ImportError:
     fcntl = None
 
 DETAIL_CAP = 1024  # GD-11: cap detail at 1 KB at the writer
+#: Roster bounds, GD-D11. They are monitor.html's own numbers (200 entries,
+#: 300 chars) deliberately: bounding at the writer as well as at the reader is
+#: what keeps a runaway roster out of the append-only file in the first place,
+#: and a stream nobody has to sanitize twice is the point of `w` attribution.
+ROSTER_MAX = 200
+ROSTER_ENTRY_CAP = 300
+#: Read ceiling for the roster FILE itself, in BYTES: past this it is not a
+#: roster and is not read into memory. It clears the largest roster the two
+#: caps above can legitimately produce -- 200 x 300 is 60 K CHARACTERS, and a
+#: character is up to 4 bytes in UTF-8 (every entry this repo writes carries an
+#: em dash, at 3), so a ceiling under ~240 KB would silently cut a valid
+#: maximal roster. Reading a quarter-megabyte once per roster event is free;
+#: dropping entries a caller was entitled to send is not.
+ROSTER_FILE_CAP = 256 * 1024
 
 
 def cap(detail):
@@ -158,6 +182,46 @@ if total:
     except ValueError:
         print("status.sh: ORCH_PLANS_TOTAL is not an integer: %s -- omitted" % total,
               file=sys.stderr)
+# The declared sub-plan roster (GD-D11): a FILE path, never inlined JSON, so the
+# writers of it (touch-run start from the run spec, cycle_reporter at the divide
+# close) hand over a path and this reads it. Best-effort by the same contract as
+# every key above -- an unreadable or empty file warns and omits `roster`, and
+# never fails the caller, because a monitoring call must never break an agent.
+roster_path = os.environ.get("ORCH_ROSTER")
+if roster_path:
+    try:
+        # BINARY, so the cap counts the bytes it claims to count: a text read
+        # counts characters, and every entry this repo writes carries an em
+        # dash. Decoding after the slice can split a multi-byte character in
+        # half, which is what errors="replace" is for.
+        with open(roster_path, "rb") as rf:
+            raw = rf.read(ROSTER_FILE_CAP + 1)
+    except OSError as exc:
+        print("status.sh: ORCH_ROSTER unreadable (%s) -- roster omitted" % exc,
+              file=sys.stderr)
+    else:
+        oversize = len(raw) > ROSTER_FILE_CAP
+        blob = raw.decode("utf-8", "replace")
+        lines = blob.splitlines()
+        if oversize:
+            print("status.sh: ORCH_ROSTER is larger than %d bytes -- reading the "
+                  "head only" % ROSTER_FILE_CAP, file=sys.stderr)
+            if lines and not blob.endswith(("\n", "\r")):
+                # The read stopped mid-ENTRY, so the last line is a fragment.
+                # Drop it rather than ship half a title -- but ONLY then: a file
+                # whose last entry ends on the boundary ends with its newline,
+                # and dropping there loses a complete entry for nothing.
+                lines = lines[:-1]
+        entries = [ln.strip()[:ROSTER_ENTRY_CAP] for ln in lines if ln.strip()]
+        if len(entries) > ROSTER_MAX:
+            print("status.sh: roster of %d entries capped at %d"
+                  % (len(entries), ROSTER_MAX), file=sys.stderr)
+            entries = entries[:ROSTER_MAX]
+        if entries:
+            event["roster"] = entries
+        else:
+            print("status.sh: ORCH_ROSTER named an empty file (%s) -- roster "
+                  "omitted" % roster_path, file=sys.stderr)
 line = json.dumps(event) + "\n"
 with open(sys.argv[5], "a") as f:
     # One LOCK_EX'd write per event: events.jsonl has many concurrent writers

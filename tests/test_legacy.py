@@ -355,6 +355,82 @@ def test_a_run_id_is_synthesized_when_the_config_does_not_name_one():
               "a node's refId is built by refs.ref_key like every other id (SD-11)")
 
 
+# --- D-04 / GD-D12: the harness join's pure half -------------------------
+def test_a_synthetic_run_id_can_never_join_a_harness_run():
+    print("test_a_synthetic_run_id_can_never_join_a_harness_run")
+    check(lg.is_synthetic_run_id("legacy:bare"),
+          "`legacy:<task>` is recognised as SYNTHESIZED — a folder that named no "
+          "wf_dir has no run to join, and the prefix says so without re-reading "
+          "the config")
+    check(not lg.is_synthetic_run_id("wf_455b348c-e17"),
+          "…while a real runId is not")
+    check(not lg.is_synthetic_run_id(None) and not lg.is_synthetic_run_id(17),
+          "…and a missing or non-string id is not synthetic either (it is simply "
+          "not joinable), never a crash")
+
+
+def test_the_plans_denominator_comes_from_the_dividers_own_result():
+    print("test_the_plans_denominator_comes_from_the_dividers_own_result")
+    divider = {"subplans": [{"id": "sp-01"}, {"id": "sp-02"}, {"id": "sp-03"}]}
+    check(lg.subplan_count(divider) == 3, "a divider result states its sub-plan count")
+    check(lg.derive_plans_total([{"passed": True}, divider, {"summary": "x"}]) == 5,
+          "…and the denominator is N + 2 — the divide card and the final gate "
+          "(GD-D11: the same N + 2 cycle_reporter declares at the divide close)")
+    check(lg.derive_plans_total([{"passed": True}]) is None,
+          "a run whose divider has not returned derives NOTHING rather than "
+          "guessing — the wire hint stays the only number")
+    check(lg.subplan_count("not a dict") is None and lg.subplan_count({"subplans": 4}) is None,
+          "a non-dict result and a non-list `subplans` answer None, not an error: "
+          "'this is not a divider's result' is the ordinary case")
+
+
+def test_the_denominator_fold_is_the_monotonic_max_it_always_was():
+    print("test_the_denominator_fold_is_the_monotonic_max_it_always_was")
+    check(lg.fold_plans_total(5, 7) == 7 and lg.fold_plans_total(7, 5) == 7,
+          "the fold is a max in either order — the wire value is an EARLY HINT and "
+          "a later, larger derivation wins")
+    check(lg.fold_plans_total(None, 7) == 7 and lg.fold_plans_total(7, None) == 7,
+          "…a missing source never erases a known denominator")
+    check(lg.fold_plans_total(None, None) is None,
+          "…and with nothing known the answer is None, not 0 (which would render "
+          "as a denominator)")
+    check(lg.fold_plans_total(7, 0, -3, True) == 7,
+          "a zero, a negative and a bool are not denominators and cannot shrink one")
+
+
+def test_the_derived_denominator_is_reconciled_into_the_reduction():
+    print("test_the_derived_denominator_is_reconciled_into_the_reduction")
+    # GD-D10: the fold lands in the module that owns the reduction, not in the
+    # API projection. A derivation applied while a response is built is one
+    # every other reader of the same reduction silently does without.
+    rows = (line(ts="2026-07-25T00:00:01.000Z", plan="sp-01", stage="implement",
+                 state="running", detail="attempt 1", plans_total=3),
+            line(ts="2026-07-25T00:00:02.000Z", plan="sp-02", stage="implement",
+                 state="running", detail="attempt 1"))
+    reduction = lg.reduce_events(
+        [lg.parse_line("t", n, text) for n, text in enumerate(rows, 1)], task="t")
+
+    check(reduction.plans["sp-01"].plans_total == 3
+          and reduction.plans["sp-02"].plans_total is None,
+          "the wire hint reduces exactly as it did — one card declared 3, the other "
+          "declared nothing")
+    check(lg.reconcile_plans_total(reduction, 5) == 5,
+          "the derived denominator is returned, so a caller can publish the number it "
+          "joined on")
+    check(reduction.plans["sp-01"].plans_total == 5
+          and reduction.plans["sp-02"].plans_total == 5,
+          "…and EVERY card carries it: the hint of 3 was early, not wrong, and a card "
+          "that declared nothing is not a card with no denominator")
+    check(lg.reconcile_plans_total(reduction, 4) == 4
+          and reduction.plans["sp-01"].plans_total == 5,
+          "a smaller later value never shrinks a card — the same monotonic max the "
+          "event fold applies, reached from the other source")
+    check(lg.reconcile_plans_total(reduction, None) is None
+          and reduction.plans["sp-01"].plans_total == 5,
+          "…and nothing derived changes nothing, which is what a run with no divider "
+          "result must do")
+
+
 # --- GD-14 re-labels + SD-4 ----------------------------------------------
 def test_the_fabricated_failed_badge_becomes_closed_no_verdict():
     print("test_the_fabricated_failed_badge_becomes_closed_no_verdict")
@@ -1324,6 +1400,10 @@ def main():
         test_a_status_sh_running_row_and_the_watcher_spawn_are_one_node,
         test_agent_ids_are_namespaced_and_both_widths_join,
         test_a_run_id_is_synthesized_when_the_config_does_not_name_one,
+        test_a_synthetic_run_id_can_never_join_a_harness_run,
+        test_the_plans_denominator_comes_from_the_dividers_own_result,
+        test_the_denominator_fold_is_the_monotonic_max_it_always_was,
+        test_the_derived_denominator_is_reconciled_into_the_reduction,
         test_the_fabricated_failed_badge_becomes_closed_no_verdict,
         test_a_genuine_failure_keeps_its_badge,
         test_sd4_last_event_wins_on_conflicting_plan_terminals,

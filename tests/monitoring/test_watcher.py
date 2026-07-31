@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 
 # The module under test is named through `tests/_roots.py` (GD-U1/GD-U6): this
 # file lives in `tests/monitoring/`, the module it imports does not.
@@ -579,7 +580,13 @@ dw.TOKEN_TICK_SECS = _saved_tick
 # MANUFACTURE one. A cadence that could manufacture a tick would erase every
 # stall segment the timeplan draws (all 17 on the measured run).
 tick_src = open(os.path.join(MOD_DIR, "decision_watcher.py")).read()
-tick_block = tick_src[tick_src.index('if state["running"]:'):]
+# The live-tick block's own condition, pinned: D-05 added `and not NO_TOKENS`
+# to it (suppression is ABSENCE of the tick, not a throttle of it), and the
+# three-way ordering below is asserted against that same block.
+TICK_HEAD = 'if state["running"] and not NO_TOKENS:'
+check("D-05: the live token tick is gated on NO_TOKENS at the block itself",
+      TICK_HEAD in tick_src)
+tick_block = tick_src[tick_src.index(TICK_HEAD):]
 # find(), not index(): a removal must fail as a check line, not as a traceback.
 i_due = tick_block.find("token_tick_due(")
 i_read = tick_block.find("agent_tokens(aid)")
@@ -841,6 +848,16 @@ leaky = ("[monitor] plan=sp-a stage=implement role=impl attempt=1\n"
 mon6, _ = dw.parse_markers(leaky)
 check("GD-9: prose under the marker line does not leak fields into it",
       "title" not in mon6 and "mode" not in mon6 and mon6["plan"] == "sp-a")
+# A payload-less mention INSIDE the window must not clobber the real marker via
+# last-wins — the real sp-03-templates incident: the sub-plan title on line 2
+# names the token ("…with the [monitor] marker fenced"), and its empty field
+# dict erased the line-1 marker, leaving every implementer unclassified.
+poisoned = ("\n[monitor] plan=sp-03-templates stage=implement role=impl attempt=2\n"
+            "You are the IMPLEMENTER for sub-plan sp-03-templates (prompt trims\n"
+            "with the [monitor] marker fenced), a fresh subagent —\n")
+mon7, _ = dw.parse_markers(poisoned)
+check("GD-9: a payload-less [monitor] mention in the window does not clobber the marker",
+      bool(mon7) and mon7["plan"] == "sp-03-templates" and mon7["attempt"] == "2")
 
 # GD-9: `marker-misplaced` means a REAL [touch] marker below the window — a
 # prompt that merely QUOTES the token (a findings file pasted into a critique
@@ -1188,7 +1205,7 @@ check("FRONTEND-6: startup arms the stale-close reopen through run_complete",
 
 # SESSION SCOPE: a complete event that was ALREADY in the stream when the
 # watcher started belongs to an earlier phase of the same task folder (research,
-# then implement-plan on the same events.jsonl). It must never end this session.
+# then implement on the same events.jsonl). It must never end this session.
 # The scan is cached on (size, mtime): it sits in the ~1s liveness loop and
 # events.jsonl grows without bound, so an unchanged stream must not be re-read.
 cache_path = os.path.join(ev_dir, "cached.jsonl")
@@ -1572,7 +1589,7 @@ WATCHER = os.path.join(MOD_DIR, "decision_watcher.py")
 
 
 def run_watcher(state_dir, wf_dir, env_extra=None, wait=6.0, during=None,
-                after=2.0, until=None, when=None, glob_root=None):
+                after=2.0, until=None, when=None, glob_root=None, args=()):
     """Start the real watcher on a throwaway journal.
 
     Returns ``(exited, returncode, stderr)`` — the watcher's loop is a
@@ -1604,6 +1621,10 @@ def run_watcher(state_dir, wf_dir, env_extra=None, wait=6.0, during=None,
     the live child, so a ``during`` stimulus can also SIGNAL it — which is how the
     M-2 shutdown-drain arms reproduce `closeRun`'s epilogue.
 
+    ``args`` are extra command-line arguments for the child (``--no-tokens``).
+    They go after the script path, so the module's own flag/positional split is
+    exercised rather than bypassed.
+
     ``ORCH_DRAIN_SECS`` defaults to 0 here (one final tail+emit pass, no extra
     slack): every negative arm ends by terminating the child, and the shipped
     3 s window would be paid on each of them for nothing. The arm that actually
@@ -1618,7 +1639,7 @@ def run_watcher(state_dir, wf_dir, env_extra=None, wait=6.0, during=None,
     # sys.dont_write_bytecode does not reach a child
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(env_extra or {})
-    proc = subprocess.Popen([sys.executable, WATCHER], env=env,
+    proc = subprocess.Popen([sys.executable, WATCHER, *args], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     run_watcher.proc = proc
     run_watcher.stimulus_latency = None
@@ -2679,6 +2700,719 @@ else:
               for e in e2e if e.get("agent")))
     check("R-40 e2e: with no driver close, the abandoned window stops it cleanly",
           exited and rc == 0)
+
+
+# ---------------------------------------------------------------------------
+# D-06: the agent's OWN summary rides the derived decision line
+#
+# The derived verdict is unchanged and comes first; the summary is appended,
+# single-lined and quote-stripped. This is what makes deleting the mandated
+# LAST `touch-status` call information-neutral (D-09 depends on it).
+# ---------------------------------------------------------------------------
+d06_info = {"plan": "sp1", "role": "test", "attempt": 2, "stage": "test"}
+_, _, d06_detail = dw.describe_result(d06_info, {"passed": True,
+                                                 "summary": "42 assertions green"})
+check("D-06: a summary-bearing result carries the agent's own words",
+      "42 assertions green" in d06_detail)
+check("D-06: the derived verdict still leads the line",
+      d06_detail.startswith("sp1 test #2 PASS"))
+_, _, d06_plain = dw.describe_result(d06_info, {"passed": True})
+check("D-06: without a summary the line is byte-identical to today's",
+      d06_plain == "sp1 test #2 PASS -> spawn critique")
+_, _, d06_msgy = dw.describe_result(
+    d06_info, {"passed": False, "summary": 'line one\nline "two"   spaced'})
+check("D-06: the summary is single-lined", "\n" not in d06_msgy)
+check("D-06: double quotes are stripped (shell/JS embedding, not JSON)",
+      '"' not in d06_msgy and "line two spaced" in d06_msgy)
+check("D-06: a non-string summary is ignored, never str()'d into the line",
+      "summary" not in dw.describe_result(d06_info, {"passed": True,
+                                                     "summary": {"a": 1}})[2])
+check("D-06: the impl stage chip single-lines the summary it already used",
+      dw.result_stage_state({"done": True, "files_changed": ["a"],
+                             "summary": 'a\nb "c"'})[1] == "a b c")
+check("D-06: describe_result is a thin wrapper over the derived decision",
+      dw._result_decision(d06_info, {"passed": True})[2] == d06_plain)
+
+# result_ts prefers the agent's own last ASSISTANT stamp over the read moment.
+d06_glob = os.path.join(BASE, "glob", "p", "s", "subagents", "workflows",
+                        os.path.basename(WF_DIR))
+os.makedirs(d06_glob, exist_ok=True)
+_fresh = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+with open(os.path.join(d06_glob, "agent-d06.jsonl"), "w") as f:
+    f.write(json.dumps({"type": "user", "timestamp": _fresh,
+                        "message": {"content": "[monitor] plan=p role=r attempt=1"}}) + "\n")
+    f.write(json.dumps({"type": "assistant", "timestamp": _fresh,
+                        "message": {"id": "m1", "usage": {}}}) + "\n")
+    f.write(json.dumps({"type": "user", "timestamp": _fresh,
+                        "message": {"content": "tool result written later"}}) + "\n")
+check("D-06: last_assistant_ts finds the agent's own last spoken line",
+      dw.last_assistant_ts("d06") == _fresh)
+check("D-06: a fresh recorded stamp is preferred over the read moment",
+      dw.result_ts("d06", live=True) == _fresh)
+with open(os.path.join(d06_glob, "agent-d06stale.jsonl"), "w") as f:
+    f.write(json.dumps({"type": "assistant", "timestamp": "2020-01-01T00:00:00.000Z",
+                        "message": {"id": "m1"}}) + "\n")
+check("D-06: a STALE transcript still falls back to the read moment",
+      (dw.result_ts("d06stale", live=True) or "") > "2021")
+check("D-06: on backlog catch-up the transcript is still the only signal",
+      dw.result_ts("d06stale", live=False) == "2020-01-01T00:00:00.000Z")
+check("D-06: the staleness guard is ONE named window, applied to both candidates",
+      dw.RESULT_TS_FRESH_SECS == 30)
+
+
+# ---------------------------------------------------------------------------
+# GD-D6 / D-07 / D-08 / D-16 — the parsers, as units
+# ---------------------------------------------------------------------------
+check("GD-D6: `completed` is the ONLY status that renders done",
+      dw.run_close_state("completed") == "done")
+for _bad in ("failed", "killed", "", None, "COMPLETED-ish", "aborted"):
+    check(f"R-58: status {_bad!r} never renders a clean done",
+          dw.run_close_state(_bad) == "failed")
+check("GD-D6: the status word is case-tolerant", dw.run_close_state("Completed") == "done")
+
+check("D-08: `plan:role:attempt` parses to a classification",
+      dw.parse_agent_label("sp-a:critique:2")
+      == {"plan": "sp-a", "role": "critique", "attempt": 2, "stage": "critique"})
+check("D-08: the harness's ~rN re-spawn suffix is stripped",
+      dw.parse_agent_label("sp-a:critique:2~r3")["attempt"] == 2)
+check("D-08: the harness's ' (retry N)' suffix is stripped",
+      dw.parse_agent_label("sp-a:impl:1 (retry 1)")["role"] == "impl")
+check("D-08: a stage-qualified role keeps its stage",
+      dw.parse_agent_label("gate:gate:run:3")["stage"] == "run")
+for _bad in ("", None, "nope", "sp-a:impl:x", "sp-a:1"):
+    check(f"D-08: label {_bad!r} parses to None, never half a classification",
+          dw.parse_agent_label(_bad) is None)
+
+NOTE_TEXT = (
+    "<task-notification>\n<task-id>wtask01</task-id>\n"
+    "<tool-use-id>toolu_x</tool-use-id>\n<status>failed</status>\n"
+    "<summary>Dynamic workflow \"demo\" failed</summary>\n"
+    "<recovery>To resume, call: Workflow({scriptPath: '/x/y.js', "
+    "resumeFromRunId: 'wf_demo-001'})</recovery>\n"
+    "<failures>[sp-a:critique:2] failed: API Error: 529 Overloaded.\n"
+    "[sp-b:impl:1~r1] failed: API Error: 500.</failures>\n"
+    "<usage><agent_count>7</agent_count><agents_done>5</agents_done>"
+    "<agents_error>2</agents_error><subagent_tokens>1234</subagent_tokens>"
+    "<tool_uses>99</tool_uses><duration_ms>60000</duration_ms></usage>\n"
+    "</task-notification>")
+NOTE = dw.notification_blocks(NOTE_TEXT)
+check("D-07: the notification's status block parses", NOTE["status"] == "failed")
+check("D-07: the summary block parses", "demo" in NOTE["summary"])
+check("D-08: <usage> parses to integers",
+      NOTE["usage"] == {"agent_count": 7, "agents_done": 5, "agents_error": 2,
+                        "subagent_tokens": 1234, "tool_uses": 99,
+                        "duration_ms": 60000})
+check("D-08: <failures> parses to per-agent (label, cause) pairs",
+      [f["label"] for f in NOTE["failures"]] == ["sp-a:critique:2", "sp-b:impl:1~r1"])
+check("D-08: <recovery> is kept verbatim",
+      "resumeFromRunId: 'wf_demo-001'" in NOTE["recovery"])
+check("D-08: an absent block is simply absent (a notification without failures "
+      "is the NORMAL case — 26 of 28 runs)",
+      "failures" not in dw.notification_blocks(
+          "<task-notification><task-id>t</task-id><status>completed</status>"
+          "</task-notification>"))
+check("D-08: an unlabelled failure line is kept, not dropped",
+      dw.parse_failure_lines("something exploded")
+      == [{"label": "", "cause": "something exploded"}])
+
+SNAP_ROWS = [
+    {"type": "workflow_phase", "index": 1, "title": "Implement"},
+    {"type": "workflow_agent", "agentId": "a" * 17, "label": "sp-a:critique:2",
+     "state": "error", "error": "API Error: 529 Overloaded.",
+     "lastAttemptReason": "stalled", "tokens": 10,
+     "promptPreview": "[monitor] plan=TRUNCATED role=x attempt=9"},
+    {"type": "workflow_agent", "agentId": "b" * 17, "label": "sp-b:impl:1",
+     "state": "done"},
+]
+SNAP = {"runId": "wf_demo-001", "status": "failed", "summary": "two red loops",
+        "agentCount": 9, "workflowProgress": SNAP_ROWS}
+check("D-16: phases are not agents", len(dw.snapshot_agents(SNAP)) == 2)
+check("D-16: agentCount != len(workflowProgress) is NORMAL, not an error",
+      SNAP["agentCount"] != len(SNAP["workflowProgress"]))
+check("D-16: no snapshot at all reads as no rows", dw.snapshot_agents(None) == [])
+D08_CAUSES = dw.failure_causes(SNAP, NOTE)
+check("D-08: the STRUCTURED cause is primary (snapshot, not the prose)",
+      any(c["source"] == "snapshot" and c["label"] == "sp-a:critique:2"
+          for c in D08_CAUSES))
+check("D-08: the structured cause carries the error AND the last attempt reason",
+      any("529" in c["cause"] and "stalled" in c["cause"] for c in D08_CAUSES))
+check("D-08: <failures> CORROBORATES — a label the snapshot already named is "
+      "not reported twice",
+      len([c for c in D08_CAUSES if c["label"] == "sp-a:critique:2"]) == 1)
+check("D-08: a label only the notification knows is still reported",
+      any(c["label"] == "sp-b:impl:1~r1" and c["source"] == "notification"
+          for c in D08_CAUSES))
+check("D-08: a healthy agent is never a cause",
+      not [c for c in D08_CAUSES if c["label"] == "sp-b:impl:1"])
+check("D-08: with neither source there are no causes and no error",
+      dw.failure_causes(None, None) == [])
+check("GD-D6: rung 1 wins when both rungs have landed",
+      dw.close_evidence(SNAP, NOTE)[0] == 1)
+check("GD-D6: rung 2 fires on its own",
+      dw.close_evidence(None, NOTE)[0] == 2)
+check("GD-D6: with neither rung there is no close",
+      dw.close_evidence(None, None) is None)
+check("GD-D6: rung 3 (a driver's own typed close) is a NAMED rung, so the "
+      "ladder covers every rung that can land, not only the two polled",
+      dw.CLOSE_RUNGS.get(3) == "driver close")
+
+# A derived annotation may never land on a badge-setting stage. `stage` comes
+# out of `role.split(':')[-1]` — arbitrary text from a harness label — so this
+# is enforcement, not a naming convention.
+check("R-58: a label whose role ENDS in the reserved `plan` stage is rewritten",
+      dw.annotation_stage(dw.parse_agent_label("sp-a:gate:plan:2")) == "agent")
+check("R-58: ...and the reserved `complete` stage likewise (it would close the run)",
+      dw.annotation_stage(dw.parse_agent_label("sp-a:gate:complete:1")) == "agent")
+check("R-58: an ordinary stage is passed through untouched",
+      dw.annotation_stage(dw.parse_agent_label("sp-a:critique:2")) == "critique")
+check("R-58: no classification at all falls back to the watcher's own stage",
+      dw.annotation_stage(None) == "watcher")
+check("R-58: the reserved set is exactly monitoring.md's two badge stages",
+      tuple(dw.RESERVED_STAGES) == ("plan", "complete"))
+
+# The deterministic close says what the recorded data says, not what the shell
+# that started the watcher happened to export (status.sh FOLDS these three).
+check("GD-D11: the status.sh env fold-ins are dropped from the close's child env",
+      tuple(dw.STATUS_ENV_DROP) == ("ORCH_TITLE", "ORCH_PLANS_TOTAL", "ORCH_ROSTER"))
+check("GD-D11: ...and the emitter really builds its env from that list",
+      "STATUS_ENV_DROP" in open(WATCHER).read().split("def emit_through_status")[1]
+      .split("\ndef ")[0])
+
+# D-07's Approach names the glob literally, and it is the widest source: 41% of
+# recorded snapshots land in a session dir the journal never names, and a
+# session that rotated in without recording one further agent transcript has no
+# `subagents/workflows/` entry to be found by.
+ROTATED = os.path.join(BASE, "glob", "-home-x-proj", "s-rotated-in")
+os.makedirs(os.path.join(ROTATED, "workflows"), exist_ok=True)
+ROTATED_SNAP = os.path.join(ROTATED, "workflows", dw.WF_NAME + ".json")
+with open(ROTATED_SNAP, "w") as f:
+    json.dump({"runId": dw.WF_NAME, "status": "completed"}, f)
+dw._SESSION_DIRS_AT = 0.0     # the dir cache is TTL'd; this dir appeared just now
+check("D-07: the plan's own `projects/*/*/workflows/<runId>.json` glob is a source",
+      ROTATED_SNAP in dw.snapshot_glob())
+check("D-07: ...so a snapshot in a session with NO agent transcript is still found",
+      ROTATED_SNAP in dw.snapshot_paths())
+check("D-07: ...and that session's driver transcript becomes tailable too "
+      "(its notification is where the run's <recovery> lives)",
+      ROTATED + ".jsonl" in dw.driver_session_paths())
+
+# D-08(c) hygiene: harness text spliced verbatim into a file humans read.
+RECOV_DIR = os.path.join(BASE, "state", "plan")
+os.makedirs(RECOV_DIR, exist_ok=True)
+RECOV_MD = os.path.join(RECOV_DIR, "RESUME.md")
+
+
+def _recovery_write(text, prior=None):
+    with open(RECOV_MD, "w") as f:
+        f.write(prior if prior is not None else "# RESUME\n\nhuman prose\n")
+    st = {}
+    ok = dw.update_resume_recovery(st, {"recovery": text})
+    return ok, open(RECOV_MD).read()
+
+
+_ok, _body = _recovery_write("Workflow({scriptPath: '/x.js'})")
+check("D-08(c): an ordinary recovery block is spliced between the markers",
+      _ok and dw.RESUME_BEGIN in _body and "Workflow({scriptPath: '/x.js'})" in _body)
+_ok, _body = _recovery_write("run ```bash\nnot a real fence\n``` then this")
+check("D-08(c): a body containing a ``` fence does not terminate its own block "
+      "(the fence widens past the longest backtick run)",
+      _ok and "````\nrun ```bash" in _body and _body.count(dw.RESUME_END) == 1)
+_ok, _body = _recovery_write(f"resume me {dw.RESUME_END} and then some")
+check("D-08(c): a body carrying this section's OWN end marker is REFUSED, never "
+      "spliced (the next rewrite splices on find(END) and would cut wrong)",
+      _ok is False and dw.RESUME_BEGIN not in _body)
+_ok, _body = _recovery_write("x" * (dw.RECOVERY_MAX_CHARS + 500))
+check("D-08(c): an oversized body is capped, and the cut is marked",
+      _ok and "[truncated by decision_watcher]" in _body
+      and len(_body) < dw.RECOVERY_MAX_CHARS + 800)
+os.remove(RECOV_MD)
+check("D-08(c): a RESUME.md that does not exist is never CREATED (touch-run "
+      "bind renders the file; this item owns only the section)",
+      dw.update_resume_recovery({}, {"recovery": "x"}) is False
+      and not os.path.exists(RECOV_MD))
+
+
+# ---------------------------------------------------------------------------
+# GD-D6 / D-07 / D-08 / D-16 / D-05 — the live-process arms
+# ---------------------------------------------------------------------------
+HARNESS_MARKER = "[monitor] plan=p1 stage=impl role=impl attempt=1"
+
+
+def make_harness_run(name, wf="wf_close-001", journal_lines=None,
+                     driver_lines="", snapshot=None, state_files=None):
+    """A realistic `~/.claude` layout for ONE run, so the real path derivation runs.
+
+        <glob>/<slug>/<session>/subagents/workflows/<wf>/journal.jsonl
+        <glob>/<slug>/<session>/workflows/<wf>.json          <- rung 1
+        <glob>/<slug>/<session>.jsonl                        <- rung 2
+
+    The watcher derives all three from `ORCH_WF_DIR` alone (three dirnames up,
+    then the two siblings), which is exactly what these arms need to exercise —
+    a helper that handed it the paths would test nothing.
+    """
+    base = os.path.join(BASE, "harness", name)
+    session = os.path.join(base, "projects", "-home-x-proj", "s-" + name)
+    wf_dir = os.path.join(session, "subagents", "workflows", wf)
+    state_dir = os.path.join(base, "state")
+    os.makedirs(wf_dir, exist_ok=True)
+    os.makedirs(os.path.join(session, "workflows"), exist_ok=True)
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(wf_dir, "journal.jsonl"), "w") as f:
+        f.write(ONE_RUN if journal_lines is None else journal_lines)
+    write_transcript(wf_dir, "a1", HARNESS_MARKER)
+    if driver_lines:
+        with open(session + ".jsonl", "w") as f:
+            f.write(driver_lines)
+    snap_path = os.path.join(session, "workflows", wf + ".json")
+    if snapshot is not None:
+        with open(snap_path, "w") as f:
+            json.dump(snapshot, f)
+    for rel, text in (state_files or {}).items():
+        path = os.path.join(state_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return {"state": state_dir, "wf_dir": wf_dir, "glob": os.path.join(base, "projects"),
+            "snapshot": snap_path, "driver": session + ".jsonl", "run_id": wf}
+
+
+def launch_record(task_id, run_id, ts="2026-07-30T00:00:00.000Z"):
+    """The `Workflow` launch tool result — the run -> task join (GD-D4)."""
+    return json.dumps({
+        "type": "user", "timestamp": ts,
+        "toolUseResult": {"status": "async_launched", "taskId": task_id,
+                          "taskType": "local_workflow", "runId": run_id,
+                          "workflowName": "demo", "transcriptDir": "/x"}}) + "\n"
+
+
+def notification_record(task_id, status="completed", summary="all done",
+                        failures=None, usage=None, recovery=None,
+                        ts="2026-07-30T00:00:09.000Z", kind="task-notification"):
+    body = (f"<task-notification>\n<task-id>{task_id}</task-id>\n"
+            f"<status>{status}</status>\n<summary>{summary}</summary>\n")
+    if recovery:
+        body += f"<recovery>{recovery}</recovery>\n"
+    if failures:
+        body += "<failures>" + "\n".join(failures) + "</failures>\n"
+    if usage:
+        body += ("<usage>" + "".join(f"<{k}>{v}</{k}>" for k, v in usage.items())
+                 + "</usage>\n")
+    body += "</task-notification>"
+    return json.dumps({"type": "user", "timestamp": ts, "origin": {"kind": kind},
+                       "message": {"content": [{"type": "text", "text": body}]}}) + "\n"
+
+
+CLOSE_ENV = {"ORCH_QUIET_SECS": "1", "ORCH_EXIT_QUIET_SECS": "1",
+             "ORCH_ABANDON_QUIET_SECS": "300", "ORCH_CLOSE_POLL_SECS": "1"}
+# Every arm below asserts a SELF-EXIT, so none of them passes `until`: the
+# stimulus is already on disk (or is dropped by `during`), and the assertion is
+# the child returning on its own. An `until` polling for the close EVENT would
+# race it — the event is written a moment before the process returns, so the
+# harness would terminate the child it was about to observe exiting, and the
+# arm would prove the close while quietly assuming the exit. The window is the
+# `wait` ceiling; the real cost is the exit, which is ~1 s.
+
+
+def close_event(events):
+    for ev in events:
+        if ev.get("stage") == "complete" and ev.get("state") in ("done", "failed") \
+                and ev.get("w") == "agent":
+            return ev
+    return None
+
+
+# --- rung 1: the snapshot APPEARS while the watcher runs --------------------
+r1 = make_harness_run("rung1")
+R1_SNAP = {"runId": r1["run_id"], "timestamp": "2026-07-30T00:00:09.000Z",
+           "status": "killed", "summary": "user stopped it",
+           "agentCount": 1,
+           "workflowProgress": [{"type": "workflow_agent", "agentId": "a" * 17,
+                                 "label": "p1:impl:1", "state": "error",
+                                 "error": "API Error: 529 Overloaded."}]}
+
+
+def _drop_snapshot():
+    with open(r1["snapshot"], "w") as f:
+        json.dump(R1_SNAP, f)
+
+
+exited, rc, err = run_watcher(
+    r1["state"], r1["wf_dir"], CLOSE_ENV, wait=60.0, glob_root=r1["glob"],
+    when=watcher_online(r1["state"]), during=_drop_snapshot)
+r1_evs = events_of(r1["state"])
+r1_close = close_event(r1_evs)
+check("D-07 rung 1: the appearing snapshot closes the run deterministically",
+      r1_close is not None)
+check("D-07 rung 1: the rung is recorded in the detail",
+      bool(r1_close) and "close rung 1: run snapshot" in r1_close["detail"])
+check("D-07 rung 1: the close is written THROUGH status.sh, so it reads w=agent",
+      bool(r1_close) and r1_close["w"] == "agent")
+check("R-58: a `killed` run NEVER renders a clean done",
+      bool(r1_close) and r1_close["state"] == "failed" and "killed" in r1_close["detail"])
+check("D-08: the snapshot's own error is reported as a CAUSE, not as `stale`",
+      any(e.get("plan") == "p1" and e.get("state") == "failed"
+          and "529" in (e.get("detail") or "") for e in r1_evs))
+check("D-07 rung 1: the watcher then self-exits by ROUTE 1 (the close it wrote "
+      "is a `w:agent` line, so the predicate did not move)",
+      exited and rc == 0
+      and any("run closed by the driver" in (e.get("detail") or "") for e in r1_evs))
+check("D-07: no traceback from the close path", "Traceback" not in err)
+# Idempotence: a second watcher over the SAME folder must not re-close it. The
+# snapshot is now part of its startup baseline (a resumed run re-uses its runId,
+# and this repository resumes constantly).
+before = len(events_of(r1["state"]))
+run_watcher(r1["state"], r1["wf_dir"], CLOSE_ENV, wait=8.0, glob_root=r1["glob"],
+            until=lambda: len(events_of(r1["state"])) > before + 1)
+r1_again = [e for e in events_of(r1["state"])[before:]
+            if e.get("stage") == "complete" and e.get("w") == "agent"]
+check("D-07: a snapshot already on disk at startup is NOT a fresh close "
+      "(a resume re-uses the runId)", r1_again == [])
+
+# --- rung 2: the task notification, joined by task id ----------------------
+RESUME_TEXT = ("# RESUME — demo\n\nSome prose a human wrote.\n\n"
+               "## Resume\n\nold, hand-copied, wrong\n")
+R2_RECOVERY = ("To resume, call: Workflow({scriptPath: '/x/y.js', "
+               "resumeFromRunId: 'wf_close-002'})")
+R2_USAGE = {"agent_count": 7, "agents_done": 5, "agents_error": 2,
+            "subagent_tokens": 1234, "tool_uses": 99, "duration_ms": 60000}
+r2 = make_harness_run(
+    "rung2", wf="wf_close-002",
+    driver_lines=(launch_record("wtask02", "wf_close-002")
+                  + notification_record(
+                      "wtask02", status="completed", summary="two loops green",
+                      failures=["[sp-a:critique:2] failed: API Error: 529 Overloaded.",
+                                "[sp-b:impl:1] failed: API Error: 500.",
+                                # A role whose LAST segment is the reserved
+                                # `plan` stage: the label grammar allows it, so
+                                # the writer — not the fixture — has to be what
+                                # keeps a cause line off the card's badge.
+                                "[sp-c:gate:plan:2] failed: API Error: 429."],
+                      usage=R2_USAGE, recovery=R2_RECOVERY)),
+    state_files={"plan/RESUME.md": RESUME_TEXT})
+exited, rc, err = run_watcher(
+    r2["state"], r2["wf_dir"], CLOSE_ENV, wait=60.0, glob_root=r2["glob"])
+r2_evs = events_of(r2["state"])
+r2_close = close_event(r2_evs)
+check("D-07 rung 2: the notification closes the run when no snapshot exists",
+      r2_close is not None)
+check("D-07 rung 2: the rung is recorded in the detail",
+      bool(r2_close) and "close rung 2: task notification" in r2_close["detail"])
+check("D-07 rung 2: the harness's own summary rides the close",
+      bool(r2_close) and "two loops green" in r2_close["detail"])
+check("D-07 rung 2: `completed` renders done",
+      bool(r2_close) and r2_close["state"] == "done")
+r2_stats = [e for e in r2_evs if e.get("stage") == "run" and e.get("run")]
+check("D-08(a): ONE orchestrator-card info event carries the harness `run` stats",
+      len(r2_stats) == 1 and r2_stats[0]["plan"] == "orchestrator"
+      and r2_stats[0]["state"] == "info")
+check("D-08(a): the `run` block is the notification's <usage>, exactly",
+      bool(r2_stats) and r2_stats[0]["run"] == R2_USAGE)
+check("D-08(a): the stats event is NOT written under the reserved `complete` "
+      "stage (an `info` there would reopen the badge it sits beside)",
+      not [e for e in r2_evs if e.get("stage") == "complete" and e.get("run")])
+r2_fail = [e for e in r2_evs if e.get("state") == "failed"
+           and e.get("plan") in ("sp-a", "sp-b", "sp-c")]
+check("D-08(b): one failed line per <failures> entry, on its own plan card",
+      {e["plan"] for e in r2_fail} == {"sp-a", "sp-b", "sp-c"})
+check("D-08(b): the line is a STAGE event — a cause never closes a plan badge",
+      all(e["stage"] != "plan" for e in r2_fail))
+r2_reserved = [e for e in r2_fail if e["plan"] == "sp-c"]
+check("R-58: the `sp-c:gate:plan:2` cause really WAS emitted (the guard rewrites "
+      "the stage, it never drops the cause)", len(r2_reserved) == 1)
+check("R-58: ...under `agent`, not under the reserved `plan` stage it parses to "
+      "— so a harness label can never set a card's badge",
+      bool(r2_reserved) and r2_reserved[0]["stage"] == "agent"
+      and dw.parse_agent_label("sp-c:gate:plan:2")["stage"] == "plan")
+check("D-08(b): the parsed role/attempt and the real cause are both in the detail",
+      any(e["stage"] == "critique" and "critique #2" in e["detail"]
+          and "529" in e["detail"] for e in r2_fail))
+r2_resume = open(os.path.join(r2["state"], "plan", "RESUME.md")).read()
+check("D-08(c): RESUME.md's recovery section is rewritten VERBATIM from <recovery>",
+      R2_RECOVERY in r2_resume)
+check("D-08(c): it is delimited, and the human's prose around it is untouched",
+      dw.RESUME_BEGIN in r2_resume and dw.RESUME_END in r2_resume
+      and "Some prose a human wrote." in r2_resume)
+check("D-07 rung 2: the watcher self-exits by route 1 here too",
+      exited and rc == 0)
+check("D-07: no traceback from the notification path", "Traceback" not in err)
+
+# --- the close and the notification do NOT land together --------------------
+# The dominant real ordering: the harness writes `<runId>.json`, rung 1 fires
+# within ORCH_CLOSE_POLL_SECS, and the `<task-notification>` — a different
+# record, in a different file, appended by a different writer — arrives a beat
+# later. Nothing orders the two. A close plane that stopped looking once the run
+# was closed would silently drop D-08(a)'s run stats and D-08(c)'s RESUME.md
+# rewrite on exactly this (normal) sequence, which is the stale hand-copied
+# resume command D-08(c) exists to kill.
+R7_RECOVERY = ("To resume, call: Workflow({scriptPath: '/x/y.js', "
+               "resumeFromRunId: 'wf_close-008'})")
+R7_USAGE = {"agent_count": 3, "agents_done": 2, "agents_error": 1,
+            "subagent_tokens": 4321, "tool_uses": 12, "duration_ms": 90000}
+r7 = make_harness_run(
+    "late-note", wf="wf_close-008",
+    driver_lines=launch_record("wtask08", "wf_close-008"),
+    state_files={"plan/RESUME.md": RESUME_TEXT})
+R7_SNAP = {"runId": "wf_close-008", "timestamp": "2026-07-30T00:00:09.000Z",
+           "status": "completed", "summary": "loops green", "agentCount": 3,
+           "workflowProgress": []}
+
+
+def _snapshot_then_note():
+    """Rung 1 fires; the notification follows ~2 poll intervals later."""
+    with open(r7["snapshot"], "w") as f:
+        json.dump(R7_SNAP, f)
+    # Blocking the PARENT here is deliberate and cheap: the child is a separate
+    # process and keeps polling. The wait is what makes the two facts land in
+    # separate polls, which is the whole point of the arm.
+    time.sleep(3.0)
+    with open(r7["driver"], "a") as f:
+        f.write(notification_record("wtask08", status="completed",
+                                    summary="loops green", usage=R7_USAGE,
+                                    recovery=R7_RECOVERY))
+
+
+def _r7_extras_landed():
+    evs = events_of(r7["state"])
+    return (any(e.get("stage") == "run" and e.get("run") for e in evs)
+            and R7_RECOVERY in open(os.path.join(r7["state"], "plan",
+                                                 "RESUME.md")).read())
+
+
+# EXIT_QUIET is widened here (the shipped default is 120 s): every other arm
+# wants the exit as fast as possible, this one needs the watcher to still be
+# alive when the late notification lands — which is the situation in the field.
+exited, rc, err = run_watcher(
+    r7["state"], r7["wf_dir"], dict(CLOSE_ENV, ORCH_EXIT_QUIET_SECS="30"),
+    wait=90.0, glob_root=r7["glob"], when=watcher_online(r7["state"]),
+    during=_snapshot_then_note, until=_r7_extras_landed)
+r7_evs = events_of(r7["state"])
+r7_close = close_event(r7_evs)
+check("D-07: the snapshot closes the run before the notification exists",
+      bool(r7_close) and "close rung 1: run snapshot" in r7_close["detail"])
+r7_stats = [e for e in r7_evs if e.get("stage") == "run" and e.get("run")]
+check("D-08(a): the run stats STILL land when the notification arrives AFTER "
+      "the close (the close is one-shot; the extras are not)",
+      len(r7_stats) == 1 and r7_stats[0]["run"] == R7_USAGE)
+r7_resume = open(os.path.join(r7["state"], "plan", "RESUME.md")).read()
+check("D-08(c): ...and so does RESUME.md's recovery section",
+      R7_RECOVERY in r7_resume and dw.RESUME_BEGIN in r7_resume)
+check("D-07: the late notification does NOT produce a second terminal close",
+      len([e for e in r7_evs if e.get("stage") == "complete"
+           and e.get("state") in ("done", "failed")
+           and e.get("w") == "agent"]) == 1)
+check("D-07: no traceback on the late-notification path", "Traceback" not in err)
+
+# --- rung 3: a driver's own typed close has already fired the ladder ---------
+r8 = make_harness_run("rung3", wf="wf_close-009",
+                      driver_lines=launch_record("wtask09", "wf_close-009"))
+R8_SNAP = {"runId": "wf_close-009", "timestamp": "2026-07-30T00:00:09.000Z",
+           "status": "completed", "summary": "green", "agentCount": 1,
+           "workflowProgress": []}
+
+
+def _driver_close_then_snapshot():
+    """The belt-and-braces close lands first; the snapshot follows."""
+    with open(os.path.join(r8["state"], "events.jsonl"), "a") as f:
+        f.write(json.dumps({"ts": datetime.now(timezone.utc)
+                            .isoformat(timespec="milliseconds"),
+                            "plan": "orchestrator",
+                            "stage": "complete", "state": "done",
+                            "detail": "wf_close-009 complete: typed by the driver",
+                            "w": "agent"}) + "\n")
+    time.sleep(2.0)
+    with open(r8["snapshot"], "w") as f:
+        json.dump(R8_SNAP, f)
+
+
+exited, rc, err = run_watcher(
+    r8["state"], r8["wf_dir"], CLOSE_ENV, wait=60.0, glob_root=r8["glob"],
+    when=watcher_online(r8["state"]), during=_driver_close_then_snapshot)
+r8_closes = [e for e in events_of(r8["state"]) if e.get("stage") == "complete"
+             and e.get("state") in ("done", "failed") and e.get("w") == "agent"]
+check("GD-D6 rung 3: a driver's own typed close fires the ladder — the watcher "
+      "adds NO second terminal event beside it", len(r8_closes) == 1)
+check("GD-D6 rung 3: ...and it is the driver's line that survives, verbatim",
+      bool(r8_closes) and "typed by the driver" in r8_closes[0]["detail"])
+check("GD-D6 rung 3: the watcher still exits by route 1 on that line",
+      exited and rc == 0)
+
+# --- the join is the TASK ID, never "the newest notification in the file" ---
+r2b = make_harness_run(
+    "rung2-foreign", wf="wf_close-003",
+    driver_lines=(launch_record("wtask03", "wf_close-003")
+                  + notification_record("wOTHER", status="failed",
+                                        summary="a sleep in the same session")
+                  + notification_record("wtask03b", status="failed",
+                                        summary="a sibling workflow")),
+    state_files={})
+exited, rc, err = run_watcher(
+    r2b["state"], r2b["wf_dir"], dict(CLOSE_ENV, ORCH_ABANDON_QUIET_SECS="4"),
+    wait=45.0, glob_root=r2b["glob"])
+r2b_evs = events_of(r2b["state"])
+check("GD-M3: a notification for ANOTHER task in the same session never closes "
+      "this run", close_event(r2b_evs) is None)
+check("GD-M3: ...and the run falls through to the timeout rung as it always did",
+      any("run abandoned" in (e.get("detail") or "") for e in r2b_evs))
+
+# --- neither rung: today's quiet-timeout behaviour, byte for byte ----------
+r3 = make_harness_run("no-rung", wf="wf_close-004",
+                      driver_lines=launch_record("wtask04", "wf_close-004"))
+exited, rc, err = run_watcher(
+    r3["state"], r3["wf_dir"], dict(CLOSE_ENV, ORCH_ABANDON_QUIET_SECS="4"),
+    wait=45.0, glob_root=r3["glob"])
+r3_evs = events_of(r3["state"])
+check("D-07: with neither rung, NOTHING is written through status.sh",
+      not [e for e in r3_evs if e.get("w") == "agent"])
+check("D-07: ...no run-stats event either", not [e for e in r3_evs if e.get("run")])
+check("D-07: ...and the abandoned window still stops the watcher, as today",
+      exited and rc == 0
+      and any("run abandoned" in (e.get("detail") or "") for e in r3_evs))
+check("D-07: an absent snapshot is never an error", "Traceback" not in err
+      and "snapshot" not in err.lower())
+
+# --- D-05: --no-tokens suppresses the token plane, nothing else ------------
+r4 = make_harness_run("no-tokens", wf="wf_close-005")
+with open(os.path.join(r4["wf_dir"], "agent-a1.jsonl"), "a") as f:
+    f.write(json.dumps({"type": "assistant", "timestamp": "2026-07-25T00:00:01.000Z",
+                        "message": {"id": "m1", "usage": {"input_tokens": 500,
+                                                          "output_tokens": 50}}}) + "\n")
+exited, rc, err = run_watcher(
+    r4["state"], r4["wf_dir"], dict(CLOSE_ENV, ORCH_ABANDON_QUIET_SECS="4"),
+    wait=45.0, glob_root=r4["glob"], args=("--no-tokens",))
+r4_evs = events_of(r4["state"])
+check("D-05: --no-tokens emits NO token events at all",
+      not [e for e in r4_evs if e.get("stage") == "tokens" or e.get("tokens")])
+check("D-05: spawns are intact",
+      any(e.get("plan") == "p1" and e.get("state") == "running" for e in r4_evs))
+check("D-05: results are intact",
+      any(e.get("stage") == "impl" and e.get("state") == "done" for e in r4_evs))
+check("D-05: an agent row carries NO tokens key — absent, never a rendered 0",
+      all("tokens" not in (e.get("agent") or {}) for e in r4_evs))
+check("D-05: no traceback with the token plane off", "Traceback" not in err)
+# The env form is the one a daemon launcher can set, so it is proved by RUNNING
+# the watcher with no argv flag at all — a grep for the string would pass on a
+# comment.
+r4b = make_harness_run("no-tokens-env", wf="wf_close-005b")
+with open(os.path.join(r4b["wf_dir"], "agent-a1.jsonl"), "a") as f:
+    f.write(json.dumps({"type": "assistant", "timestamp": "2026-07-25T00:00:01.000Z",
+                        "message": {"id": "m1", "usage": {"input_tokens": 500,
+                                                          "output_tokens": 50}}}) + "\n")
+exited, rc, err = run_watcher(
+    r4b["state"], r4b["wf_dir"],
+    dict(CLOSE_ENV, ORCH_ABANDON_QUIET_SECS="4", ORCH_NO_TOKENS="1"),
+    wait=45.0, glob_root=r4b["glob"])
+r4b_evs = events_of(r4b["state"])
+check("D-05: ORCH_NO_TOKENS=1 with NO argv flag suppresses the token plane",
+      not [e for e in r4b_evs if e.get("stage") == "tokens" or e.get("tokens")])
+check("D-05: ...and spawns/results survive the env form too",
+      any(e.get("plan") == "p1" and e.get("state") == "running" for e in r4b_evs)
+      and any(e.get("stage") == "impl" and e.get("state") == "done"
+              for e in r4b_evs))
+
+# --- D-16: --reconcile, the snapshot as post-run oracle --------------------
+r5 = make_harness_run(
+    "reconcile", wf="wf_close-006", journal_lines="",
+    snapshot={"runId": "wf_close-006", "status": "completed",
+              "summary": "done", "agentCount": 4,
+              "workflowProgress": [
+                  {"type": "workflow_phase", "index": 1, "title": "Implement"},
+                  {"type": "workflow_agent", "agentId": "a1", "state": "done",
+                   "label": "p1:impl:1",
+                   # TRUNCATED display text: parsing a marker out of it would
+                   # file the agent under a plan that does not exist.
+                   "promptPreview": "[monitor] plan=TRUNC role=x attempt=9",
+                   "resultPreview": "{\"done\":tr"},
+                  {"type": "workflow_agent", "agentId": "a2", "state": "error",
+                   "label": "p2:critique:1", "error": "API Error: 529."}]})
+
+
+def run_reconcile(run, args=("--reconcile",), env_extra=None):
+    env = dict(os.environ)
+    env.update({"ORCH_STATE_DIR": run["state"], "ORCH_WF_DIR": run["wf_dir"],
+                "ORCH_WF_GLOB_ROOT": run["glob"], "PYTHONDONTWRITEBYTECODE": "1"})
+    env.update(env_extra or {})
+    return subprocess.run([sys.executable, WATCHER, *args], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+rec1 = run_reconcile(r5)
+r5_evs = events_of(r5["state"])
+check("D-16: --reconcile exits 0 and reports what it did",
+      rec1.returncode == 0 and "correction(s)" in rec1.stdout)
+check("D-16: an agent the tail never saw is corrected onto its real plan",
+      any(e.get("plan") == "p1" and (e.get("agent") or {}).get("id") == "a1"
+          for e in r5_evs))
+check("D-16: the TRUNCATED promptPreview is never parsed as a marker",
+      not [e for e in r5_evs if e.get("plan") == "TRUNC"])
+check("D-16: the real transcript's marker wins (a1 is p1:impl, not the preview)",
+      any(e.get("plan") == "p1" and e.get("state") == "done" for e in r5_evs))
+check("D-16: a row that ended in `error` is reconciled as failed, never done",
+      any(e.get("plan") == "p2" and e.get("state") == "failed" for e in r5_evs))
+check("D-16: the snapshot's own `agentCount` disagreeing with the row count is "
+      "not reported as a problem", "agentCount" not in rec1.stdout)
+rec2 = run_reconcile(r5)
+check("D-16: a second pass is idempotent — no new events",
+      rec2.returncode == 0 and events_of(r5["state"]) == r5_evs)
+r6 = make_harness_run("reconcile-none", wf="wf_close-007")
+rec3 = run_reconcile(r6)
+check("D-16: with no snapshot it says so and exits 0 (a snapshot is NOT "
+      "guaranteed — never an error)",
+      rec3.returncode == 0 and "no run snapshot" in rec3.stdout
+      and events_of(r6["state"]) == [])
+# The env form of the mode, proved by RUNNING it with no argv flag.
+r5b = make_harness_run("reconcile-env", wf="wf_close-006b", journal_lines="",
+                       snapshot={"runId": "wf_close-006b", "status": "completed",
+                                 "agentCount": 1,
+                                 "workflowProgress": [
+                                     {"type": "workflow_agent", "agentId": "a1",
+                                      "state": "done", "label": "p1:impl:1"}]})
+rec4 = run_reconcile(r5b, args=(), env_extra={"ORCH_RECONCILE": "1"})
+check("D-16: ORCH_RECONCILE=1 with NO argv flag runs the one-shot pass and "
+      "RETURNS (it does not become a daemon)",
+      rec4.returncode == 0 and "correction(s)" in rec4.stdout)
+check("D-16: ...and it really emitted the correction",
+      any("reconciled from the run snapshot" in (e.get("detail") or "")
+          for e in events_of(r5b["state"])))
+# "Post-run" made structural: a checkpoint that moved under the pass belongs to
+# a live daemon, and rewinding its offsets would cost the live view its place.
+r5c = make_harness_run("reconcile-live", wf="wf_close-006c", journal_lines="",
+                       snapshot={"runId": "wf_close-006c", "status": "completed",
+                                 "agentCount": 1,
+                                 "workflowProgress": [
+                                     {"type": "workflow_agent", "agentId": "a1",
+                                      "state": "done", "label": "p1:impl:1"}]})
+R5C_STATE = os.path.join(r5c["state"], ".watcher-state.json")
+# `pid` is what a live daemon stamps into its own checkpoint on every save; THIS
+# test process stands in for it, so the refusal is deterministic rather than a
+# race against an mtime.
+with open(R5C_STATE, "w") as f:
+    json.dump({"offset": 4242, "pid": os.getpid(),
+               "journal": os.path.join(r5c["wf_dir"], "journal.jsonl"),
+               "agents": {}, "running": [], "plans": {}}, f)
+rec5 = run_reconcile(r5c)
+check("D-16: a reconcile racing a LIVE watcher's checkpoint refuses to save it",
+      rec5.returncode == 0 and "checkpoint NOT written" in rec5.stderr
+      and f"pid {os.getpid()}" in rec5.stderr)
+check("D-16: ...and the live watcher's own offset survives untouched",
+      json.load(open(R5C_STATE)).get("offset") == 4242)
+# The second belt, as a unit: a checkpoint written before the `pid` key existed
+# is still caught by its stamp moving. Asserted on the predicate rather than by
+# racing a writer against a subprocess — a timing race would be a flaky test of
+# a guard whose whole job is to be conservative.
+_STAMP_BEFORE = dw.state_stamp()
+with open(dw.STATE, "w") as f:
+    json.dump({"offset": 1, "journal": dw.JOURNAL, "note": "another writer"}, f)
+check("D-16: the checkpoint stamp MOVES when another writer rewrites the file "
+      "(the pid-less belt: an older checkpoint is still caught)",
+      dw.state_stamp() != _STAMP_BEFORE and dw.state_stamp() is not None)
+check("D-16: liveness is a real question about a real pid, and a non-pid is "
+      "never 'alive'",
+      dw.pid_alive(os.getpid()) and not dw.pid_alive(0)
+      and not dw.pid_alive("nope") and not dw.pid_alive(None))
+check("D-16: ...while the corrections it already appended still stand "
+      "(events.jsonl is append-only; only the checkpoint is withheld)",
+      any("reconciled from the run snapshot" in (e.get("detail") or "")
+          for e in events_of(r5c["state"])))
 
 
 # ---------------------------------------------------------------------------

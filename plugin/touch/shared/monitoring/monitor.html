@@ -976,6 +976,20 @@ function onEvent(ev) {
     const n = Math.floor(Number(ev.plans_total));
     if (Number.isFinite(n) && n > planTotal && n <= 9999) planTotal = n;
   }
+  // D-08: the HARNESS's own end-of-run tally, carried on the watcher's run
+  // close under the additive `run` key. It is a CROSS-CHECK for the statistics
+  // view and NEVER a substitute: every figure on that page is folded from this
+  // stream, and swapping in a number computed elsewhere — over a different
+  // denominator (`subagent_tokens` excludes the driver), at a different moment
+  // — would make one tile disagree with the rows it sits above with no way for
+  // a reader to tell which is which. Untrusted event data, so only the known
+  // keys are read and each is coerced to a bounded non-negative integer.
+  if (ev.run && typeof ev.run === "object" && !Array.isArray(ev.run)) {
+    for (const k of HARNESS_RUN_KEYS) {
+      const n = Math.floor(Number(ev.run[k]));
+      if (Number.isFinite(n) && n >= 0 && n <= 1e12) harnessRun[k] = n;
+    }
+  }
   // Planned sub-plan ROSTER (driver-emitted on the orchestrator card, latest
   // wins): the run's full intended loop list, shown in the accordion before
   // the loops exist. Untrusted event data: strings only, bounded count+length.
@@ -1021,7 +1035,7 @@ function onEvent(ev) {
     if (ev.quiet) logged = false;  // live delta: counters only, no log line
   } else {
     // FRONTEND-6: one task folder hosts several phases (research, then
-    // implement-plan) appending to the same events.jsonl, so a replay can pass
+    // implement) appending to the same events.jsonl, so a replay can pass
     // an earlier phase's run-level "complete done" and then keep going. Fresh
     // watcher/driver activity on the reserved orchestrator card must reopen a
     // settled badge — never leave it "done" while loops are visibly running.
@@ -1925,6 +1939,16 @@ setInterval(() => {
 // rows. Tiles are built once from the STAT_TILES literals; updates only ever
 // touch textContent with self-formatted numbers (FRONTEND-1 discipline).
 let evCount = 0, quietCount = 0, planTotal = 0, statsDirty = false;
+// D-08 cross-check: the harness's own counts for this run, as they arrived on
+// the run-close `run` block. Read-only decoration on tiles the page computes
+// for itself — a tile whose sub-line says "harness: N" is telling you what the
+// other observer saw, and a DISAGREEMENT is information, not an error to
+// reconcile away (the two count different things: the harness tallies agents it
+// launched, this page tallies agent rows the stream reported).
+const HARNESS_RUN_KEYS = ["agent_count", "agents_done", "agents_error",
+  "agents_skipped", "agents_empty_result", "subagent_tokens", "tool_uses",
+  "duration_ms"];
+let harnessRun = {};
 const statsEl = document.getElementById("statsView");
 const STAT_TILES = [
   { id: "tokens", label: "tokens in", hero: true },
@@ -1971,7 +1995,16 @@ function setStat(id, v, sub, dot) {
 }
 function statsReset() {
   evCount = 0; quietCount = 0; planTotal = 0; statsDirty = false;
+  harnessRun = {};
   for (const t of STAT_TILES) setStat(t.id, "—", "", t.dot);
+}
+// " · harness N" — appended to a tile's sub-line when the run close carried the
+// harness's own figure for it. Absent key -> nothing at all: ~7% of runs never
+// produce the close block this comes from, and a run without it is a normal
+// run, not one with a missing number to apologise for.
+function harnessNote(key, fmt) {
+  const v = harnessRun[key];
+  return v === undefined ? "" : " · harness " + (fmt ? fmt(v) : String(v));
 }
 function statsRender() {
   statsDirty = false;
@@ -2038,14 +2071,16 @@ function statsRender() {
         ? done + "/" + plansAll + " plans green" + (failed ? " · " + failed + " red" : "")
         : (done + failed) + "/" + plansAll + " plans done", flow);
   setStat("tokens", fmtTok(tin),
-    tin ? fmtIn(tin, tcached, twrite) + " · out " + fmtTok(tout) : "");
+    tin ? fmtIn(tin, tcached, twrite) + " · out " + fmtTok(tout)
+          + harnessNote("subagent_tokens", fmtTok) : "");
   setStat("tokOut", fmtTok(tout), agents ? "≈ " + fmtTok(Math.round(tout / agents)) + " per agent" : "");
   setStat("cacheHit", tin ? Math.round(100 * tcached / tin) + "%" : "—",
     tin ? "r:" + fmtTok(tcached) + " of in " + fmtTok(tin) : "");
   setStat("plansDone", String(done), "of " + plansAll + " plans" +
     (plansAll > plansSeen ? " · " + (plansAll - plansSeen) + " unstarted" : " seen"));
   setStat("plansFailed", String(failed), runningPlans + " running");
-  setStat("agents", String(agents), runningAgents + " running now");
+  setStat("agents", String(agents),
+    runningAgents + " running now" + harnessNote("agent_count"));
   setStat("attempts", String(attempts), retries + (retries === 1 ? " retry" : " retries"));
   setStat("avgAgent", durN ? fmtDur(durSum / durN) : "—", durMax ? "longest " + fmtDur(durMax) : "");
   setStat("events", String(evCount), quietCount + " token ticks");
@@ -2562,6 +2597,11 @@ function applySnapshot(snap) {
   tpSeed(snap.timeplan);
   evCount = snap.evCount | 0; quietCount = snap.quietCount | 0;
   planTotal = snap.planTotal | 0; statsDirty = true;
+  // The harness cross-check (D-08) is NOT part of the server's fold, so a
+  // snapshot-hydrated view simply carries no harness note until a tailed event
+  // brings one. That degradation is the honest one: the notes say what the
+  // other observer reported, and a hydrated page that has not seen the report
+  // must not claim it did. `resetView()` above already cleared them.
   for (const pair of (Array.isArray(snap.plans) ? snap.plans : [])) {
     if (!Array.isArray(pair)) continue;
     hydratePlan(planEl(pair[0]), pair[1] || {});

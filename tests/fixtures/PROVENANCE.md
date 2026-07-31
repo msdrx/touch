@@ -174,6 +174,32 @@ discovery to the configured project's slug(s) must ingest **none**.
 six transcripts on disk, and its filename is the raw **pid** — pid reuse
 overwrites it, which is why session identity is `(pid, procStart)`.
 
+## `dup-snapshot-wf_617adbe5/` — one run, two disagreeing snapshots (D-02)
+
+Source: `~/.claude/projects/-home-laniakea-Projects-touch/<session>/workflows/`,
+copied 2026-07-30 from the two sessions that observed run `wf_617adbe5-42a`
+(the `touch-memory-home` implement run, resumed after an infrastructure
+outage). The session directory names are kept, so the subtree mounts as a
+project slug and `find_snapshots`' cross-session glob finds both copies.
+
+| copy | timestamp | status | agentCount | totalTokens | totalToolCalls | durationMs |
+|---|---|---|---|---|---|---|
+| `1be0c928…` (earlier, sorts FIRST by path) | `2026-07-30T06:14:25.815Z` | `failed` | 37 | 3 659 088 | 1 178 | 16 446 655 |
+| `f6fa2bbd…` (later, authoritative) | `2026-07-30T13:11:45.232Z` | `killed` | 59 | 4 319 298 | 1 437 | 24 968 896 |
+
+**The fixture is the disagreement.** A resumed run writes one snapshot per
+observing session; `find_snapshot`'s `sorted()[0]` orders on the *session
+UUID*, a value with no relation to time, and here that hands back the earlier
+`failed`/37/3.66 M copy for a run that was `killed` after 59 agents and 4.32 M
+tokens. `fold_snapshots` (D-02) takes the later `status` and the `$max` of
+every total; `tests/test_ingest.py` asserts both against these bytes. One of 27
+on-disk run ids is duplicated today, and the mechanism recurs on every resume,
+so the count is a floor.
+
+Both files are the harness's own single-object JSON: no trailing newline, and
+they carry `promptPreview`/`lastToolSummary`/`resultPreview` text from this
+repo's own run. The credential scan above was re-run over both — no hits.
+
 ---
 
 ## Regenerating `MANIFEST.sha256`

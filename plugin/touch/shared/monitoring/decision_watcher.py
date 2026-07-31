@@ -13,6 +13,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -29,6 +30,53 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 # the first heartbeat emit, so a bad value is reported in startup context
 # instead of killing the watcher at import (R-07, mirrors SERVER-2).
 _CFG_WARNINGS: list[str] = []
+
+
+# --------------------------------------------------------------------------
+# Command line. The one POSITIONAL argument is still the run dir (`argv[1]`,
+# unchanged); flags are split out of it so a `--flag` can never be mistaken for
+# a wf_dir. An UNKNOWN flag warns (deferred, R-07) and is ignored rather than
+# refused: this is a best-effort observer of someone else's run, and dying on a
+# typo would lose the live view the module exists to keep.
+# --------------------------------------------------------------------------
+KNOWN_FLAGS = ("--reconcile", "--no-tokens")
+
+
+def parse_argv(argv: list[str]) -> tuple[list[str], list[str]]:
+    """``(flags, positional)`` — anything starting with ``-`` is a flag."""
+    return ([a for a in argv if a.startswith("-")],
+            [a for a in argv if not a.startswith("-")])
+
+
+_FLAGS, _POSITIONAL = parse_argv(sys.argv[1:])
+for _flag in _FLAGS:
+    if _flag not in KNOWN_FLAGS:
+        _CFG_WARNINGS.append(
+            f"decision_watcher: unknown flag {_flag!r}; ignored "
+            f"(known flags: {', '.join(KNOWN_FLAGS)})")
+
+
+def _flag_on(flag: str, env: str) -> bool:
+    """Is ``flag`` on the command line, or ``env`` set to anything but off?
+
+    Same truthiness ORCH_NO_SELF_EXIT already uses (any non-empty value except
+    ``0``/``false``/``no``), so an operator learns one spelling for the module.
+    """
+    if flag in _FLAGS:
+        return True
+    return str(os.environ.get(env, "")).strip().lower() not in ("", "0", "false", "no")
+
+
+# D-16: one-shot post-run reconcile against the run snapshot, then exit. Not a
+# daemon mode — it emits the corrections the live tail could not see and stops.
+RECONCILE = _flag_on("--reconcile", "ORCH_RECONCILE")
+# D-05: suppress this watcher's token accounting entirely, so a deployment that
+# has wired the aggregator's ingest tick (D-01) can make `ingest.rollup` the ONE
+# reachable implementation of the same pure function. Default OFF: the watcher
+# is the live view's token source until 8932 convergence, and the two
+# implementations are cross-checked (tests/test_token_crosscheck.py) rather than
+# one being quietly preferred.
+NO_TOKENS = _flag_on("--no-tokens", "ORCH_NO_TOKENS")
 
 
 # --------------------------------------------------------------------------
@@ -190,8 +238,8 @@ def read_config() -> dict:
 
 def resolve_wf_dir() -> str:
     """Workflow transcript dir: argv > $ORCH_WF_DIR > orch-config.json > newest run."""
-    if len(sys.argv) > 1:
-        return sys.argv[1]
+    if _POSITIONAL:
+        return _POSITIONAL[0]
     if os.environ.get("ORCH_WF_DIR"):
         return os.environ["ORCH_WF_DIR"]
     configured = read_config().get("wf_dir")
@@ -471,7 +519,7 @@ def poll_sleep(seconds: float = 1.0, step: float = 0.1) -> None:
 # GD-11: writer-side detail cap. The reason is shell/JS-template embedding of
 # these strings downstream, not JSON — a 1 KB cut keeps every consumer safe.
 DETAIL_CAP = 1024
-# Reserved plan id for implement-plan's final aggregate sweep: its decision text
+# Reserved plan id for implement's final aggregate sweep: its decision text
 # is keyed on (plan, role) because no critique follows the sweep (R-08).
 FINALGATE_PLAN = "finalgate"
 
@@ -528,6 +576,19 @@ def cap_detail(detail: str) -> str:
     if len(detail) <= DETAIL_CAP:
         return detail
     return detail[:DETAIL_CAP - 3] + "..."
+
+
+def single_line(text) -> str:
+    """One line, no double quotes — monitoring.md's `detail` rule, at the writer.
+
+    Applied to every string the watcher did NOT author: an agent's own
+    ``summary`` (D-06), a harness error string, a `<failures>` line (D-08).
+    The reason is shell and JS-template embedding downstream, not JSON — a
+    detail travels through a bash argument and a JS template literal before
+    anything parses it — and collapsing whitespace also keeps the 1 KB cap
+    spending its budget on words instead of indentation.
+    """
+    return " ".join(str(text or "").replace('"', "").split())
 
 
 def emit(stage: str, state: str, detail: str, ts: str | None = None,
@@ -718,6 +779,26 @@ def agent_tokens(agent_id: str) -> tuple[int, int, int, int]:
     return tin, tcached, twrite, tout
 
 
+def token_totals(agent_id: str) -> tuple[int, int, int, int] | None:
+    """An agent's cumulative usage, or None when ``--no-tokens`` is in force (D-05).
+
+    None is emphatically NOT zero: a suppressed reading must leave the `agent`
+    block's `tokens` key ABSENT, because a rendered 0 reads as "this agent
+    burned nothing" on every dashboard that folds `agent.tokens` last-wins.
+    It also skips the transcript parse, which is the only reason suppressing
+    the events is worth anything.
+    """
+    return None if NO_TOKENS else agent_tokens(agent_id)
+
+
+def tokens_field(totals: tuple[int, int, int, int] | None) -> dict | None:
+    """The `agent.tokens` sub-object for a reading, or None for a suppressed one."""
+    if totals is None:
+        return None
+    tin, tcached, twrite, tout = totals
+    return {"in": tin, "out": tout, "cached": tcached, "cache_write": twrite}
+
+
 def token_deltas(prev: dict, tin: int, tcached: int, twrite: int,
                  tout: int) -> tuple[dict, dict]:
     """``(wire deltas, new baseline)`` under the D7 monotonic rule.
@@ -837,13 +918,20 @@ def first_ts(agent_id: str) -> str | None:
     return min(stamps) if stamps else None
 
 
-def _last_ts_in_file(path: str) -> str | None:
+def _last_ts_in_file(path: str, types: tuple[str, ...] | None = None) -> str | None:
     """Latest parseable ``timestamp`` in one transcript file.
 
     Grows the tail window until at least one full line is captured, so a final
     transcript line larger than the initial window (a >64KB tool result — the
     real case commit 0586bbbf shows) still yields the true last timestamp
     instead of an older one or ``None`` (WATCHER-7).
+
+    ``types`` narrows the search to records of those ``type``s — D-06 uses
+    ``("assistant",)`` to ask for the moment the agent last SPOKE rather than
+    the moment its file was last appended to. The window growth is what keeps
+    that honest: a filtered search that found nothing in the tail keeps
+    doubling to the head of the file rather than reporting the newest record it
+    happened to see.
     """
     try:
         size = os.path.getsize(path)
@@ -864,9 +952,14 @@ def _last_ts_in_file(path: str) -> str | None:
             data = data[nl + 1:] if nl != -1 else b""
         for line in reversed(data.decode(errors="replace").splitlines()):
             try:
-                ts = json.loads(line).get("timestamp")
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(record, dict):
+                continue
+            if types is not None and record.get("type") not in types:
+                continue
+            ts = record.get("timestamp")
             if ts:
                 return ts
         if start == 0:  # whole file scanned, still nothing parseable
@@ -884,6 +977,29 @@ def last_ts(agent_id: str) -> str | None:
     return max(stamps) if stamps else None
 
 
+def last_assistant_ts(agent_id: str) -> str | None:
+    """When the agent last SPOKE: latest ``assistant`` timestamp across copies.
+
+    The moment an agent's final assistant message was written is the closest
+    recorded thing to "the agent finished" — every later line in the transcript
+    (tool results, hook output, harness scaffolding) is bookkeeping about a turn
+    that had already ended. D-06 prefers it over the read moment for exactly
+    that reason.
+    """
+    stamps = []
+    for path in agent_paths(agent_id):
+        ts = _last_ts_in_file(path, ("assistant",))
+        if ts:
+            stamps.append(ts)
+    return max(stamps) if stamps else None
+
+
+# How fresh a recorded stamp must be to be believed as the real completion time
+# of an agent whose result JUST landed. Unchanged value, named so the two
+# candidates below are visibly held to the SAME guard.
+RESULT_TS_FRESH_SECS = 30
+
+
 def result_ts(agent_id: str, live: bool) -> str | None:
     """Completion timestamp for an agent whose journal ``result`` just landed.
 
@@ -891,21 +1007,34 @@ def result_ts(agent_id: str, live: bool) -> str | None:
     mid-run — a long final Bash call leaves the tool result and everything
     after it unwritten, so the transcript's last line may predate the real
     finish by many minutes. When tailing live (the entry appeared since the
-    previous ~1s poll) the read moment IS the completion time; trust the
-    transcript timestamp only when it is fresh enough to be the real end.
+    previous ~1s poll) the read moment is the fallback completion time; a
+    recorded stamp is trusted only when it is fresh enough to be the real end.
     On backlog catch-up the transcript is the only signal we have.
+
+    D-06 narrows the +29 s p90 tail this used to leave: the agent's own LAST
+    ASSISTANT MESSAGE is preferred over the read moment, and only then the
+    transcript's last line of any kind. Both candidates pass the SAME staleness
+    guard, so nothing is invented — each is a stamp the harness itself wrote,
+    and the read moment survives as the answer for the case it was chosen for
+    (a transcript that stopped flushing). The residual trade — a result whose
+    transcript went quiet still carries the watcher's read moment, not the true
+    end — is stated in monitoring.md next to "Timestamps are true occurrence
+    times", because a stamp that is honest about being observed beats a stamp
+    that is confidently wrong.
     """
     t_tr = last_ts(agent_id)
     if not live:
         return t_tr
     now = datetime.now(timezone.utc)
-    if t_tr:
+    for candidate in (last_assistant_ts(agent_id), t_tr):
+        if not candidate:
+            continue
         try:
-            parsed = datetime.fromisoformat(t_tr.replace("Z", "+00:00"))
-            if (now - parsed).total_seconds() <= 30:
-                return t_tr
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
         except ValueError:
-            pass
+            continue
+        if (now - parsed).total_seconds() <= RESULT_TS_FRESH_SECS:
+            return candidate
     return now.isoformat(timespec="milliseconds")
 
 
@@ -944,6 +1073,12 @@ def parse_markers(text: str) -> tuple[dict | None, dict | None]:
     monitor = touch = None
     for kind, rest in marker_records(marker_window(text)):
         fields = dict(MARKER_KV.findall(rest))
+        if not fields:
+            # Payload-less mention — prose quoting the token (e.g. a sub-plan
+            # title naming "[monitor]"), not a marker; it must not clobber a
+            # real marker's fields. Same rule touch_marker_misplaced applies
+            # below the window.
+            continue
         if kind == "monitor":
             monitor = fields
         else:
@@ -1084,7 +1219,17 @@ def flush_agent_tokens(state: dict, agent_id: str, info: dict | None = None,
     other caller stays silent when there is nothing to report. All of it is
     schema-ADDITIVE — ``agent`` is already documented as optional on any event
     and readers ignore keys they don't know.
+
+    ``--no-tokens`` (D-05) turns the whole body into the two evictions: no
+    transcript is read and no `tokens` event is written, so spawns, results and
+    decision lines are untouched while `ingest.rollup` becomes the single
+    reachable token implementation. The evictions still happen because every
+    caller is still a point where the agent stops being ticked.
     """
+    if NO_TOKENS:
+        drop_usage_cache(agent_id)
+        state.setdefault("tok_tick_at", {}).pop(agent_id, None)
+        return totals if totals is not None else (0, 0, 0, 0)
     if totals is None:
         totals = agent_tokens(agent_id)
     # Every caller is a point where this agent stops being ticked, so BOTH of
@@ -1176,7 +1321,7 @@ def stream_terminal_close(events_path: str | None = None,
     ``complete running`` (the reopen event this module emits when a closed run
     spawns again) or a later plan card MOVING, i.e. a `plan` event whose state is
     not itself a close. (A moving card deliberately includes the `plan queued`
-    SEED lines the m-orchestrator recipe writes before launch: seeding after a
+    SEED lines the monitor recipe writes before launch: seeding after a
     close would mean a new run is starting.)
 
     A terminal `plan done|failed` is NOT a reset (M-1): closing a card is the
@@ -1190,7 +1335,7 @@ def stream_terminal_close(events_path: str | None = None,
 
     ``since_offset`` scopes the scan to bytes appended after the watcher started,
     which is what keeps a STALE close from an EARLIER phase in the same task
-    folder (one folder hosts research, then implement-plan) from ever reading as
+    folder (one folder hosts research, then implement) from ever reading as
     this session's ending. ``writer`` additionally requires the closing line's
     ``w`` attribution to match (R-39) — ``"agent"`` means "written by a script or
     an agent through status.sh, not inferred by this watcher".
@@ -1246,7 +1391,7 @@ def stream_badge_closed(events_path: str | None = None) -> bool:
     Orchestrator badge.
 
     Consulted once at startup to arm the continuation heal: one task folder
-    hosts several phases (research, then implement-plan) appending to one
+    hosts several phases (research, then implement) appending to one
     ``events.jsonl``, so the stream can END on an EARLIER phase's
     ``complete done`` — which a replaying dashboard shows as a closed run while
     THIS phase's loops are visibly running. Arming ``run_complete`` makes the
@@ -1327,9 +1472,15 @@ def exit_authorized(events_path: str | None = None,
     The EXIT question is strictly harder, because exiting self-heals nothing (no
     one restarts the watcher), so it is answered only by a ``w:"agent"``
     ``orchestrator complete done|failed`` line appended after this watcher's
-    startup baseline — i.e. by the driver/template that actually knows the
-    workflow returned (both templates emit it in ``closeRun``). The watcher's own
-    guess never stops it; see ABANDON_QUIET_SECS for the killed-session case.
+    startup baseline.
+
+    Who writes that line, since GD-D6: normally the DETERMINISTIC close (rungs
+    1-2 of :func:`poll_run_close`), which appends it by RUNNING ``status.sh``
+    precisely so this predicate needs no new case; optionally a driver typing
+    it as belt-and-braces (rung 3). Not the templates' ``closeRun`` — it emits
+    nothing at all, because the Workflow runtime has no Node API and every such
+    call silently no-ops (D-10). The watcher's own inference never stops it
+    either; see ABANDON_QUIET_SECS for the killed-session case.
     """
     return stream_terminal_close(events_path, since_offset, writer="agent")
 
@@ -1442,7 +1593,30 @@ def abandoned_agents(running: list, quiet_secs: float, idle_for=transcript_idle_
 
 
 def describe_result(info: dict, result) -> tuple[str, str, str]:
-    """Return (stage, state, detail) decision line for a finished agent.
+    """(stage, state, detail) for a finished agent, carrying its own summary (D-06).
+
+    The DERIVED verdict comes first and is byte-identical to what this module
+    has always written — it is what the loop decided, and it is the
+    deterministic half. A ``summary`` the agent's structured output actually
+    carried is APPENDED to it, single-lined and quote-stripped, inside the
+    existing 1 KB writer cap.
+
+    Why it belongs here: the agent's own account of what it did is the ONE
+    thing the journal records that the marker cannot derive, and it is exactly
+    what the mandated LAST `touch-status` line was carrying. Preserving it on
+    the derived line is what makes deleting that mandate information-neutral —
+    D-09 depends on this item, not the other way round (GD-D3: the deletion is
+    a correctness item, never a token-reduction one).
+    """
+    stage, state, detail = _result_decision(info, result)
+    summary = ""
+    if isinstance(result, dict) and isinstance(result.get("summary"), str):
+        summary = single_line(result["summary"])
+    return stage, state, f"{detail} — {summary}" if summary else detail
+
+
+def _result_decision(info: dict, result) -> tuple[str, str, str]:
+    """The derived decision line, without the agent's own summary (see above).
 
     Shape-driven: keyed on the structured-output fields the orchestrator
     script's schemas force, so the line reflects the actual returned data.
@@ -1535,7 +1709,10 @@ def result_stage_state(result) -> tuple[str, str]:
         # the loop retries (loop.workflow.js), so its row must not draw green.
         if r["done"]:
             files = r.get("files_changed", r.get("changed_files")) or []
-            return "done", r.get("summary") or f"{len(files)} changed files"
+            # D-06: the implementer's own summary was already preferred here;
+            # it is now single-lined and quote-stripped like every other string
+            # this module did not author.
+            return "done", single_line(r.get("summary")) or f"{len(files)} changed files"
         return "failed", "retrying"
     return "done", "finished"
 
@@ -1563,6 +1740,909 @@ def run_outcome(state: dict) -> str | None:
     if not effective:
         return None
     return "done" if all(v == "done" for v in effective) else "failed"
+
+
+# --------------------------------------------------------------------------
+# GD-D6 — THE LAYERED RUN CLOSE (D-07), plus the harness's own run stats, the
+# real per-agent death causes and the recovery command (D-08), and the post-run
+# reconcile against the snapshot (D-16).
+#
+# Four rungs, FIRST TO FIRE WINS, the rung recorded in the event's detail:
+#
+#   1. the run SNAPSHOT `<session>/workflows/<runId>.json` — written at the
+#      second the run ends; the authoritative status vocabulary
+#      (`completed|failed|killed`) plus the harness's own totals;
+#   2. the driver session's `<task-notification>` — `<summary>`, `<failures>`,
+#      `<recovery>`, `<usage>`;
+#   3. a driver-typed `touch-status orchestrator complete` — retained as
+#      redundant belt-and-braces, DEMOTED from MUST;
+#   4. the existing EXIT_QUIET_SECS / ABANDON_QUIET_SECS timeouts.
+#
+# Only rungs 1 and 2 are EMITTED here. Rung 3 is recognised but never written —
+# a driver's typed close is already the line route 1 of the exit protocol waits
+# for, so once it has landed the ladder has fired and this module must not add
+# a second terminal event beside it. Rung 4 is the loop's own window: unmoved.
+# The emitter writes THROUGH status.sh so the close keeps `w:"agent"` and route
+# 1's predicate is untouched (GD-D5) — the point of GD-D6 is that the close
+# stops being something a driver has to remember to type, not that the watcher
+# starts forging attributions. `killed` NEVER renders `done` (R-58 discipline
+# applied to the run close), and the rule that the watcher's own INFERENCE
+# cannot authorize an exit is NOT relaxed: a rung is recorded evidence written
+# by the harness, which is a different thing from a guess about quiet.
+#
+# Neither source is guaranteed and that is designed for, not worked around:
+# ~7% of runs never get a snapshot (2 of 28 measured), one recorded run has a
+# snapshot and no journal at all, and `<failures>` appears in 2 of 28
+# notifications. Absence is normal on every path below — never an error, never
+# a warning, and never a reason to weaken the timeout rungs.
+# --------------------------------------------------------------------------
+
+#: The one write path into events.jsonl for lines that must read as `w:"agent"`.
+STATUS_SH = os.path.join(ROOT, "status.sh")
+#: Rung names, as they appear in the close event's detail (rung 3 is a driver's
+#: own typed close: never emitted here, only RECOGNISED, so that "first rung
+#: wins" holds across all three landable rungs and not just the two polled).
+CLOSE_RUNGS = {1: "run snapshot", 2: "task notification", 3: "driver close"}
+#: How often the two deterministic rungs are polled, in seconds. The journal
+#: tail keeps its ~1 s cadence; this is a cheaper question asked slightly less
+#: often (a handful of stats plus O(bytes appended) of the driver session).
+CLOSE_POLL_SECS = max(1, _int_env("ORCH_CLOSE_POLL_SECS", 2))
+#: How far back the FIRST pass over a driver session file reads. A session
+#: transcript is unbounded (tens of MB), and for any run this watcher could
+#: still close, its launch record and its notification are near the end. A
+#: bounded head start is the difference between one cheap scan and re-reading a
+#: conversation; every later pass is incremental from the stored offset.
+SESSION_SCAN_MAX_BYTES = _int_env("ORCH_SESSION_SCAN_BYTES", 8 * 1024 * 1024)
+#: How long the session-dir glob is cached. Rotation (a `/clear` mid-run) adds
+#: a dir; nothing removes one, so a minute-stale answer costs nothing.
+SESSION_DIRS_TTL = 60.0
+#: `record.origin.kind` of the run-close notification. Matched on the KIND,
+#: never on the literal `<task-notification>` tag: that tag is the GENERIC
+#: background-task block (a polling `sleep` completing carries it too), so a
+#: substring test admits foreign tasks, while the kind is 35/35 with zero false
+#: positives (JSONL-EXTRACT-5).
+NOTIFY_KIND = "task-notification"
+#: The `<usage>` counters, in the order they are narrated.
+USAGE_TAGS = ("agent_count", "agents_done", "agents_error", "agents_skipped",
+              "agents_empty_result", "subagent_tokens", "tool_uses", "duration_ms")
+#: The blocks parsed out of a notification body.
+NOTIFY_TAGS = ("task-id", "status", "summary", "recovery", "failures", "usage")
+#: `plan/RESUME.md`'s recovery section, delimited so the rewrite can never
+#: touch a byte a human wrote around it (D-08c).
+RESUME_BEGIN = "<!-- touch:recovery -->"
+RESUME_END = "<!-- touch:recovery:end -->"
+#: How much `<recovery>` text is spliced into RESUME.md. The recorded blocks are
+#: one `Workflow({…})` call (hundreds of bytes); a body past this is not a
+#: resume command, and an unbounded splice into a file humans read is how a
+#: display surface becomes a payload surface.
+RECOVERY_MAX_CHARS = _int_env("ORCH_RECOVERY_MAX_CHARS", 4096)
+#: Env vars `status.sh` folds into the line it writes. The deterministic close
+#: declares none of them, so they are dropped from the child rather than
+#: inherited from whatever shell started the watcher (see emit_through_status).
+STATUS_ENV_DROP = ("ORCH_TITLE", "ORCH_PLANS_TOTAL", "ORCH_ROSTER")
+#: Stages that SET A CARD'S BADGE (monitoring.md §event schema): `plan` is the
+#: plan lifecycle and `complete` is its alias on the orchestrator card. A
+#: derived annotation — a death cause, a reconcile correction — is never
+#: allowed to land on one: the stage of an agent row is `role.split(":")[-1]`,
+#: i.e. arbitrary text out of a harness label, and a role that happened to end
+#: in `:plan:` would otherwise close a card the loop never closed. That is the
+#: fabricated badge R-58 forbids, arriving through a new door.
+RESERVED_STAGES = ("plan", "complete")
+
+_SESSION_DIRS: tuple = ()
+_SESSION_DIRS_AT = 0.0
+#: path -> {"ident", "offset", "partial"} — the incremental driver-session tail.
+_SESSION_SCAN: dict[str, dict] = {}
+#: The newest launch record naming THIS runId: {"task_id", "ts"}. Last-wins by
+#: RECORD timestamp, not by scan order: a resumed run re-uses its runId, so an
+#: older launch for the same run sits in the same (or another) session file and
+#: must never win over the resume that is actually running now.
+_LAUNCH: dict = {}
+#: task-id -> parsed notification blocks (bounded; a session holds few).
+_NOTIFICATIONS: dict[str, dict] = {}
+_NOTIFICATIONS_CAP = 32
+
+
+def snapshot_glob() -> list[str]:
+    """GD-D6's own glob: `<claude-root>/projects/*/*/workflows/<runId>.json`.
+
+    The plan names this glob literally, and it is the WIDEST of the three
+    sources below on purpose: 41% of recorded snapshots land in a different
+    session dir than their journal (C-E), and a session that rotated in mid-run
+    without recording a single further agent transcript leaves no
+    ``subagents/workflows/`` trace to find it by. Uncached — one two-level glob
+    per close poll — because rung 1 is snapshot APPEARANCE and a minute-stale
+    answer would be a minute-late close.
+    """
+    return sorted(glob.glob(os.path.join(WF_GLOB_ROOT, "*", "*", "workflows",
+                                         WF_NAME + ".json")))
+
+
+def run_session_dirs(now: float | None = None,
+                     ttl: float = SESSION_DIRS_TTL) -> list[str]:
+    """Every session dir that can hold this run's snapshot or driver transcript.
+
+    Three sources, all needed. The dir three levels above ``WF_DIR`` is the
+    session that LAUNCHED the run and is a candidate whether or not any glob
+    matches. The ``subagents/workflows/<runId>`` glob adds the sessions a
+    mid-run ``/clear`` rotated into — the same rotation ``agent_paths`` already
+    searches for transcripts — because the notification lands in whichever
+    session was current when the run ended. :func:`snapshot_glob` adds any
+    session that recorded a SNAPSHOT for this run without recording an agent
+    transcript, which the second source structurally cannot see; its driver
+    transcript is exactly where that run's notification will be.
+    """
+    global _SESSION_DIRS, _SESSION_DIRS_AT
+    now = time.time() if now is None else now
+    if _SESSION_DIRS and (now - _SESSION_DIRS_AT) < ttl:
+        return list(_SESSION_DIRS)
+    dirs: list[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in dirs and os.path.isdir(path):
+            dirs.append(path)
+
+    add(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.normpath(WF_DIR)))))
+    for path in glob.glob(os.path.join(WF_GLOB_ROOT, "*", "*", "subagents",
+                                       "workflows", WF_NAME)):
+        add(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+    for path in snapshot_glob():
+        add(os.path.dirname(os.path.dirname(path)))
+    _SESSION_DIRS = tuple(dirs)
+    _SESSION_DIRS_AT = now
+    return list(dirs)
+
+
+def snapshot_paths() -> list[str]:
+    """Where rung 1's `<runId>.json` could be — the session dirs, then the glob.
+
+    The glob is asked EVERY time (it is what finds a snapshot in a session this
+    watcher has no other trace of), and the derived candidates stay because a
+    session dir is knowable before its snapshot exists — which is what lets
+    :func:`snapshot_baseline` scope a resume's already-present copy out.
+    """
+    paths = [os.path.join(d, "workflows", WF_NAME + ".json")
+             for d in run_session_dirs()]
+    for path in snapshot_glob():
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def snapshot_baseline() -> dict:
+    """``{path: (size, mtime_ns)}`` for every snapshot copy present RIGHT NOW.
+
+    Rung 1 is snapshot APPEARANCE. A resumed run re-uses its runId, so the
+    PREVIOUS run's snapshot is already on disk before the resumed watcher
+    starts — this repository resumes constantly — and a rung that fired on mere
+    existence would close every resume the moment it began. The baseline scopes
+    it exactly the way ``events_baseline`` scopes the exit protocol: only a file
+    that was not there, or whose bytes moved, after this watcher started counts.
+    """
+    out = {}
+    for path in snapshot_paths():
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        out[path] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def read_run_snapshot(baseline: dict | None = None) -> dict | None:
+    """This run's snapshot, newest copy wins — or None when there is none.
+
+    A resumed run writes ONE SNAPSHOT PER OBSERVING SESSION and they disagree
+    (the same defect D-02 fixes on the aggregator side), so the later
+    ``timestamp`` wins here rather than whichever path the glob returned first.
+    ``baseline`` skips copies that have not changed since the watcher started
+    (see :func:`snapshot_baseline`); pass None to read whatever is on disk,
+    which is what ``--reconcile`` wants.
+    """
+    best = None
+    for path in snapshot_paths():
+        if baseline is not None:
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if baseline.get(path) == (st.st_size, st.st_mtime_ns):
+                continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                snap = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("runId") not in (None, WF_NAME):
+            continue
+        if best is None or str(snap.get("timestamp") or "") > str(best.get("timestamp") or ""):
+            best = snap
+    return best
+
+
+def snapshot_agents(snap: dict | None) -> list[dict]:
+    """The ``workflow_agent`` rows of ``workflowProgress[]`` (phases are not agents).
+
+    ``snapshot["agentCount"] != len(rows)`` is NORMAL, not a discrepancy to
+    report: the count is the harness's own tally over a run whose agents may
+    have been re-spawned, and the rows are what it kept. Nothing here treats a
+    mismatch as an error (SUBSTRATE-10).
+    """
+    rows = (snap or {}).get("workflowProgress")
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows
+            if isinstance(r, dict) and r.get("type") == "workflow_agent"]
+
+
+def run_close_state(status) -> str:
+    """`completed` -> done; `failed`, `killed` and anything unknown -> failed.
+
+    R-58 discipline applied to the run close. Two rules, both one-way: a
+    ``killed`` run must never render as a clean ``done``, and an UNKNOWN status
+    word is not a verdict either — it settles ``failed`` with the raw word kept
+    in the detail, because inventing green from a vocabulary we do not
+    recognise is exactly the fabricated badge R-58 exists to kill.
+    """
+    return "done" if str(status or "").strip().lower() == "completed" else "failed"
+
+
+def parse_agent_label(label) -> dict | None:
+    """``plan:role:attempt`` (the loop's own label grammar) -> classification fields.
+
+    Both harness suffixes are stripped first: ``~rN`` (its internal re-spawn of
+    the same attempt) and `` (retry N)``. A label that does not carry all three
+    parts, or whose attempt is not a number, returns None — a half-parsed label
+    would name a plan card that does not exist.
+    """
+    text = single_line(label)
+    if not text:
+        return None
+    text = text.split(" (")[0].split("~")[0].strip()
+    parts = text.split(":")
+    if len(parts) < 3 or not parts[-1].isdigit():
+        return None
+    role = ":".join(parts[1:-1])
+    return {"plan": parts[0], "role": role, "attempt": int(parts[-1]),
+            "stage": role.split(":")[-1]}
+
+
+def annotation_stage(info: dict | None, fallback: str = "watcher") -> str:
+    """The stage a DERIVED annotation may be written under (never a reserved one).
+
+    ``parse_agent_label`` derives ``stage`` from the harness's own label text,
+    so it is untrusted: a label like ``sp-a:gate:plan:2`` yields the reserved
+    stage ``plan``, and a `failed` line there would set the plan card's badge.
+    Cause lines and reconcile corrections describe an AGENT; the badge belongs
+    to the loop's own close predicate (GD-10) and to the run close (GD-D6).
+    A reserved stage is therefore rewritten to ``agent`` — the annotation still
+    names its plan card, its role and its attempt in the detail, it just cannot
+    be the thing that closes the card.
+    """
+    stage = (info or {}).get("stage") if info else None
+    stage = str(stage or "").strip()
+    if not stage:
+        return fallback
+    return "agent" if stage in RESERVED_STAGES else stage
+
+
+def record_text(record: dict) -> str:
+    """The text of a session record's message, list-content tolerated."""
+    content = (record.get("message") or {}).get("content", "")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "")
+                          for part in content if isinstance(part, dict))
+    return content if isinstance(content, str) else ""
+
+
+def notification_blocks(text: str) -> dict:
+    """A `<task-notification>` body split into its named blocks.
+
+    Only the blocks this module consumes are extracted, and every one of them
+    is optional: a notification with no `<failures>` is the NORMAL case (2 of 28
+    runs carry one), and a missing block simply means that output is not
+    emitted.
+    """
+    out: dict = {}
+    for tag in NOTIFY_TAGS:
+        match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+        if match:
+            out[tag.replace("-", "_")] = match.group(1).strip()
+    usage = out.get("usage")
+    if usage is not None:
+        counts = {}
+        for tag in USAGE_TAGS:
+            m = re.search(rf"<{tag}>\s*(-?\d+)\s*</{tag}>", usage)
+            if m:
+                counts[tag] = int(m.group(1))
+        out["usage"] = counts
+    failures = out.get("failures")
+    if failures is not None:
+        out["failures"] = parse_failure_lines(failures)
+    return out
+
+
+def parse_failure_lines(text: str) -> list[dict]:
+    """`[<label>] failed: <cause>` lines -> ``[{label, cause}]``.
+
+    Corroborating detail only (see :func:`failure_causes`). A line that does not
+    open with a bracketed label is kept with an empty label rather than dropped:
+    an unattributable cause is still a cause, and dropping it would be the one
+    thing worse than not naming the agent.
+    """
+    out = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^\[([^\]]*)\]\s*(?:failed\s*:)?\s*(.*)$", line)
+        if m:
+            out.append({"label": m.group(1).strip(), "cause": m.group(2).strip()})
+        else:
+            out.append({"label": "", "cause": line})
+    return out
+
+
+def driver_session_paths() -> list[str]:
+    """`<session>.jsonl` beside every session dir that holds this run."""
+    return [d + ".jsonl" for d in run_session_dirs()]
+
+
+def scan_driver_sessions() -> None:
+    """Read this run's driver session file(s) forward, for the launch and the close.
+
+    Records the newest launch `toolUseResult` naming this runId (which supplies
+    the ``taskId`` the notification is joined on — GD-M3's discriminator) and
+    every `<task-notification>` seen, keyed by its own task id.
+
+    Cost: the first pass over a path starts at most ``SESSION_SCAN_MAX_BYTES``
+    from its end and every later pass starts at the stored offset, so a live
+    driver conversation costs O(bytes appended) per poll — the same tailer
+    discipline the journal reader uses, including the torn-tail rule (nothing
+    past the last newline is consumed). A byte-level pre-filter keeps the JSON
+    parser off the 99.9% of a conversation that is neither record.
+
+    Read-only, like every other `~/.claude` access in this module.
+    """
+    for path in driver_session_paths():
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        ident = f"{st.st_dev}:{st.st_ino}"
+        seen = _SESSION_SCAN.get(path)
+        if seen is None or seen["ident"] != ident or st.st_size < seen["offset"]:
+            start = max(0, st.st_size - SESSION_SCAN_MAX_BYTES)
+            seen = {"ident": ident, "offset": start, "partial": start > 0}
+            _SESSION_SCAN[path] = seen
+        if st.st_size == seen["offset"]:
+            continue
+        try:
+            with open(path, "rb") as f:
+                f.seek(seen["offset"])
+                chunk = f.read()
+        except OSError:
+            continue
+        cut = chunk.rfind(b"\n")
+        if cut == -1:  # no complete line yet; leave the offset where it is
+            continue
+        body = chunk[:cut + 1]
+        seen["offset"] += cut + 1
+        if seen.pop("partial", False):
+            # We started mid-line to bound the first pass: that fragment is not
+            # a record, and json.loads would only fail on it anyway.
+            nl = body.find(b"\n")
+            body = body[nl + 1:] if nl != -1 else b""
+        for raw in body.split(b"\n"):
+            if not raw:
+                continue
+            if b"runId" not in raw and b"task-notification" not in raw:
+                continue
+            try:
+                record = json.loads(raw.decode(errors="replace"))
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(record, dict):
+                _absorb_session_record(record)
+
+
+def _absorb_session_record(record: dict) -> None:
+    """One driver-session record -> the launch join and the notification store."""
+    ts = str(record.get("timestamp") or "")
+    result = record.get("toolUseResult")
+    if isinstance(result, dict) and result.get("runId") == WF_NAME:
+        task_id = result.get("taskId")
+        if task_id and ts >= str(_LAUNCH.get("ts") or ""):
+            _LAUNCH["task_id"] = str(task_id)
+            _LAUNCH["ts"] = ts
+    origin = record.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") == NOTIFY_KIND:
+        blocks = notification_blocks(record_text(record))
+        task_id = blocks.get("task_id")
+        if not task_id:
+            return
+        blocks["ts"] = ts
+        _NOTIFICATIONS[task_id] = blocks
+        while len(_NOTIFICATIONS) > _NOTIFICATIONS_CAP:
+            _NOTIFICATIONS.pop(next(iter(_NOTIFICATIONS)))
+
+
+def run_notification() -> dict | None:
+    """This run's notification, joined by task id — or None.
+
+    The join is the launch record's ``taskId``, never the tag and never "the
+    newest notification in the file": one driver session runs many background
+    tasks, and adopting a foreign one would close a live run on a stranger's
+    verdict. A notification OLDER than the launch it would be joined to is
+    refused for the same reason a stale snapshot is (a resume re-uses the
+    runId, so the previous run's notification is still on disk).
+    """
+    task_id = _LAUNCH.get("task_id")
+    if not task_id:
+        return None
+    note = _NOTIFICATIONS.get(task_id)
+    if note is None:
+        return None
+    if str(note.get("ts") or "") < str(_LAUNCH.get("ts") or ""):
+        return None
+    return note
+
+
+def emit_through_status(plan: str, stage: str, state_word: str,
+                        detail: str) -> bool:
+    """Append ONE event by RUNNING status.sh, so the line reads `w:"agent"` (GD-D5).
+
+    The run close is the one line this module must not write itself. Route 1 of
+    the exit protocol is answered only by a `w:"agent"` close, and forging that
+    attribution with a raw append would fork the writer set the attribution
+    exists to keep honest — the two ledgerless hand-appended lines on disk are
+    the cautionary example (MONITORING-5). So the deterministic emitter shells
+    out to the same script an agent uses: one flock, one cap, one attribution,
+    and `status.sh` stays the only write path into `events.jsonl`.
+
+    Best-effort like every other write here: a missing script, a missing bash
+    or a non-zero exit warns on stderr and returns False. The caller then
+    leaves the close to the timeout rungs, which is precisely what they are for.
+    """
+    if not os.path.isfile(STATUS_SH):
+        print(f"decision_watcher: cannot emit the run close: {STATUS_SH} is missing",
+              file=sys.stderr, flush=True)
+        return False
+    # Say exactly what this call means to say and nothing the shell it was
+    # started from happened to export. `status.sh` FOLDS ORCH_TITLE,
+    # ORCH_PLANS_TOTAL and (GD-D11) ORCH_ROSTER into every line it writes, and
+    # a watcher inherits the driver's environment — so an inherited
+    # ORCH_PLANS_TOTAL would have the deterministic close silently re-declaring
+    # a denominator, or renaming the orchestrator card, as a side effect of the
+    # shell it was launched from. The output of a deterministic emitter is a
+    # pure function of recorded data; these three are not recorded data.
+    env = {k: v for k, v in os.environ.items() if k not in STATUS_ENV_DROP}
+    env["ORCH_STATE_DIR"] = STATE_DIR
+    try:
+        proc = subprocess.run(
+            ["bash", STATUS_SH, plan, stage, state_word,
+             cap_detail(single_line(detail))],
+            env=env, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"decision_watcher: cannot run {STATUS_SH}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    if proc.returncode != 0:
+        print(f"decision_watcher: {STATUS_SH} exited {proc.returncode}: "
+              f"{(proc.stderr or '').strip()}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def failure_causes(snap: dict | None, note: dict | None) -> list[dict]:
+    """Per-agent death causes: STRUCTURED first, the notification corroborating.
+
+    The primary source is the snapshot's own `workflowProgress[]` — a row with
+    ``state:"error"`` and its ``error`` string (×23 on the recorded corpus),
+    with ``lastAttemptReason`` (×8) carried alongside. The notification's
+    `<failures>` block is CORROBORATION only: it fires on 2 of 28 recorded runs,
+    so a reader that made it primary would report "stale" for the other 26
+    (JSONL-EXTRACT-4 / CC-SESSIONS-9 — the run-2 correction to D-08 as
+    written). When both name the same label the structured cause wins and the
+    prose is dropped; when only the prose exists it is used as-is.
+
+    Returns one entry per DEAD agent, each carrying its label, its parsed
+    plan/role/attempt when the label is well-formed, the agentId when the
+    snapshot knew it, and the cause text. Absence of either source yields an
+    empty list — the normal case, and not an error.
+    """
+    causes: dict[str, dict] = {}
+    for row in snapshot_agents(snap):
+        error = single_line(row.get("error"))
+        if not error and row.get("state") != "error":
+            continue
+        label = single_line(row.get("label"))
+        reason = single_line(row.get("lastAttemptReason"))
+        cause = error or reason or "agent ended in state error"
+        if error and reason:
+            cause = f"{error} (last attempt: {reason})"
+        entry = {"label": label, "cause": cause, "source": "snapshot",
+                 "agent_id": row.get("agentId") or ""}
+        entry.update(parse_agent_label(label) or {})
+        causes[label or entry["agent_id"]] = entry
+    for item in (note or {}).get("failures") or []:
+        label = single_line(item.get("label"))
+        if label and label in causes:  # already reported, structurally
+            continue
+        entry = {"label": label, "cause": single_line(item.get("cause")),
+                 "source": "notification", "agent_id": ""}
+        entry.update(parse_agent_label(label) or {})
+        causes.setdefault(label or f"\0unlabelled\0{len(causes)}", entry)
+    return list(causes.values())
+
+
+def emit_failure_causes(state: dict, causes: list[dict]) -> int:
+    """One `<stage> failed` line per dead agent, once (D-08b). Returns the count.
+
+    This is what turns a 529-killed agent from a row that merely went ``stale``
+    (a shape derived from silence) into one that reads *failed, with a cause*.
+    It writes STAGE events only: plan badges are settled by GD-10's predicate
+    and the settle pass, and a cause line must never be the thing that closes a
+    card — that would be exactly the fabricated badge R-58 forbids, arriving
+    through a new door. ``annotation_stage`` is what ENFORCES that (the stage
+    comes out of a harness label and a reserved word in one would otherwise set
+    a badge); it is not left to the labels happening to be well-behaved.
+
+    Idempotent by label, checkpointed, so a restart or a second poll after the
+    snapshot changed re-emits nothing.
+    """
+    reported = set(state.setdefault("failure_causes", []))
+    emitted = 0
+    for cause in causes:
+        key = cause.get("label") or cause.get("agent_id") or cause.get("cause")
+        if not key or key in reported:
+            continue
+        reported.add(key)
+        info = None
+        if cause.get("plan") and cause.get("role"):
+            info = {k: cause[k] for k in ("plan", "role", "attempt", "stage")}
+        who = (f"{info['role']} #{info['attempt']}" if info
+               else (cause.get("label") or "agent"))
+        extra = None
+        if cause.get("agent_id"):
+            extra = {"agent": agent_block(cause["agent_id"], info, "failed")}
+        emit(annotation_stage(info), "failed",
+             f"{who} died: {cause['cause']} (from the {cause['source']})",
+             plan=info["plan"] if info else "orchestrator", extra=extra)
+        emitted += 1
+    state["failure_causes"] = sorted(reported)
+    return emitted
+
+
+def emit_run_stats(state: dict, note: dict | None) -> bool:
+    """The harness's own `<usage>` counts, once, on the orchestrator card (D-08a).
+
+    Carried under a new top-level ``run`` key — additive, and readers that do
+    not know it ignore it (GD-D14). It is a CROSS-CHECK, never a substitute:
+    the folded live totals stay the in-flight source, because they are computed
+    from the transcripts' own `message.usage` rows while these are the harness's
+    display figures for a different denominator (`subagent_tokens` excludes the
+    driver, GD-11 forbids substituting `harnessTotals` for a computed total).
+
+    Deliberately NOT written under the reserved ``complete`` stage: that stage
+    is an alias of ``plan`` for badge purposes, so an `info` there would reopen
+    the badge the close just set and cancel the exit protocol's route 1.
+    """
+    usage = (note or {}).get("usage")
+    if not usage or state.get("run_stats_emitted"):
+        return False
+    parts = [f"{usage[tag]} {tag.replace('_', ' ')}"
+             for tag in USAGE_TAGS if tag in usage]
+    emit("run", "info", "harness run stats: " + ", ".join(parts),
+         extra={"run": dict(usage)})
+    state["run_stats_emitted"] = True
+    return True
+
+
+def update_resume_recovery(state: dict, note: dict | None) -> bool:
+    """Rewrite `plan/RESUME.md`'s recovery section verbatim from `<recovery>` (D-08c).
+
+    The harness prints the EXACT `Workflow({…})` call that resumes the run, and
+    a hand-copied version of it is the thing that goes stale first in a recovery
+    procedure. Written between two HTML-comment markers, so:
+
+      * nothing outside the markers is ever touched — the rest of RESUME.md is
+        prose a human wrote;
+      * a file WITHOUT the markers gets the section appended, once;
+      * a file that does not exist is not created. `touch-run bind` (D-13)
+        renders RESUME.md; this item owns only the recovery section.
+
+    Idempotent on the recovery TEXT (checkpointed), so a re-poll rewrites
+    nothing. Refuses to write inside a plugin cache for the same reason every
+    other writer here does.
+
+    The body is harness text going verbatim into a file humans read, so three
+    cheap bounds apply before the splice — the same posture the 1 KB detail cap
+    takes, for the same reason (the bytes travel through renderers, not only
+    through JSON):
+
+      * a body carrying either marker is REFUSED outright, because the next
+        rewrite splices on ``find(RESUME_END)`` and an injected copy would cut
+        the section in the wrong place, eating whatever a human wrote between;
+      * the fence is widened past the longest backtick run in the body, so a
+        recovery call containing ``` cannot terminate its own code block;
+      * the body is capped at ``RECOVERY_MAX_CHARS`` with the cut marked.
+    """
+    recovery = (note or {}).get("recovery")
+    if not recovery or state.get("resume_recovery") == recovery:
+        return False
+    path = os.path.join(STATE_DIR, "plan", "RESUME.md")
+    if not os.path.isfile(path) or in_plugin_cache(path):
+        return False
+    body = recovery.strip()
+    if RESUME_BEGIN in body or RESUME_END in body:
+        print("decision_watcher: refusing to splice a <recovery> block that "
+              "carries this section's own markers", file=sys.stderr, flush=True)
+        state["resume_recovery"] = recovery   # refused once, refused for good
+        return False
+    if len(body) > RECOVERY_MAX_CHARS:
+        body = body[:RECOVERY_MAX_CHARS] + "\n...[truncated by decision_watcher]"
+    runs = [len(m) for m in re.findall(r"`+", body)]
+    fence = "`" * max(3, (max(runs) if runs else 0) + 1)
+    section = (f"{RESUME_BEGIN}\n"
+               f"<!-- written by decision_watcher from the run's own "
+               f"<recovery> block; edits here are overwritten -->\n"
+               f"{fence}\n{body}\n{fence}\n{RESUME_END}\n")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return False
+    start, end = text.find(RESUME_BEGIN), text.find(RESUME_END)
+    if start != -1 and end > start:
+        new = text[:start] + section + text[end + len(RESUME_END):].lstrip("\n")
+    else:
+        new = text.rstrip("\n") + "\n\n## Recovery (verbatim, from the harness)\n\n" + section
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(new)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"decision_watcher: cannot update {path}: {exc}",
+              file=sys.stderr, flush=True)
+        return False
+    state["resume_recovery"] = recovery
+    return True
+
+
+def close_evidence(snap: dict | None, note: dict | None) -> tuple[int, str, str] | None:
+    """``(rung, status, summary)`` for the first rung that has landed, or None.
+
+    Rung 1 (the snapshot) wins a tie: its status vocabulary is the harness's own
+    and it exists at the second the run ended, where the notification is the
+    driver session's account of the same fact.
+    """
+    if snap is not None:
+        return 1, str(snap.get("status") or ""), single_line(snap.get("summary"))
+    if note is not None and note.get("status"):
+        return 2, str(note.get("status") or ""), single_line(note.get("summary"))
+    return None
+
+
+def emit_run_extras(state: dict, snap: dict | None, note: dict | None) -> int:
+    """The three harness-derived outputs of D-08, in reader order. Count written.
+
+    Kept SEPARATE from the close, and polled for as long as the watcher lives,
+    because the two facts do not land together. Rung 1 fires within
+    ``CLOSE_POLL_SECS`` of the snapshot appearing, while the
+    `<task-notification>` is a different record in a different file appended by
+    a different writer — nothing orders them. A version of this that stopped
+    looking the moment the run closed would drop `<usage>` and `<recovery>`
+    every time the notification was one beat late, which is exactly the stale
+    hand-copied resume command D-08(c) exists to kill. All three emitters are
+    checkpoint-idempotent, so asking again costs a stat and writes nothing.
+    """
+    written = emit_failure_causes(state, failure_causes(snap, note))
+    if emit_run_stats(state, note):
+        written += 1
+    if update_resume_recovery(state, note):
+        emit("watcher", "info",
+             "plan/RESUME.md recovery section updated from the run's own <recovery>")
+        written += 1
+    return written
+
+
+def poll_run_close(state: dict, baseline: dict,
+                   events_baseline: int = 0) -> tuple[bool, int]:
+    """One pass of the GD-D6 close plane. ``(closed_now, extras_written)``.
+
+    Reads both recorded sources once, emits the death causes / run stats /
+    recovery section that either of them supports, and THEN — if the run is not
+    closed yet — the terminal `orchestrator complete done|failed`, which is the
+    run's final word and the line route 1 of the exit protocol waits for. That
+    order is deliberate: the causes happened before the end, and the close is
+    the last thing a reader should see.
+
+    Rung 3 is consulted here too, so "first rung wins" is true of all three
+    landable rungs and not just of the two this module polls: a driver that
+    still types its belt-and-braces close has fired the ladder, and emitting a
+    second terminal event beside it would be the duplicate close this module
+    exists to remove — worse, a disagreement between the two would flip the
+    badge on last-event-wins.
+
+    With no rung landed this function writes NOTHING and the run falls through
+    to the timeout rungs exactly as it always has.
+    """
+    snap = read_run_snapshot(baseline)
+    scan_driver_sessions()
+    note = run_notification()
+    extras = emit_run_extras(state, snap, note)
+    if state.get("run_closed_rung"):
+        return False, extras
+    evidence = close_evidence(snap, note)
+    if evidence is None:
+        return False, extras
+    if stream_terminal_close(EVENTS, events_baseline, writer="agent"):
+        # Rung 3 landed first: record it as the rung that fired and do not
+        # compete. Asked HERE, not at the top, because it reads events.jsonl
+        # and this module keeps stream scans off the poll path (the same rule
+        # exit_precheck follows) — a run with no rung 1/2 evidence was never
+        # going to emit anything, so the question would cost a re-read of a
+        # growing multi-writer file every two seconds to change nothing.
+        state["run_closed_rung"] = CLOSE_RUNGS[3]
+        return False, extras
+    rung, status, summary = evidence
+    close_state = run_close_state(status)
+    detail = (f"{WF_NAME} {single_line(status) or 'ended'} "
+              f"(close rung {rung}: {CLOSE_RUNGS[rung]})")
+    if summary:
+        detail += f" — {summary}"
+    if not emit_through_status("orchestrator", "complete", close_state, detail):
+        return False, extras
+    state["run_closed_rung"] = CLOSE_RUNGS[rung]
+    state["run_complete"] = close_state
+    return True, extras
+
+
+def reconcile(state: dict, snap: dict) -> int:
+    """D-16: the post-run snapshot as an oracle. Returns the corrections emitted.
+
+    Two holes the live tail cannot close, both recorded on disk:
+
+      * an agent whose transcript had not flushed when its journal entry was
+        read classifies as nothing and renders as ``agentId[:8]`` forever;
+      * a run whose watcher never ran at all (5 of 12 recorded task folders)
+        has no rows and no token totals.
+
+    Both are corrected from the snapshot's `workflowProgress[]` — which agents
+    existed, what state each ended in, what its label was. Two caveats are
+    encoded rather than commented: ``promptPreview``/``resultPreview`` are
+    TRUNCATED and are never parsed for markers (the marker is re-read from the
+    agent's real transcript, or the LABEL is parsed, and nothing else), and
+    ``agentCount != len(workflowProgress)`` is normal.
+
+    Token totals are re-derived from the transcripts by the ordinary flush, not
+    copied from the snapshot's own ``tokens`` figure: GD-11 forbids substituting
+    the harness's display number for a computed one, and the snapshot is used
+    here only to learn WHICH agents to look at.
+
+    Idempotent: every corrected agent is checkpointed, so a second run of
+    ``--reconcile`` emits nothing.
+    """
+    reconciled = set(state.setdefault("reconciled", []))
+    emitted = 0
+    for row in snapshot_agents(snap):
+        agent_id = row.get("agentId")
+        if not agent_id or agent_id in reconciled:
+            continue
+        known = state["agents"].get(agent_id)
+        lost_tokens = not NO_TOKENS and agent_id not in state.get("tok_emitted", {})
+        if known and not lost_tokens:
+            continue
+        # The real transcript's marker first (the authoritative source), then
+        # the snapshot's own label. NEVER promptPreview: it is truncated, and a
+        # marker cut in half classifies an agent onto a plan card that does not
+        # exist (SUBSTRATE-10).
+        info = known or classify(agent_id, retries=1) or parse_agent_label(row.get("label"))
+        row_state = {"done": "done", "error": "failed"}.get(row.get("state"), "stale")
+        totals = token_totals(agent_id)
+        # annotation_stage, and here it matters MORE than in emit_failure_causes:
+        # these rows carry `done`/`failed`, so a label ending in a reserved
+        # stage would close a plan card — or the run — from a post-run pass.
+        emit(annotation_stage(info), row_state,
+             (f"{info['role']} #{info['attempt']}" if info
+              else f"agent {agent_id}")
+             + f": reconciled from the run snapshot ({single_line(row.get('state')) or 'unknown'})",
+             plan=info["plan"] if info else "orchestrator",
+             extra={"agent": agent_block(agent_id, info, row_state,
+                                         tokens=tokens_field(totals))})
+        flush_agent_tokens(state, agent_id, info, row_state=row_state,
+                           totals=totals)
+        if info:
+            state["agents"][agent_id] = info
+        reconciled.add(agent_id)
+        emitted += 1
+    state["reconciled"] = sorted(reconciled)
+    return emitted
+
+
+def state_stamp() -> tuple | None:
+    """``(size, mtime_ns)`` of the checkpoint, or None if there is not one yet."""
+    try:
+        st = os.stat(STATE)
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def pid_alive(pid) -> bool:
+    """Is ``pid`` a live process? Stdlib, no /proc dependency.
+
+    ``os.kill(pid, 0)`` sends nothing and only asks the kernel whether the
+    process exists; ``EPERM`` means it exists and is someone else's. A recycled
+    pid reads as alive — deliberately the safe direction here, since the only
+    consequence is that a checkpoint write is withheld.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def reconcile_main() -> None:
+    """`decision_watcher.py --reconcile` — one pass, then stop (D-16).
+
+    A **post-run** pass, and the checkpoint is what makes that structural
+    rather than merely documented: `.watcher-state.json` has exactly one writer
+    at a time. Two questions are asked, in order, and either one withholds the
+    save:
+
+      * does the checkpoint name a LIVE pid other than this process? The daemon
+        records its own on every save, so this is the deterministic answer —
+        a recycled pid reads as live, which is the safe direction;
+      * did the file move under the pass anyway? The mtime stamp catches a
+        writer this build did not record a pid for (an older checkpoint).
+
+    The corrections already emitted stand — `events.jsonl` is append-only and
+    flock'd — and only the checkpoint write is withheld, which costs at most a
+    re-emit on a later reconcile.
+    """
+    state = load_state()
+    state.setdefault("agents", {})
+    state.setdefault("running", [])
+    state.setdefault("tok_emitted", {})
+    state.setdefault("tok_tick_at", {})
+    stamp = state_stamp()
+    for warning in _CFG_WARNINGS:
+        print(warning, file=sys.stderr, flush=True)
+    snap = read_run_snapshot()
+    if snap is None:
+        print(f"decision_watcher --reconcile: no run snapshot for {WF_NAME} "
+              f"(a snapshot is not guaranteed — nothing to reconcile)")
+        return
+    rows = snapshot_agents(snap)
+    emitted = reconcile(state, snap)
+    owner = state.get("pid")
+    live = pid_alive(owner) and int(owner) != os.getpid()
+    if not live and state_stamp() == stamp:
+        save_state(state)
+    else:
+        print(f"decision_watcher --reconcile: a live watcher owns "
+              f"{os.path.basename(STATE)}"
+              + (f" (pid {owner})" if live else " (it changed during this pass)")
+              + "; checkpoint NOT written", file=sys.stderr, flush=True)
+    print(f"decision_watcher --reconcile: {WF_NAME} {snap.get('status')} — "
+          f"{len(rows)} snapshot agent row(s), {emitted} correction(s) emitted")
 
 
 def read_new_lines(path: str, offset: int) -> tuple[list[str], int]:
@@ -1642,6 +2722,12 @@ def save_state(state: dict) -> None:
 
 
 def main() -> None:
+    if RECONCILE:
+        # D-16: a one-shot corrective pass, not a daemon. It shares every
+        # reader above and writes through the same emit(), so nothing about the
+        # live path has a second implementation.
+        reconcile_main()
+        return
     state = load_state()
     state.setdefault("agents", {})
     state.setdefault("running", [])
@@ -1657,17 +2743,26 @@ def main() -> None:
     state.setdefault("last_result_ok", {})
     state.setdefault("last_plan", None)
     state.setdefault("run_complete", None)
+    # Who owns this checkpoint. Read by `--reconcile`, which is a POST-run pass
+    # and must not rewind a live daemon's offsets; nothing else consumes it, and
+    # a reader that does not know the key ignores it like every other.
+    state["pid"] = os.getpid()
     for cached in state["agents"].values():  # pre-upgrade cache entries lack "stage"
         cached.setdefault("stage", cached.get("role", "work").split(":")[-1])
     # Session scope for the R-40 self-exit: every `complete` event already in the
     # stream belongs to an EARLIER phase of this task folder (one folder hosts
-    # research, then implement-plan), so only bytes appended past this baseline
+    # research, then implement), so only bytes appended past this baseline
     # can end THIS watcher's run. Recorded before the first emit so the
     # heartbeat itself stays outside the window.
     try:
         events_baseline = os.path.getsize(EVENTS)
     except OSError:
         events_baseline = 0
+    # GD-D6 rung 1 is snapshot APPEARANCE, so the copies already on disk are
+    # this run's PREVIOUS attempt (a resume re-uses the runId) and must not
+    # close it. Same scoping, same reason, as events_baseline above.
+    close_baseline = snapshot_baseline()
+    close_poll_at = 0.0
     # Continuation heal: a wf_dir change resets this checkpoint fresh
     # (run_complete=None), so a stale ``complete done`` left by an EARLIER
     # phase in the same task folder would never be healed — the badge (and
@@ -1685,7 +2780,7 @@ def main() -> None:
     # every already-tracked agent and emit a quiet delta for whatever the
     # emitted totals are missing (normally just the cache-write component).
     backfill_at = time.time()
-    for aid, prev in list(state["tok_emitted"].items()):
+    for aid, prev in ([] if NO_TOKENS else list(state["tok_emitted"].items())):
         tin, tcached, twrite, tout = agent_tokens(aid)
         # For an agent still in flight this backfill IS a read, so it opens the
         # cadence window like any other (GD-D: the window restarts on the READ).
@@ -1861,7 +2956,7 @@ def main() -> None:
                             # its last chance to state a total. One transcript
                             # read serves both the row's cumulative and the
                             # flushing delta line below.
-                            o_totals = agent_tokens(other)
+                            o_totals = token_totals(other)
                             # D7: state the CLAMPED baseline, never the raw
                             # reading. agent_paths() unions transcript COPIES,
                             # so a pruned or rotated copy can shrink the union —
@@ -1870,14 +2965,15 @@ def main() -> None:
                             # agent's cumulative. A raw reading there would be
                             # the one place a counter goes backwards and GD-C's
                             # "delta sum == last cumulative" equality breaks.
-                            _, o_base = token_deltas(
-                                state["tok_emitted"].get(other, {}), *o_totals)
+                            o_base = (None if o_totals is None else token_deltas(
+                                state["tok_emitted"].get(other, {}), *o_totals)[1])
                             emit(oinfo["stage"], "stale",
                                  f"{oinfo['role']} #{oinfo['attempt']} abandoned — no result, "
                                  f"{info['role']} attempt {info['attempt']} respawned",
                                  ts=ts0, plan=oinfo["plan"],
                                  extra={"agent": agent_block(
-                                     other, oinfo, "stale", tokens=dict(o_base),
+                                     other, oinfo, "stale",
+                                     tokens=None if o_base is None else dict(o_base),
                                      runtime=elapsed_str(first_ts(other), last_ts(other)))})
                             flush_agent_tokens(state, other, oinfo, ts=ts0,
                                                totals=o_totals)
@@ -1962,15 +3058,13 @@ def main() -> None:
                         # LAST result was a failure, so a verdict-less plan can
                         # close "done — no verdict" instead of a fabricated failed.
                         state["last_result_ok"][info["plan"]] = sst != "failed"
-                        a_totals = agent_tokens(agent_id)
-                        a_tin, a_tcached, a_twrite, a_tout = a_totals
+                        a_totals = token_totals(agent_id)
                         emit(info["stage"], sst,
                              f"{info['role']} #{info['attempt']}: {sdetail}",
                              ts=tsN, plan=info["plan"],
                              extra={"agent": agent_block(
                                  agent_id, info, sst,
-                                 tokens={"in": a_tin, "out": a_tout,
-                                         "cached": a_tcached, "cache_write": a_twrite},
+                                 tokens=tokens_field(a_totals),
                                  runtime=elapsed_str(first_ts(agent_id), tsN))})
                         if isinstance(result, dict) and ("passed" in result or "approved" in result):
                             ok = bool(result.get("passed") or result.get("approved"))
@@ -2054,18 +3148,20 @@ def main() -> None:
             # nor a flush, so a stale-closed agent's usage survived only inside
             # quiet ticks — 15 of 167 agents and 9.14% of the measured run's
             # input tokens, invisible to any replay that folds those away.
-            a_totals = agent_tokens(aid)
+            a_totals = token_totals(aid)
             # D7 again (see the respawn stale close above): the clamped
             # baseline, so this row can never be the event that lowers an
             # agent's cumulative.
-            _, a_base = token_deltas(state["tok_emitted"].get(aid, {}), *a_totals)
+            a_base = (None if a_totals is None else token_deltas(
+                state["tok_emitted"].get(aid, {}), *a_totals)[1])
             emit(ainfo["stage"] if ainfo else "watcher", "stale",
                  (f"{ainfo['role']} #{ainfo['attempt']}" if ainfo else f"agent {aid}")
                  + " abandoned — no result, no transcript activity for "
                    f"{ABANDON_QUIET_SECS}s",
                  plan=ainfo["plan"] if ainfo else "orchestrator",
                  extra={"agent": agent_block(
-                     aid, ainfo, "stale", tokens=dict(a_base),
+                     aid, ainfo, "stale",
+                     tokens=None if a_base is None else dict(a_base),
                      runtime=elapsed_str(first_ts(aid), last_ts(aid)))})
             flush_agent_tokens(state, aid, ainfo, totals=a_totals)
         if gone:
@@ -2112,11 +3208,21 @@ def main() -> None:
                     emit("plan", st,
                          close_detail(plan, state["decisive"],
                                       f"run {outcome}: settling open plan"), plan=plan)
-                # Only when the VERDICT actually moved: adopting the stream's
-                # closes can re-derive the same outcome the badge already carries,
-                # and re-announcing it would be one more duplicate close of
-                # exactly the kind m-3 exists to remove.
-                if state.get("run_complete") != outcome:
+                # The run-level announcement, under TWO guards.
+                #
+                # (1) GD-D6, first rung wins: once a DETERMINISTIC rung has
+                # closed the run with the harness's own verdict, this pass may
+                # still settle open plan cards but must never re-announce the
+                # run. Its verdict is an INFERENCE over the journal, and a
+                # `killed` run whose plans all resulted would be folded to
+                # `done` by it — exactly the fabricated badge R-58 exists to
+                # kill, arriving through a new door.
+                #
+                # (2) Only when the VERDICT actually moved: adopting the
+                # stream's closes can re-derive the same outcome the badge
+                # already carries, and re-announcing it would be one more
+                # duplicate close of exactly the kind m-3 exists to remove.
+                if not state.get("run_closed_rung") and state.get("run_complete") != outcome:
                     emit("complete", outcome,
                          f"run {outcome}: {len(plans)} plan(s) "
                          + ("all green" if outcome == "done" else "closed with failures")
@@ -2126,6 +3232,29 @@ def main() -> None:
                 save_state(state)
         else:
             quiet_since = None
+        # GD-D6 rungs 1 and 2: the DETERMINISTIC run close. Polled here, after
+        # the settle pass and before the exit protocol, because what it writes
+        # is the very line route 1 below waits for — a `w:"agent"`
+        # `orchestrator complete`, appended through status.sh, that no driver
+        # had to remember to type. It writes nothing at all until the harness
+        # has actually recorded the run's end, so a run with neither rung falls
+        # through to the timeout rungs exactly as it always did.
+        #
+        # It keeps being polled AFTER the close, too, and that is not an
+        # oversight: the close is one-shot but the notification-derived outputs
+        # (D-08's run stats and RESUME.md recovery section) are a different
+        # record in a different file, which routinely lands a beat later than
+        # the snapshot that already closed the run. They are idempotent, so
+        # asking again until the watcher exits costs a stat and writes nothing.
+        if time.time() >= close_poll_at:
+            close_poll_at = time.time() + CLOSE_POLL_SECS
+            closed, extras = poll_run_close(state, close_baseline, events_baseline)
+            if closed:
+                emit("watcher", "info",
+                     f"run close detected deterministically "
+                     f"(rung: {state['run_closed_rung']})")
+            if closed or extras:
+                save_state(state)
         # R-40 run-close protocol. Two routes, deliberately asymmetric, because
         # exiting is irreversible (nothing restarts a watcher) while a wrong badge
         # self-heals on the next spawn:
@@ -2167,7 +3296,11 @@ def main() -> None:
                 save_state(state)
                 return
         tick += 1
-        if state["running"]:  # every poll tick (~1s): live token deltas
+        # D-05: with --no-tokens the live tick is not throttled, it is absent —
+        # no transcript read, no delta line. Spawns, results and decisions are
+        # untouched, so the event plane still works; only the second
+        # implementation of `ingest.rollup` goes quiet.
+        if state["running"] and not NO_TOKENS:  # every poll tick (~1s): live token deltas
             # Live token deltas for in-flight agents (quiet: counters only, no log line).
             dirty = False
             now = time.time()

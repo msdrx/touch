@@ -5,138 +5,147 @@
 </p>
 
 Touch is a Claude Code plugin for **watching your agents work**. When a session
-spawns subagents — a research pass, an implementation loop, a review fleet — the
-terminal shows you almost nothing about them. Touch puts that run on a local web
+spawns subagents, the terminal shows you almost nothing about them. Touch puts that run on a local web
 page: which plans are running, what stage each loop is in, what the gates
 decided, and what it all costs in tokens.
 
-> **Alpha — v0.2.1.** Touch is early software: incomplete, moving, and rough in
+It is read-only for now. Future releases will "touch" the agent.
+
+> **Alpha — v0.2.2.** Touch is early software: incomplete, moving, and rough in
 > places. Interfaces, layout and command behaviour can change between releases
 > without a migration path.
 
-- **Local only.** Both servers bind `127.0.0.1` and print a URL carrying a
-  per-boot token; every route but `/health` needs it.
-- **It never writes to `~/.claude`.** It reads what the CLI already wrote, and
-  keeps its own history in `.touch/` inside your project. The one thing it
-  writes for you is Claude Code's auto memory — and it does that by pointing the
-  CLI at `<project>/.touch/memory` instead of reaching into `~/.claude`.
-- **One write plane, off by default.** The dashboard can edit those memory
-  files, but only when started with `--allow-memory-write`; everything else it
-  serves is read-only.
-- **It renders no button it cannot honour.** No session verb ships: nothing here
-  starts, ends or re-invokes an agent loop.
+## Quick start
 
-## The six commands
+### 1. Install it in Claude Code
 
-They land on your `PATH` when the plugin is enabled, and live in
-`plugin/touch/bin/` otherwise.
+Worth a minute first: the plugin's own [README](plugin/touch/README.md) is the
+full disclosure of what Touch reads, writes and serves.
 
-| command | what it does |
-|---|---|
-| `touch-monitor` | serves the dashboard (port 8931): live plan cards, stages, gate verdicts, token counters — and, at `/memory`, an editor over the memory files Claude Code loads in this project (reads always, writes only with `--allow-memory-write`) |
-| `touch-watcher` | daemon that turns a run's journal into dashboard events — this is what makes the page move |
-| `touch-status` | appends one progress event; the line a script or an agent writes to say where it is |
-| `touch-cycle-reporter` | writes one report per implement → test → critique cycle, so a finished run leaves a readable record |
-| `touch-selfcheck` | nine PASS/FAIL checks of an installation, so "it doesn't work" becomes one failing line; `--init` is the one mode that writes, mapping auto memory into `<project>/.touch/memory` |
-| `touch-serve` | the Touch page (port 8932) — **not implemented yet**: the backend behind it works and is tested, the page it serves is a placeholder |
-
-`touch-monitor` is the page you actually use today. The plan is for
-`touch-serve` to serve that same page over everything the aggregator sees, so
-Touch ends up with one dashboard instead of two.
-
-The plugin also ships **ten skills** ([listed below](#the-skills)), costing
-~1,257 tokens of always-on context between them — a measured figure — and **one
-hook**, `orch_scope_guard.py`, which keeps subagents inside their own run's
-folder while a run is active and is inert when none is.
-
-## Install
-
-Read the plugin's own [README](plugin/touch/README.md) before you run these: it
-discloses what Touch reads, writes and serves, and what installing from this
-repository puts on your disk.
+Inside Claude Code, run:
 
 ```
 /plugin marketplace add msdrx/touch
 /plugin install touch@msdrx-tools
+/reload-plugins
 ```
 
-The shorthand clones over SSH; without a key on the machine, use the HTTPS URL
-— `/plugin marketplace add https://github.com/msdrx/touch.git` — or set
-`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+Then open `/plugin` and **enable** Touch — it installs disabled because it
+carries a hook, and its commands land on your `PATH` only while it is enabled.
 
-Then `/reload-plugins`, and enable Touch from `/plugin` — it installs
-**disabled** because it carries a hook, and its `bin/` wrappers reach your
-`PATH` only while it is enabled. Then run `touch-selfcheck` to verify.
+Two footnotes. The `msdrx/touch` shorthand clones over SSH; without a key on
+the machine, use the HTTPS URL — `/plugin marketplace add
+https://github.com/msdrx/touch.git` — or set
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`. And updates never arrive on their own:
+`/plugin marketplace update msdrx-tools` → `/plugin update touch@msdrx-tools`
+→ `/reload-plugins`.
 
-To try it without installing anything, from a clone of this repository:
-`claude --plugin-dir plugin/touch`.
+(To try Touch without installing anything, from a clone of this repository:
+`claude --plugin-dir plugin/touch`.)
 
-New releases do not arrive on their own: `/plugin marketplace update
-msdrx-tools` → `/plugin update touch@msdrx-tools` → `/reload-plugins`.
-
-## Use
-
-**1. Run a loop.**
+### 2. Check it works
 
 ```
-/touch:execute-research  <what you want researched>
-/touch:implement-plan    <the plan it wrote>
+touch-selfcheck
 ```
 
-**2. Watch it.** Runs driven by the skills start the daemons for you; by hand,
+Ten PASS/FAIL checks, one line each — all green means Touch is installed,
+importable, and able to serve. Optional but recommended:
+`touch-selfcheck --init` maps this project's Claude Code auto memory into
+`<project>/.touch/memory`, which is what the dashboard's `/memory` page reads.
+
+### 3. Run a research → implement loop
+
+The two loop skills are the heart of it. Ask for research first:
+
+```
+/touch:research  how should rate limiting be added to this API?
+```
+
+Read-only researchers fan out over your code in parallel, then one synthesizer
+writes a single complete plan file and tells you where it is. When you are
+happy with the plan:
+
+```
+/touch:implement  implement the plan it wrote
+```
+
+A divider splits the plan by file ownership, then each sub-plan runs a gated
+loop — a fresh implementer, then a read-only test gate, then a read-only
+adversarial critique — until green or the attempt cap.
+
+### 4. Watch it
+
+Runs driven by the skills start the dashboard for you — look for the
+`http://127.0.0.1:8931/?token=…` URL in the run output. To start it by hand
 for one task:
 
 ```bash
 TASK=$PWD/.touch/local-orchestrators/<task-name>
-ORCH_STATE_DIR="$TASK" touch-monitor &   # the dashboard: http://127.0.0.1:8931
+ORCH_STATE_DIR="$TASK" touch-monitor &   # the dashboard
 ORCH_STATE_DIR="$TASK" touch-watcher &   # feeds it from the run's journal
 ```
 
-**3. Edit the memory Claude Code loads here.** `touch-selfcheck --init` maps
-this project's auto memory to `<project>/.touch/memory`, and the dashboard's
-header links to `/memory`, a page that lists and reads those files. To let it
-save them, start the dashboard with `--allow-memory-write` — the default is
-read-only, because those files are injected into every future session in this
-project.
+Every page needs the per-boot token the server prints (every route but
+`/health` does), and everything binds `127.0.0.1` only — the wrappers refuse
+to open a public bind on your behalf. To reach a page from another machine,
+forward the port: `ssh -L 8931:127.0.0.1:8931 you@host`.
 
-The wrappers refuse to open a public bind on your behalf. To reach a page from
-another machine, forward the port: `ssh -L 8931:127.0.0.1:8931 you@host`.
+## The commands
 
-### The skills
+Seven commands, on `PATH` while the plugin is enabled (in `plugin/touch/bin/`
+otherwise):
 
-Four drive the loops the dashboard renders:
+| command | what it does |
+|---|---|
+| `touch-monitor` | the run dashboard (port 8931): live plan cards, stages, gate verdicts, token counters — plus the `/memory` editor |
+| `touch-watcher` | daemon that turns a run's journal into dashboard events — what makes the page move |
+| `touch-serve` | the Touch page (port 8932): read-only view over every session the aggregator sees |
+| `touch-run` | `start / bind / close / verify / status` — lays out a run folder, starts and stops Touch's own daemons, settles the run's cards; not a session verb |
+| `touch-status` | appends one progress event to a run's stream |
+| `touch-cycle-reporter` | one readable report per implement → test → critique cycle, plus the final run report |
+| `touch-selfcheck` | ten install checks; `--init` maps auto memory into the project |
+
+`touch-monitor` is still the page most runs are watched on. `touch-serve`'s
+page is shipped and read-only — the aggregator's ingest tick fills its read
+model, and `/health` reports it. The two pages are meant to converge into one.
+
+## The skills
+
+Four orchestration skills drive the loops the dashboard renders:
 
 | skill | what it does |
 |---|---|
-| `/touch:execute-research` | parallel read-only researchers, then one synthesizer that writes a single complete plan |
-| `/touch:implement-plan` | divide a plan by file ownership, then run gated implement → test → critique loops |
-| `/touch:orchestrate` | the naming and control-file standards that make subagents visible to the dashboard |
-| `/touch:m-orchestrator` | wire live monitoring into an orchestrator you write yourself |
+| `/touch:research` | parallel read-only researchers → one complete plan |
+| `/touch:implement` | divide the plan by file ownership → gated implement / test / critique loops |
+| `/touch:orchestrate` | naming and control-file standards that make subagents visible to the dashboard |
+| `/touch:monitor` | wire live monitoring into an orchestrator you write yourself |
 
-Six are engineering practice, for the agents inside those loops:
-`/touch:architecture-boundaries` (layering and dependency direction),
-`/touch:architecture-tradeoffs` (a decision analysed as a trade-off, then
-recorded), `/touch:code-quality-review` (`file:line` findings with fixes),
-`/touch:pattern-selection` (the right design pattern — or the case against one),
-`/touch:refactoring-pass` (behaviour-preserving cleanup with a test net), and
-`/touch:testing-discipline` (tests, and testability read as an architecture
-signal). They are condensed guidance derived from the books on each one's
-`Sources:` line — not the works themselves.
+Six more are engineering practice, for the agents inside those loops:
+`/touch:architecture-boundaries`, `/touch:architecture-tradeoffs`,
+`/touch:code-quality-review`, `/touch:pattern-selection`,
+`/touch:refactoring-pass` and `/touch:testing-discipline` — condensed guidance
+derived from the books on each one's `Sources:` line, not the works
+themselves.
 
-## From this repository
+All ten cost ~1,277 tokens of always-on context between them — a measured
+figure, re-read with `claude --plugin-dir plugin/touch plugin details touch`.
+The two hooks that ship alongside cost no model context at all: a scope guard
+that keeps a run's subagents in their own folder, and an additive recorder
+that lets the dashboard see agent starts sooner. Both are inert when no run is
+active.
 
-Plain Python 3 stdlib, nothing to install. The code lives in `plugin/touch/`,
-the shipping subtree and the only copy:
+## What it will not do
 
-```bash
-plugin/touch/bin/touch-monitor   # or any of the six wrappers
-tests/run_all.sh                 # the tests; --keep-going reports every failure
-```
-
-For hacking on the aggregator itself there is one module-direct form:
-`PYTHONPATH=plugin/touch python3 -m aggregator.server`.
-
-Layout, ground rules, the release gate: [CONTRIBUTING.md](CONTRIBUTING.md).
+- **It never writes to `~/.claude`.** It reads what the CLI already wrote, and
+  keeps its own history in `.touch/` inside your project. The one thing it
+  writes for you is Claude Code's auto memory — and it does that by pointing
+  the CLI at `<project>/.touch/memory`, never by reaching into `~/.claude`.
+- **One write plane, off by default.** The dashboard can edit those memory
+  files, but only when started with `--allow-memory-write`; everything else it
+  serves is read-only.
+- **No control it cannot honour.** No session verb ships — the table below is
+  the planned vocabulary, and none of it exists yet.
 
 ## Control verbs — planned, none shipped
 
@@ -181,17 +190,3 @@ first" becomes an N-collection scan with every index duplicated.
 - `inception.md` — everything verified about the substrate, summarized
 - `CLAUDE.md` — the session guide and the authority ladder over the full design
   record (whose run folders are local history, absent from a clean checkout)
-
-## Original intent (verbatim, 2026-07-25)
-
-Kept unedited as the source of the requirement. Where its wording and the verb
-table above differ, the table wins — it is the same intent with each verb's
-honesty attached.
-
-> This is Touch, a web page for visualizing and managing subagents in a Claude Code session.
-> Touch have 2 main components, aggregator and touch-visual.
-> main page shows terminal with terminal design. main terminal is web view over claude code
-> session. that is main user interface. left sidebar shows such terminal sessions list, where we
-> can click and windows opens that terminal. also there is page for current terminal, where we can see n8n like UML diagrams and graphs. but with one addition, we must have control in which
-> we can pause, restart, start and terminate agents loops. about loops you can find in
-> /execute-research and /implement-plan skills.

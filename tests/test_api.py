@@ -487,6 +487,45 @@ def test_run_graph_serves_the_reducers_output():
           "optional keys are present as null — sp-13 reads no-value as null, never absent")
 
 
+def test_the_snapshots_liveness_fields_reach_the_run_graph():   # D-03
+    print("test_the_snapshots_liveness_fields_reach_the_run_graph")
+    # `_node_payload`'s projection is a WHITELIST, so a field the mapper stores
+    # and the projection does not name is written and then silently dropped on
+    # the way out — which is where D-03's five fields spent attempt 1.
+    live = "wf_liveness1-a"
+    state = ms.apply_operations({}, ingest_mod.map_run(ingest_mod.RunObservation(
+        run_id=live, session_ids=(SID_LIVE,), workflow_name="implement")))
+    ms.apply_operations(state, ingest_mod.map_run_node(ingest_mod.RunNodeObservation(
+        run_id=live, key="sp-01/implement", ordinal=0, journal_seq=0, agent_id=AGENT_A,
+        result_seen=False, started_at=ts(21),
+        harness_state="running", queued_at=ts(20), last_progress_at=ts(29),
+        last_tool_name="Bash", last_tool_summary="ran the suite")))
+    observed = body(get(make_api(state=state), f"/api/run/graph?run={live}"))["nodes"][0]["observed"]
+    check(observed["harnessState"] == "running",
+          "`harnessState` reaches /api/run/graph — the harness's own word about the "
+          "agent, published beside the reducer's verdict and never merged into it")
+    check(observed["lastToolName"] == "Bash"
+          and observed["lastToolSummary"] == "ran the suite",
+          "…and both `last_tool_*` fields, the free deterministic replacement for a "
+          "hand-typed detail string (display only, never parsed)")
+    check(observed["queuedAt"] is not None and observed["lastProgressAt"] is not None,
+          "…and the two snapshot clocks")
+    check(observed["harnessState"] != body(
+        get(make_api(state=state), f"/api/run/graph?run={live}"))["nodes"][0]["derived"]["state"],
+          "the harness said `running` and the reducer says otherwise — the two "
+          "vocabularies stay two fields (GD-23/R-58)")
+
+    bare = body(get(make_api(), f"/api/run/graph?run={RUN_ID}"))["nodes"][0]["observed"]
+    for name in ("harnessState", "queuedAt", "lastProgressAt", "lastToolName",
+                 "lastToolSummary"):
+        check(name not in bare,
+              f"with no snapshot, `{name}` is ABSENT rather than null-filled — a run "
+              f"with no snapshot is normal, and an invented null reads as a fact")
+    check(bare["startedAt"] and bare["endedAt"],
+          "…while the transcript-scan clocks are still there, which is what makes the "
+          "snapshot path an addition and not a replacement (GD-D4)")
+
+
 def test_run_node_resolves_spawn_without_reading_the_file():
     print("test_run_node_resolves_spawn_without_reading_the_file")
     state = build_state()
@@ -620,9 +659,184 @@ def test_tasks_lists_legacy_folders_with_their_derivation():
     check(payload["tasks"][0]["nodes"], "its nodes travel with it")
     check("archive" in payload["tasks"][0],
           "and the derived archive label, which is a fact about the source, not a constant")
+    check(payload["tasks"][0]["nodeSource"] == "legacy"
+          and payload["tasks"][0]["assertedNodes"] == [],
+          "with no wf_dir there is nothing to join, so the reduction IS the answer "
+          "and nothing is demoted (GD-D12's honest fallback)")
+    check("harness" not in payload["tasks"][0],
+          "…and no harness block is invented for it")
     empty = make_api(tasks_root=None)
     check(body(get(empty, "/api/tasks"))["tasks"] == [],
           "with no configured root the answer is empty and says so — never a guess")
+
+
+# --- D-04 / GD-D12: the wf_dir join ---------------------------------------
+
+
+def task_folder_for(root, task, *, wf_dir=None, lines=()):
+    """One `local-orchestrators/<task>/` on disk, optionally naming a run."""
+    folder = os.path.join(root, task)
+    os.makedirs(folder, exist_ok=True)
+    if lines:
+        with open(os.path.join(folder, "events.jsonl"), "w") as fh:
+            for line in lines:
+                fh.write(json.dumps(line) + "\n")
+    if wf_dir is not None:
+        with open(os.path.join(folder, "orch-config.json"), "w") as fh:
+            json.dump({"wf_dir": wf_dir}, fh)
+    return folder
+
+
+#: The three events.jsonl lines every join test asserts *survive* the demotion.
+JOIN_LINES = (
+    {"ts": "2026-07-25T03:20:00Z", "plan": "sp-01", "stage": "implement",
+     "state": "running", "detail": "attempt 1", "agent": "aaaaaaaa"},
+    {"ts": "2026-07-25T03:29:00Z", "plan": "sp-01", "stage": "implement",
+     "state": "done", "detail": "attempt 1 ok", "agent": "aaaaaaaa"},
+    {"ts": "2026-07-25T03:30:00Z", "plan": "sp-01", "stage": "plan",
+     "state": "done", "detail": "closed", "plans_total": 3},
+)
+
+
+def joined_api(root, *, wf_dir, run_id, subplans=None, extra_state=None):
+    """A model whose state holds `run_id`'s nodes, and a folder naming `wf_dir`."""
+    state = ms.apply_operations({}, ingest_mod.map_run(ingest_mod.RunObservation(
+        run_id=run_id, session_ids=(SID_LIVE,), workflow_name="implement")))
+    result = {"subplans": [{"id": f"sp-0{n}"} for n in range(1, subplans + 1)]} \
+        if subplans else {"passed": True}
+    for ordinal, (key, agent, seen) in enumerate((("sp-01/divide", AGENT_A, True),
+                                                  ("sp-01/implement", AGENT_B, False))):
+        ms.apply_operations(state, ingest_mod.map_run_node(ingest_mod.RunNodeObservation(
+            run_id=run_id, key=key, ordinal=0, journal_seq=ordinal, agent_id=agent,
+            result_seen=seen, result=result if seen else None,
+            label=f"observed {key}", harness_state="done" if seen else "running",
+            last_tool_name="Bash", last_tool_summary="ran the suite",
+            started_at=ts(21), ended_at=ts(30) if seen else None)))
+    if extra_state:
+        state.update(extra_state)
+    return make_api(state=state, tasks_root=root)
+
+
+def test_a_joined_task_serves_harness_nodes_and_demotes_the_stream():
+    print("test_a_joined_task_serves_harness_nodes_and_demotes_the_stream")
+    root = tmpdir("orch-join")
+    run_id = "wf_join00001-a"
+    wf_dir = os.path.join(tmpdir("claude-join"), "projects", "-repo", SID_LIVE,
+                          "subagents", "workflows", run_id)
+    os.makedirs(wf_dir)
+    task_folder_for(root, "touch-joined", wf_dir=wf_dir, lines=JOIN_LINES)
+    api = joined_api(root, wf_dir=wf_dir, run_id=run_id, subplans=3)
+    row = body(get(api, "/api/tasks"))["tasks"][0]
+
+    check(row["runId"] == run_id,
+          "the folder's runId IS the basename of its wf_dir — the join needs no "
+          "second grammar")
+    check(row["nodeSource"] == "harness" and len(row["nodes"]) == 2,
+          "the harness-derived nodes are THE node set (GD-D12)")
+    check(all(n["source"] == "harness" for n in row["nodes"]),
+          "…each labelled with where it came from")
+    check([n["detail"] for n in row["nodes"]] == ["ran the suite", "ran the suite"],
+          "…and the detail line is the snapshot's own lastToolSummary, not a "
+          "hand-typed string (D-03's free replacement)")
+    check(len(row["assertedNodes"]) == 1
+          and all(n["source"] == "asserted" for n in row["assertedNodes"]),
+          "the events.jsonl node is KEPT and labelled `asserted` — demoted, "
+          "never deleted")
+    check([n["detail"] for n in row["assertedNodes"]] == ["attempt 1"],
+          "…verbatim, so the annotation still says what the agent claimed")
+    check(row["harness"]["wfDir"] == wf_dir and row["harness"]["runId"] == run_id,
+          "the join key travels on the payload: 'why did these rows change source' "
+          "is answerable from the response")
+    check(row["plans"]["sp-01"]["plansTotal"] == 5,
+          "the denominator is the divider's own N + 2 (5), folded over the wire "
+          "hint of 3 by the monotonic max (GD-D11)")
+
+
+def test_an_unobserved_wf_dir_keeps_the_legacy_reduction():
+    print("test_an_unobserved_wf_dir_keeps_the_legacy_reduction")
+    root = tmpdir("orch-unobserved")
+    wf_dir = os.path.join(tmpdir("claude-gone"), "projects", "-repo", SID_LIVE,
+                          "subagents", "workflows", "wf_archived01-z")
+    task_folder_for(root, "touch-archived", wf_dir=wf_dir, lines=JOIN_LINES)
+    api = joined_api(root, wf_dir=wf_dir, run_id="wf_other00001-b")
+    row = body(get(api, "/api/tasks"))["tasks"][0]
+    check(row["nodeSource"] == "legacy" and row["assertedNodes"] == [],
+          "a wf_dir naming a run this installation never ingested (archived; its "
+          "transcripts are swept) keeps the legacy reduction — an honest fallback, "
+          "not a degraded case")
+    check(len(row["nodes"]) == 1 and all(n["source"] == "legacy" for n in row["nodes"]),
+          "…and the stream's own nodes are still the node set")
+
+
+def test_a_plan_only_folder_is_untouched_by_the_join():
+    print("test_a_plan_only_folder_is_untouched_by_the_join")
+    root = tmpdir("orch-planonly")
+    os.makedirs(os.path.join(root, "touch-plan-only", "plan"))
+    api = make_api(tasks_root=root)
+    row = body(get(api, "/api/tasks"))["tasks"][0]
+    check(row["kind"] == "plan-only" and row["nodeSource"] == "legacy",
+          "a folder with a plan and no stream is unchanged: no run to join, no "
+          "demotion, no controls (RUNSTATE-13)")
+    check(row["nodes"] == [] and row["assertedNodes"] == [],
+          "…and both node lists are empty, which is the truth about it")
+
+
+def test_the_tasks_route_reads_the_node_collection_once():
+    print("test_the_tasks_route_reads_the_node_collection_once")
+    # `nodes_of` filters a fresh shallow COPY of `run_nodes` per call, so one
+    # call per task folder is one whole-collection copy per task on every
+    # request — O(tasks x run_nodes) in dict copies, on the route that has a
+    # folder for every run this repo has ever done.
+    root = tmpdir("orch-many")
+    run_id = "wf_join00003-d"
+    wf_dir = os.path.join(tmpdir("claude-many"), "projects", "-repo", SID_LIVE,
+                          "subagents", "workflows", run_id)
+    os.makedirs(wf_dir)
+    for name in ("alpha", "beta", "gamma"):
+        task_folder_for(root, name, wf_dir=wf_dir, lines=JOIN_LINES)
+    api = joined_api(root, wf_dir=wf_dir, run_id=run_id, subplans=3)
+
+    reads = []
+    real = api.model.bucket
+    api.model.bucket = lambda name: (reads.append(name), real(name))[1]
+    payload = body(get(api, "/api/tasks"))
+    api.model.bucket = real
+    check(payload["count"] == 3 and all(r["nodeSource"] == "harness"
+                                        for r in payload["tasks"]),
+          "all three folders name the same run and all three join")
+    check(reads.count("run_nodes") == 1,
+          f"…off ONE read of the collection, grouped once by runId, not one per task "
+          f"({reads.count('run_nodes')})")
+
+
+def test_the_denominator_is_derived_with_and_without_the_wire_hint():
+    print("test_the_denominator_is_derived_with_and_without_the_wire_hint")
+    run_id = "wf_join00002-c"
+    wf_dir = os.path.join(tmpdir("claude-hint"), "projects", "-repo", SID_LIVE,
+                          "subagents", "workflows", run_id)
+    os.makedirs(wf_dir)
+
+    hinted = tmpdir("orch-hinted")
+    task_folder_for(hinted, "with-hint", wf_dir=wf_dir, lines=JOIN_LINES)
+    row = body(get(joined_api(hinted, wf_dir=wf_dir, run_id=run_id, subplans=3),
+                   "/api/tasks"))["tasks"][0]
+    check(row["plans"]["sp-01"]["plansTotal"] == 5,
+          "with a wire hint of 3, the journal-derived 5 wins — a hint is EARLY, "
+          "not wrong")
+
+    bare = tmpdir("orch-bare")
+    task_folder_for(bare, "no-hint", wf_dir=wf_dir, lines=JOIN_LINES[:2])
+    row = body(get(joined_api(bare, wf_dir=wf_dir, run_id=run_id, subplans=3),
+                   "/api/tasks"))["tasks"][0]
+    check(row["plans"]["sp-01"]["plansTotal"] == 5,
+          "…and with no hint at all the denominator is still derived (5)")
+
+    nodiv = tmpdir("orch-nodivider")
+    task_folder_for(nodiv, "no-divider", wf_dir=wf_dir, lines=JOIN_LINES)
+    row = body(get(joined_api(nodiv, wf_dir=wf_dir, run_id=run_id), "/api/tasks"))["tasks"][0]
+    check(row["plans"]["sp-01"]["plansTotal"] == 3,
+          "a run whose divider stated no sub-plans leaves the wire hint standing "
+          "(3) rather than erasing it")
 
 
 # --- /api/query -----------------------------------------------------------
@@ -1347,9 +1561,15 @@ def main():
                   test_events_pages_forwards_and_backwards,
                   test_events_of_a_historical_session_is_not_a_fallback,
                   test_run_graph_serves_the_reducers_output,
+                  test_the_snapshots_liveness_fields_reach_the_run_graph,
                   test_run_node_resolves_spawn_without_reading_the_file,
                   test_toolresult_rechecks_containment_at_serve_time,
                   test_tasks_lists_legacy_folders_with_their_derivation,
+                  test_a_joined_task_serves_harness_nodes_and_demotes_the_stream,
+                  test_an_unobserved_wf_dir_keeps_the_legacy_reduction,
+                  test_a_plan_only_folder_is_untouched_by_the_join,
+                  test_the_tasks_route_reads_the_node_collection_once,
+                  test_the_denominator_is_derived_with_and_without_the_wire_hint,
                   test_query_falls_back_to_memory_and_says_so,
                   test_replay_window_is_bounded_and_publishes_its_edge,
                   test_socket_replays_then_switches_then_tails,

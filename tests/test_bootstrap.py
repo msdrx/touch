@@ -59,6 +59,13 @@ GITIGNORE_ENTRIES = (
     "!/.touch/memory/",
     "/.touch/memory/*",
     "!/.touch/memory/*.md",
+    # The SECOND carve, and the only other one (D-12/SKILLS-7): the tracked
+    # per-project run constants `touch-run start` merges under a run spec
+    # before handing `args` to a workflow template. A single FILE, so no
+    # directory re-include is needed — and deliberately a single file, because
+    # widening this to a directory is how a token file or a watcher checkpoint
+    # becomes committable.
+    "!/.touch/run.json",
     ".claude/settings.local.json",
     "*.pid",
     # legacy defence, deliberately still in the file (G9/LAYOUT-4)
@@ -105,6 +112,11 @@ MUST_NOT_IGNORE = (
     # The ONE tracked subtree of `.touch/` (G9). Named with a file that does not
     # exist: the point is that the RULES re-include it, not that it is present.
     ".touch/memory/does-not-exist.md",
+    # The one tracked FILE beside it (D-12): the per-project run constants a
+    # workflow template consumes through `args`. Also named while absent — a
+    # project that has not configured one yet must still be able to add it
+    # without editing .gitignore, which is exactly how the carve goes stale.
+    ".touch/run.json",
 )
 
 # Entries that must NOT be in .gitignore (item 04, 2026-07-28). These two lines
@@ -350,9 +362,14 @@ def test_run_state_not_tracked():
 def test_only_memory_markdown_is_tracked_under_touch():
     print("test_only_memory_markdown_is_tracked_under_touch")
     tracked = [p for p in git_out("ls-files", "--", ".touch").splitlines() if p]
-    strays = [p for p in tracked if not p.startswith(".touch/memory/")]
+    # Two carves, and only two: the memory subtree (G9) and the per-project run
+    # constants (D-12). Everything else `.touch/` holds — the WAL, the tokens,
+    # the mirror credentials, every task folder — stays out of the index.
+    strays = [p for p in tracked
+              if not p.startswith(".touch/memory/") and p != ".touch/run.json"]
     check(not strays,
-          f"nothing outside .touch/memory/ is tracked (found: {strays})")
+          f"nothing outside .touch/memory/ and .touch/run.json is tracked "
+          f"(found: {strays})")
     inside = [p[len(".touch/memory/"):] for p in tracked
               if p.startswith(".touch/memory/")]
     bad = [n for n in inside if "/" in n or not n.endswith(".md")]

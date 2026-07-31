@@ -10,7 +10,7 @@ those loops — deterministic research→plan and plan→implementation drivers
 whose every stage reports to a dashboard Touch renders too (the run dashboard
 below, and the same stream in the session view) — and six engineering-practice
 skills for architecture, testing, refactoring, design patterns and code
-review, which are what those loops apply once they are running. Version 0.2.1
+review, which are what those loops apply once they are running. Version 0.2.2
 renders no button it cannot honestly honour, so nothing here starts, stops or
 restarts anything (see `docs/control-semantics.md` for the verb ladder that a
 later version would implement). It is read-only over your sessions and your
@@ -22,7 +22,7 @@ project you run it in, and even that is off until you pass
 ## Trust and data handling
 
 Read this before you install. Touch reads your conversation history and
-installs a hook, and both facts should be a decision, not a surprise.
+installs two hooks, and both facts should be a decision, not a surprise.
 
 **What it reads.** Your Claude Code transcripts and workflow journals under
 `~/.claude/projects/`, and, for the run dashboard, the task folders under
@@ -94,16 +94,22 @@ you install yourself, and a database that is absent, down or unreachable is a
 non-event — the live view is memory-authoritative and unaffected. Recipe and
 security baseline: `docs/mongo.md`. Never publish the database port.
 
-**The hook — the part that costs you something.** Touch registers one
-`PreToolUse` hook, `hooks/orch_scope_guard.py`, on the matcher
-`Read|Glob|Grep|Edit|Write|Bash`. Its job is to keep the subagents of one
-orchestration run out of another run's folder, and it is **inert unless your
-project contains `.touch/local-orchestrators/ACTIVE`** (or the `HALT`
-emergency-stop sentinel beside it) — files only Touch's own orchestration
-skills create. With neither file present it exits without reading its input.
-The main terminal agent is never restricted; only subagents are. While it is
-armed it also refuses subagent writes to `.touch/memory/`, so a loop agent
-cannot edit the instructions your next session loads.
+**The hooks — the part that costs you something.** Touch registers two hooks
+in `hooks/hooks.json`. The one that can say no is `hooks/orch_scope_guard.py`,
+a `PreToolUse` hook on the matcher `Read|Glob|Grep|Edit|Write|Bash`. Its job
+is to keep the subagents of one orchestration run out of another run's folder,
+and it is **inert unless your project contains
+`.touch/local-orchestrators/ACTIVE`** (or the `HALT` emergency-stop sentinel
+beside it) — files only Touch's own orchestration skills create. With neither
+file present it exits without reading its input. The main terminal agent is
+never restricted; only subagents are. While it is armed it also refuses
+subagent writes to `.touch/memory/`, so a loop agent cannot edit the
+instructions your next session loads. The second hook,
+`hooks/agent_lifecycle.py` (SubagentStart, SubagentStop, and PostToolUse on
+`Workflow|Artifact`), denies nothing, ever: it records agent starts and stops
+into the active run's folder so the dashboard sees them without waiting for
+the journal, is likewise inert when no run is active, and has its own off
+switch (the `agent_lifecycle` plugin option, or `TOUCH_AGENT_LIFECYCLE=0`).
 
 - **Cost, measured 2026-07-28** (six independent 20-run loops, one `python3`
   subprocess per call, median): about **22 ms per matched tool call** against a
@@ -133,8 +139,8 @@ cannot edit the instructions your next session loads.
   would auto-start one; Touch deliberately does not use it.)
 
 **Context cost — the biggest thing this plugin charges you.**
-`claude plugin details touch` reports **~1,257 tokens always-on** (measured
-2026-07-29 against this payload) — the ten skill descriptions, and nothing
+`claude plugin details touch` reports **~1,277 tokens always-on** (measured
+2026-07-31 against this payload) — the ten skill descriptions, and nothing
 else — added to every session in which Touch is enabled. Ten, not four:
 0.1.0 shipped the four orchestration skills at ~459 tokens, and 0.2.0 adds six
 engineering-practice ones that cost the rest. Per skill, always-on and then
@@ -142,10 +148,10 @@ on invocation:
 
 | skill | always-on | on invoke |
 |---|---|---|
-| `m-orchestrator` | ~130 | ~4.4k |
-| `implement-plan` | ~120 | ~3.3k |
-| `orchestrate` | ~120 | ~2k |
-| `execute-research` | ~100 | ~1.8k |
+| `monitor` | ~150 | ~6.3k |
+| `implement` | ~120 | ~5.7k |
+| `orchestrate` | ~120 | ~2.9k |
+| `research` | ~100 | ~3.4k |
 | `architecture-tradeoffs` | ~170 | ~2.6k |
 | `pattern-selection` | ~140 | ~2.8k |
 | `architecture-boundaries` | ~130 | ~2.4k |
@@ -161,7 +167,8 @@ where you orchestrate — it installs disabled anyway.
 **Auditing it.** The payload is Python 3 standard library, bash, three pages of
 HTML/CSS/JS, the eleven Markdown files under `skills/` that the model reads as
 instructions, and two JavaScript workflow templates the harness runs when a
-skill fires. It has no runtime dependencies (the optional `pymongo` is
+skill fires — copied byte-for-byte per run and parameterized only by a JSON
+run-spec, never edited. It has no runtime dependencies (the optional `pymongo` is
 imported lazily by two modules and by nothing else), and it ships no test
 suite, no fixtures and no build step, so what you read is what runs. A
 future release may add `claude plugin eval` as a published pre-release gate;
@@ -226,18 +233,21 @@ With the plugin enabled, from the project you want to use it in:
 touch-selfcheck
 ```
 
-Nine checks in a healthy install, one `PASS`/`FAIL` line each — fewer when a
-check is a full stop, since a 3.9 interpreter or a missing package ends the
-report there and says so: the interpreter clears the 3.11 floor; the
-aggregator imports from *this* tree rather than a same-named directory you
-happen to be standing next to; the web assets came with it; the
-project root resolves; task state resolves into your project and not into the
-plugin's own directory; auto memory resolves to the directory the memory page
-serves, or the mismatch is named; a loopback port can be bound; every `bin/`
-wrapper kept its exec bit (the one thing a zip round trip silently destroys);
-and one event survives a real write-and-read round trip. It refuses to print a
-green summary from an incomplete report, exits non-zero on any failure, and ends
-with the command to run next.
+Ten checks in a healthy install, one `PASS`/`FAIL` line each (one of them can
+`WARN` instead) — fewer when a check is a full stop, since a 3.9 interpreter
+or a missing package ends the report there and says so: the interpreter clears
+the 3.11 floor; the aggregator imports from *this* tree rather than a
+same-named directory you happen to be standing next to; the web assets came
+with it; the project root resolves; task state resolves into your project and
+not into the plugin's own directory; auto memory resolves to the directory the
+memory page serves, or the mismatch is named; a leftover pre-mapping memory
+directory under `~/.claude` is detected and named — the one check that WARNs
+rather than fails, since only you can decide what to rescue from it; a
+loopback port can be bound; every `bin/` wrapper kept its exec bit (the one
+thing a zip round trip silently destroys); and one event survives a real
+write-and-read round trip. It refuses to print a green summary from an
+incomplete report, exits non-zero on any failure, and ends with the command to
+run next.
 
 `touch-selfcheck --init` is the same program's one writing mode: it maps this
 project's auto memory to `<project>/.touch/memory` (one key in
@@ -257,14 +267,17 @@ started it in. `touch-serve --help` shows the module's own usage, including
 the two bind flags this wrapper holds back — `--open` outright, and `--host`
 unless it names a loopback address.
 
-For orchestration runs there are four more commands: `touch-monitor` (the run
+For orchestration runs there are five more commands: `touch-monitor` (the run
 dashboard, port 8931, which prints its token to a terminal and otherwise
 leaves it in `<task>/monitor.json`, mode `0600`, and whose header links to the
 `/memory` editor described above), `touch-status` (append one
 event to a task's `events.jsonl`), `touch-watcher` (derive
 spawn/verdict/retry/advance events and token accounting from a workflow
-journal) and `touch-cycle-reporter` (one report per implement→test→critique
-cycle). The skills call them by name; you rarely need to.
+journal), `touch-cycle-reporter` (one report per implement→test→critique
+cycle, plus the final run report) and `touch-run` (`start | bind | close |
+verify | status` — the run envelope: it lays out the run folder, starts and
+stops Touch's own daemons and settles the run's cards; it runs no agent and is
+not a session verb). The skills call them by name; you rarely need to.
 
 The ten skills invoke under the plugin's namespace, in two groups.
 
@@ -272,10 +285,10 @@ The ten skills invoke under the plugin's namespace, in two groups.
 
 | skill | what it does |
 |---|---|
-| `/touch:execute-research` | parallel read-only researchers, then one synthesizer that writes a single complete plan |
-| `/touch:implement-plan` | divide that plan by file ownership, then run each sub-plan through gated implement→test→critique loops |
+| `/touch:research` | parallel read-only researchers, then one synthesizer that writes a single complete plan |
+| `/touch:implement` | divide that plan by file ownership, then run each sub-plan through gated implement→test→critique loops |
 | `/touch:orchestrate` | the naming, spawn-ledger and control-file standards that make subagents visible to the dashboard |
-| `/touch:m-orchestrator` | wire live monitoring into any orchestrator you write yourself |
+| `/touch:monitor` | wire live monitoring into any orchestrator you write yourself |
 
 **Engineering practice** — what the agents inside those loops are asked to do
 well:

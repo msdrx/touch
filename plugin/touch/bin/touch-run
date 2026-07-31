@@ -1,0 +1,1686 @@
+#!/usr/bin/env bash
+# touch-run — the deterministic driver envelope (D-13, GD-D8).
+#
+#   touch-run start  <task> --spec <file> [--tasks-root DIR] [--port N] [--no-daemons]
+#   touch-run bind   <task> [--wf-dir DIR] [--run-id ID] [--port N] [--tasks-root DIR] [--no-daemons]
+#   touch-run close  <task> [--state done|failed] [--summary TEXT] [--tasks-root DIR]
+#   touch-run verify <task> | --spec <file> [--script FILE] [--task NAME] [--tasks-root DIR]
+#   touch-run status <task> [--tasks-root DIR]
+#
+# THE SEVENTH WRAPPER, AND WHY IT IS NOT A CONTROL VERB
+# ----------------------------------------------------
+# GD-U4 said "the six wrappers"; GD-D8 amends it to seven and this is the
+# seventh. It starts and stops TOUCH's own daemons, creates TOUCH's own task
+# folder and writes TOUCH's own config — it never starts, ends, resumes or
+# messages a Claude Code session, so `CONTROL_ROUTES` stays `{}` (GD-4) and it
+# does not appear in the verb table. The memory file plane is the precedent:
+# a write plane that acts on FILES is not a control verb.
+#
+# WHAT IT REPLACES: about 230 lines of prose in `monitor/SKILL.md` that
+# a driver re-typed per run — mkdir, cp, seed, ACTIVE, daemons, config, close.
+# Every one of those steps has exactly one correct spelling and no judgment in
+# it, which is the definition of something a script should own (GD-D1). The two
+# that were reliably got wrong are fixed here by construction:
+#
+#   * the ACTIVE close-out. The documented idiom is
+#     `grep -vxF "<task>" "$f" > "$f.tmp"` followed by
+#     `if [ -s "$f.tmp" ]; then mv "$f.tmp" "$f"; else rm -f "$f" "$f.tmp"; fi`
+#     (monitor/SKILL.md), and it is wrong twice over:
+#       (a) `$f.tmp` is a FIXED, SHARED path — two close-outs running at once
+#           interleave into one temp file and whichever `mv`s last publishes a
+#           sentinel it did not compute;
+#       (b) the `else` branch deletes the WHOLE sentinel whenever grep failed
+#           for any reason other than "nothing matched" — disarming the run
+#           scope for every other run still listed in it.
+#     `close` instead reads, drops exactly its own line and writes the rest
+#     back under the same exclusive lock `start` appends with. Every other line
+#     survives line for line, blank lines and indentation included.
+#   * the tasks root. Anchoring on a bare `$PWD` fails SILENTLY: the daemons
+#     and the sentinels land where the scope guard never looks, so the guard
+#     reports itself inert and the HALT brake never fires for a whole run. It
+#     is resolved ONCE here, by the shipped resolver, and PRINTED.
+#
+# WHY THE WATCHER STARTS AT `bind` AND NOT AT `start`
+# ---------------------------------------------------
+# D-13's step list reads "…start watcher, record pid" under `start`, and that
+# ORDER cannot be implemented as written: `start` runs BEFORE the Workflow is
+# launched — it prints the `Workflow({…})` line for the driver to run next — so
+# at that moment this run has no journal in existence. A watcher started there
+# gets no argv, no `$ORCH_WF_DIR` and an `orch-config.json` with no `wf_dir`, so
+# `decision_watcher.resolve_wf_dir` falls to its LAST rung: the newest
+# `wf_*/journal.jsonl` anywhere under the configuration directory, machine-wide
+# — and `WF_DIR` is bound once at import and never re-resolved, so a later
+# `bind` cannot repair it. Measured: against a brand-new task folder that
+# resolver attached to an unrelated run and replayed 192 of its events — plan
+# cards, `done`/`failed` verdicts and token totals — into a stream that had
+# never had those plans. That is precisely the state lie GD-D6/R-58 exist to
+# prevent, so the launch moves to the one moment the answer is KNOWN and is
+# handed over explicitly in argv. Nothing is lost: between `start` and `bind`
+# there is no journal to tail. `start` still launches the watcher when a usable
+# `wf_dir` is ALREADY recorded (the resume case), and `bind` stops a watcher it
+# finds running before relaunching it on the bound directory — the watcher
+# checkpoints in `.watcher-state.json`, so a restart never double-counts.
+#
+# WHY THERE IS NO ENVIRONMENT LOOKUP HERE
+# ---------------------------------------
+# A bin/ process receives NONE of the three plugin variables the harness
+# exports elsewhere (plugin root, plugin data dir, project directory — all
+# measured EMPTY here, GD-T4 / probe C2). Code location comes from $0, which is
+# absolute in a bin/ launch; the only project signal is $PWD. The tasks root is
+# not resolved in this file either: `aggregator.paths.tasks_root()` is the
+# shipped ladder every other reader uses, so it is CALLED, never copied — a
+# second copy would pin the callee's first rung and make every later correction
+# unreachable for anyone who came in through bin/.
+#
+# WHY THE PROGRAM IS A HEREDOC AND NOT A MODULE
+# ---------------------------------------------
+# `touch-selfcheck` set the precedent: the payload's monitoring tree is an
+# exact, pinned set of six files and the aggregator package is the read/serve
+# path, so a driver envelope belongs to neither. One file, one owner, no new
+# import surface — and a `python3 - <<'PY'` heredoc (the `status.sh` spelling)
+# rather than `python3 -c '…'` so the program may contain apostrophes.
+#
+# WRITES, AND WHERE. Everything this command creates lives under the project's
+# own tasks root: the task folder and its four subdirectories, `orch-config.json`,
+# `run-spec.json`, `plan/RESUME.md`, the daemon pid/log files, and the `ACTIVE`
+# sentinel beside them. Events are NEVER written directly — every one of them
+# goes through `bin/touch-status`, which fronts `status.sh`, which owns the
+# flock, the 1 KB cap and the `w:"agent"` attribution (GD-D5). Nothing is ever
+# written under the CLI configuration directory, which stays a read-only tap.
+set -eu
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+[ -f "$ROOT/.claude-plugin/plugin.json" ] || {
+    echo "touch-run: cannot locate the plugin root from $0" >&2
+    exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+    echo "touch-run: python3 not found on PATH (Touch needs Python 3.11+)" >&2
+    exit 127
+}
+# The plugin root is a version-stamped cache that is re-copied on update: never
+# leave .pyc droppings in it.
+export PYTHONDONTWRITEBYTECODE=1
+
+# `${1+"$@"}`, never a bare `"$@"`: bash before 4.4 treats `"$@"` as an unset
+# variable under `set -u` when there are no positional parameters, and stock
+# macOS ships /bin/bash 3.2.57 — which `#!/usr/bin/env bash` finds on a machine
+# without Homebrew. A bare `touch-run` (no verb) is the normal way to ask for
+# usage, so that is the common path and not a corner.
+#
+# The heredoc is the LAST command, so its exit status is this script's: 0 all
+# good, 1 a check or a step failed, 2 a usage error.
+python3 - "$ROOT" ${1+"$@"} <<'PY'
+"""touch-run: start | bind | close | verify | status.
+
+Exit codes: 0 success, 1 a step or a check failed, 2 usage.
+"""
+import datetime
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+try:  # POSIX only; the sentinel edit degrades to unlocked read-modify-write.
+    import fcntl
+except ImportError:                                   # pragma: no cover
+    fcntl = None
+
+ROOT = sys.argv[1]
+ARGV = sys.argv[2:]
+
+USAGE = """usage: touch-run <verb> ...
+
+  touch-run start  <task> --spec <file> [--tasks-root DIR] [--port N] [--no-daemons]
+  touch-run bind   <task> [--wf-dir DIR] [--run-id ID] [--port N] [--tasks-root DIR] [--no-daemons]
+  touch-run close  <task> [--state done|failed] [--summary TEXT] [--tasks-root DIR]
+  touch-run verify <task> | --spec <file> [--script FILE] [--task NAME] [--tasks-root DIR]
+  touch-run status <task> [--tasks-root DIR]
+
+  start   create the task folder, copy the template verbatim, preflight the
+          run spec, seed the plan cards, arm the run scope, start the monitor
+          and print the exact Workflow(...) line to launch.
+  bind    record the launched run (wf_dir, run id, port) in orch-config.json,
+          render plan/RESUME.md and start the two per-run daemons — the
+          watcher and the cycle reporter — on the journal it just bound.
+  close   settle open cards, close the run card, disarm the run scope and stop
+          this task's daemons by RECORDED pid.
+  verify  the launch preflight, standalone. Writes nothing.
+  status  which daemons are alive, which pids were recorded, what the stream
+          says. Writes nothing.
+"""
+
+#: The four subdirectories every task folder has, created together so a run
+#: never fails half way through because a gate had nowhere to write findings.
+TASK_SUBDIRS = ("plan", "findings", "report", "orch-scripts")
+
+#: Run kind -> the payload template it copies. The kind selects the SCRIPT and
+#: nothing else; every per-run value travels in the spec (GD-D9).
+TEMPLATES = {
+    "implement": os.path.join("skills", "implement", "templates",
+                              "implement.workflow.js"),
+    "research": os.path.join("skills", "research", "templates",
+                             "research.workflow.js"),
+}
+
+#: Spec keys `touch-run` consumes itself. Everything else in the spec is handed
+#: to the script as `args`, because the templates read their configuration from
+#: there and ignore what they do not recognise.
+#:
+#: `script` is in here so a spec carrying it cannot leak the key into `args`,
+#: but it is REFUSED rather than honoured (see the preflight): the run kind
+#: selects the shipped template, full stop. A spec-named script would make
+#: GD-D9's byte-identity pin self-referential — the copy would be compared
+#: against the very file the spec chose, so a per-run, LLM-authored script (the
+#: SKILLS-3 failure that pin exists to end) would preflight green.
+ENVELOPE_KEYS = ("kind", "title", "roster", "plans_total", "script")
+
+#: The per-project constants file (D-12/SKILLS-7): tracked, configured once,
+#: merged UNDER the run spec so a per-run value always wins.
+PROJECT_CONFIG_REL = os.path.join(".touch", "run.json")
+
+#: The KNOWN placeholders — D-12 says "no known ALL-CAPS placeholder survives",
+#: and `known` is the operative word. The shipped templates keep
+#: `/ABS/PATH/TO/…` as their own defaults ON PURPOSE (SKILLS-14: `PLUGIN_ROOT`
+#: is left as shipped, and the copy is byte-for-byte), so a scan of the SCRIPT
+#: text would fail every correct run. What is preflighted is therefore the
+#: SPEC: the values that actually reach the run. A spec that still says
+#: `/ABS/PATH/TO/PROJECT` is a template somebody filled in half way, which is
+#: exactly the failure that used to spawn a whole opus fan-out against a
+#: directory that does not exist.
+PLACEHOLDER_SUBSTRINGS = ("/ABS/PATH", "PATH/TO/PROJECT", "PATH/TO/PLUGIN_ROOT")
+PLACEHOLDER_WORDS = ("TASK_SPECIFIC_CONTEXT", "TASK_NAME", "PLAN_FILE",
+                     "PROJECT_DIR", "PLUGIN_ROOT", "RESEARCH_CONTEXT",
+                     "PERSPECTIVE_LIST", "TODO", "FIXME", "XXX")
+PLACEHOLDER_WORD_RE = re.compile(
+    r"(^|[^A-Za-z0-9_])(%s)([^A-Za-z0-9_]|$)" % "|".join(PLACEHOLDER_WORDS))
+
+#: A task name is a directory basename under the tasks root and nothing else.
+#: `ACTIVE` and `HALT` are the guard's sentinels, never tasks — listing `HALT`
+#: in `ACTIVE` is the documented way to disarm the emergency brake by accident.
+TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SENTINELS = ("ACTIVE", "HALT")
+
+#: Daemon -> (pid file, log file, the substring its /proc cmdline must carry).
+#: The marker is what makes "stop by recorded pid" safe: pids are reused, and a
+#: recorded number that now belongs to somebody else must not be signalled.
+#:
+#: The MONITOR is deliberately not in here. One server serves every task on a
+#: project, so its pid belongs beside the sentinel it shares a lifetime with
+#: (the tasks root) and not inside one task folder — and `close` must never
+#: stop it, because another run may still be watching.
+DAEMONS = {
+    "watcher": ("watcher.pid", "watcher.log", "decision_watcher"),
+    "reporter": ("cycle-reporter.pid", "cycle-reporter.log", "cycle_reporter"),
+}
+
+DEFAULT_PORT = 8931
+
+FAILS = 0
+
+
+def say(text=""):
+    sys.stdout.write(text + "\n")
+
+
+def oops(text):
+    sys.stderr.write("touch-run: " + text + "\n")
+
+
+def report(ok, text):
+    """One PASS/FAIL line, in the shape `touch-selfcheck` established."""
+    global FAILS
+    if not ok:
+        FAILS += 1
+    say(("PASS  " if ok else "FAIL  ") + text)
+
+
+def oneline(value, limit=200):
+    """`value` as ONE whitespace-normalized line, capped.
+
+    Everything interpolated from a spec somebody wrote goes through here before
+    it is printed or handed to `status.sh`.
+    """
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def sanitize_detail(value, limit=200):
+    """An event `detail` that survives every hop it has to make.
+
+    `status.sh` caps at 1 KB and JSON would survive anything, but the string
+    also travels through a bash argument and a JS template literal in the
+    documented procedures, so the house rule is: short, single line, no double
+    quotes. Enforced here rather than trusted, because the caller is a driver
+    typing a summary at the end of a long run.
+    """
+    return oneline(str(value).replace('"', "'"), limit)
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC")
+
+
+def load_paths():
+    """`aggregator.paths`, imported from THIS tree.
+
+    The cwd is the user's project and may hold its own `aggregator/`; for a
+    program read from stdin the cwd sits first on `sys.path`, ahead of anything
+    prepended, so it comes off first — the same guard `touch-serve` and
+    `touch-selfcheck` apply.
+    """
+    sys.path[:] = [p for p in sys.path if p not in ("", ".", os.getcwd())]
+    sys.path.insert(0, ROOT)
+    from aggregator import paths
+    return paths
+
+
+# ---------------------------------------------------------------- arguments
+class Usage(Exception):
+    """A wrong command line — exit 2, never 1, and never a half-done step."""
+
+
+class Refused(Exception):
+    """A step that will not proceed. Exit 1, having written nothing new."""
+
+
+def parse(argv, valued=(), boolean=()):
+    """(positionals, options) with STRICT rejection of anything unrecognised.
+
+    Hand-rolled rather than argparse for one reason: an unknown flag must be a
+    usage error, not a positional. A driver that types `--wf_dir` for `--wf-dir`
+    would otherwise get a run bound to a directory nobody chose.
+    """
+    positionals = []
+    options = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            positionals.extend(argv[i + 1:])
+            break
+        if arg.startswith("--"):
+            name, _, inline = arg[2:].partition("=")
+            key = name.replace("-", "_")
+            if key in boolean:
+                if inline:
+                    raise Usage("--%s takes no value" % name)
+                options[key] = True
+            elif key in valued:
+                if inline:
+                    options[key] = inline
+                else:
+                    i += 1
+                    if i >= len(argv):
+                        raise Usage("--%s needs a value" % name)
+                    options[key] = argv[i]
+            else:
+                raise Usage("unknown option --%s" % name)
+        elif arg.startswith("-") and arg != "-":
+            raise Usage("unknown option %s" % arg)
+        else:
+            positionals.append(arg)
+        i += 1
+    return positionals, options
+
+
+# ---------------------------------------------------------------- the spec
+def read_json(path, what):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        raise Refused("%s %s does not exist" % (what, path))
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise Refused("%s %s could not be read (%s: %s)"
+                      % (what, path, type(exc).__name__, oneline(exc)))
+    if not isinstance(data, dict):
+        raise Refused("%s %s does not hold a JSON object" % (what, path))
+    return data
+
+
+def project_constants(project_dir):
+    """The tracked per-project constants, or an empty map.
+
+    ABSENT IS NORMAL and is never an error: the templates carry honest "(none
+    configured — …)" defaults for every one of these, so a project that has not
+    written the file gets the documented fallback rather than a refusal.
+    """
+    path = os.path.join(project_dir, PROJECT_CONFIG_REL)
+    if not os.path.isfile(path):
+        return {}, None
+    return read_json(path, "project constants"), path
+
+
+def merge_spec(spec, constants):
+    """The constants UNDER the spec — a per-run value always wins (GD-D9)."""
+    merged = dict(constants)
+    merged.update(spec)
+    return merged
+
+
+def spec_kind(spec):
+    """implement | research, declared or inferred from the spec's own shape."""
+    declared = spec.get("kind")
+    if declared:
+        if declared not in TEMPLATES:
+            raise Refused("unknown run kind %r (expected %s)"
+                          % (declared, " or ".join(sorted(TEMPLATES))))
+        return declared
+    if spec.get("perspectives") or spec.get("subject"):
+        return "research"
+    return "implement"
+
+
+def template_path(spec, kind):
+    """The payload template this run copies, verbatim (GD-D9).
+
+    The KIND selects it and nothing else. A spec that names its own `script` is
+    refused by the preflight rather than obeyed, so this function has exactly
+    one answer per kind and the byte-identity pin has something fixed to pin
+    against.
+    """
+    return os.path.join(ROOT, TEMPLATES[kind])
+
+
+def roster_entries(spec):
+    """`[(id, title)]` from the spec's roster — the ONE place its shape is judged.
+
+    Raised as `Refused` rather than returned as a report line because two very
+    different callers need the same answer: the preflight, which turns it into
+    a FAIL line before anything exists, and `start`, which by then is entitled
+    to assume the shape is good.
+    """
+    roster = spec.get("roster") or []
+    if not isinstance(roster, list):
+        raise Refused("the spec's roster is %s, not a list of entries"
+                      % type(roster).__name__)
+    entries = []
+    for entry in roster:
+        if isinstance(entry, dict):
+            plan_id, plan_title = entry.get("id"), entry.get("title")
+        elif isinstance(entry, str):
+            plan_id, plan_title = entry.strip(), None
+        else:
+            raise Refused("a roster entry is neither a name nor an object: %s"
+                          % oneline(json.dumps(entry, sort_keys=True), 80))
+        if not plan_id or not isinstance(plan_id, str):
+            raise Refused("a roster entry has no id: %s"
+                          % oneline(json.dumps(entry, sort_keys=True), 80))
+        entries.append((plan_id.strip(), plan_title))
+    return entries
+
+
+def declared_plans_total(spec, entries):
+    """`max(plans_total, len(roster))` as declared by the SPEC, or 0.
+
+    The `int()` lives here, not at the seed: a `plans_total` somebody typed as
+    `"many"` used to raise a bare `ValueError` out of the middle of `start`,
+    after the task folder had been created — a traceback instead of a refusal,
+    and a half-made run to clean up by hand.
+    """
+    raw = spec.get("plans_total") or 0
+    try:
+        total = int(raw)
+    except (TypeError, ValueError):
+        raise Refused("the spec's plans_total %s is not an integer"
+                      % oneline(repr(raw), 40))
+    if total < 0:
+        raise Refused("the spec's plans_total is negative (%d)" % total)
+    return max(total, len(entries))
+
+
+def workflow_args(spec):
+    """What the Workflow receives: the spec minus the keys touch-run consumes."""
+    return {k: v for k, v in spec.items() if k not in ENVELOPE_KEYS}
+
+
+def walk_strings(value, trail=""):
+    """(path, string) for every string anywhere in the spec."""
+    if isinstance(value, str):
+        yield trail or "<root>", value
+    elif isinstance(value, dict):
+        for key, sub in value.items():
+            yield from walk_strings(sub, "%s.%s" % (trail, key) if trail else str(key))
+    elif isinstance(value, list):
+        for index, sub in enumerate(value):
+            yield from walk_strings(sub, "%s[%d]" % (trail, index))
+
+
+def placeholder_hits(spec):
+    """Every spec value that is still a placeholder, named by its key path."""
+    hits = []
+    for key, text in walk_strings(spec):
+        for needle in PLACEHOLDER_SUBSTRINGS:
+            if needle in text:
+                hits.append("%s = %s" % (key, oneline(text, 80)))
+                break
+        else:
+            if PLACEHOLDER_WORD_RE.search(text):
+                hits.append("%s = %s" % (key, oneline(text, 80)))
+    return hits
+
+
+# ---------------------------------------------------------------- preflight
+def preflight(spec, script, task=None, shipped=None):
+    """D-12's launch preflight — deterministic, sub-second, refuses on failure.
+
+    Every check is a claim about what will actually reach the run, which is why
+    the placeholder arm reads the SPEC and the shape arms read the SCRIPT:
+    the script is copied byte-for-byte and its own `/ABS/PATH/TO/…` defaults are
+    documentation of the shape a spec must fill, not leaked configuration.
+    """
+    kind = spec_kind(spec)
+    report(True, "run kind is %s" % kind)
+
+    name = spec.get("task")
+    if task and name and name != task:
+        report(False, "the spec names task %r but the command says %r"
+                      % (oneline(name, 60), task))
+    else:
+        report(bool(task or name), "the run names a task (%s)"
+                                   % oneline(task or name or "missing", 60))
+
+    project_dir = spec.get("project_dir")
+    if not project_dir:
+        report(False, "the spec sets project_dir (missing — the script throws "
+                      "on this rather than running against a placeholder)")
+    elif not os.path.isabs(project_dir):
+        report(False, "project_dir %s is ABSOLUTE (it is relative — the script "
+                      "joins the task folder onto it)" % oneline(project_dir, 80))
+    else:
+        report(os.path.isdir(project_dir),
+               "project_dir %s exists" % oneline(project_dir, 80))
+
+    hits = placeholder_hits(spec)
+    report(not hits, "no known placeholder survives in the spec%s"
+                     % ("" if not hits else " (found: %s)" % "; ".join(hits)))
+
+    # The ENVELOPE arms. They are here rather than inline at the seed for one
+    # reason: everything the preflight rejects is rejected BEFORE `start`
+    # creates anything, so a malformed roster or a `plans_total` of "many" is a
+    # refusal with an empty tasks root behind it rather than a traceback out of
+    # the middle of a half-made run.
+    report(not spec.get("script"),
+           "the spec does not name its own script (the run kind selects the "
+           "shipped template — a spec-named script would make GD-D9's "
+           "byte-identity pin compare the copy against the copy)")
+    try:
+        entries = roster_entries(spec)
+        declared = declared_plans_total(spec, entries)
+    except Refused as exc:
+        report(False, "the run envelope is well formed (%s)" % oneline(exc, 160))
+    else:
+        report(True, "the run envelope is well formed (roster: %d entries, "
+                     "plans_total declared %d)" % (len(entries), declared))
+
+    if not os.path.isfile(script):
+        report(False, "the run script %s exists" % script)
+        return
+    try:
+        text = open(script, encoding="utf-8", errors="replace").read()
+    except OSError as exc:
+        report(False, "the run script %s could be read (%s)" % (script, oneline(exc)))
+        return
+    report(True, "the run script is %s" % script)
+
+    # GD-D1a, restated as a launch gate: the infrastructure wrapper is what
+    # turns an agent that died on infrastructure into a retry instead of a
+    # narrated null, and a copy that lost it fails silently, mid-run.
+    report("agentR" in text,
+           "the script defines the agentR infrastructure wrapper")
+    raw = text.count("await agent(")
+    report(raw == 2, "the script makes exactly 2 raw `await agent(` calls "
+                     "(found %d — every other spawn goes through agentR)" % raw)
+
+    if kind == "implement":
+        plan_file = spec.get("plan_file")
+        if not plan_file and task and spec.get("project_dir"):
+            plan_file = os.path.join(spec["project_dir"], ".touch",
+                                     "local-orchestrators", task, "plan",
+                                     "%s-plan.md" % task)
+        if not plan_file:
+            report(False, "an implement run names its plan_file (missing)")
+        else:
+            report(os.path.isfile(plan_file),
+                   "the plan file %s exists" % oneline(plan_file, 100))
+
+    if shipped and os.path.isfile(shipped) and os.path.abspath(shipped) != \
+            os.path.abspath(script):
+        try:
+            same = open(shipped, "rb").read() == open(script, "rb").read()
+        except OSError as exc:
+            report(False, "the copy could be compared with the shipped template "
+                          "(%s)" % oneline(exc))
+        else:
+            # GD-D9: `orch-scripts/` copies are byte-for-byte `cp`. A copy that
+            # drifted is a run whose archived script is not the one that ran.
+            report(same, "the copy is byte-identical to the shipped template %s"
+                         % shipped)
+
+
+# ---------------------------------------------------------------- sentinels
+def active_list(tasks_root):
+    """The task names `ACTIVE` currently lists — READ ONLY.
+
+    Separate from :func:`active_edit` on purpose: that one opens `O_CREAT`, and
+    `status` and the reporting half of `close` must not be able to CREATE a
+    sentinel. An absent file is an inert guard, and reporting it must not arm
+    one.
+    """
+    try:
+        with open(os.path.join(tasks_root, "ACTIVE"), encoding="utf-8") as fh:
+            return [ln.strip() for ln in fh.read().splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+def active_edit(tasks_root, add=None, remove=None):
+    """Add or remove ONE line of `ACTIVE`, leaving every other byte alone.
+
+    Read-modify-write under the same exclusive lock both directions take, so a
+    concurrent run's append cannot be lost between this read and this write.
+    Lines this call does not own are copied back LINE FOR LINE — blanks,
+    spacing and all, though a file that ended without a newline gains one —
+    because the `grep -vxF … > "$f.tmp"` idiom this replaces shared one fixed
+    temp path between concurrent close-outs and deleted the whole sentinel on
+    any grep failure that was not "nothing matched".
+
+    An emptied sentinel is left in place rather than removed: the guard is inert
+    with no names in it, and unlinking a file another driver may be holding open
+    is a race for no gain.
+    """
+    path = os.path.join(tasks_root, "ACTIVE")
+    if add is None and not os.path.exists(path):
+        # A removal against a sentinel that does not exist creates nothing. An
+        # absent ACTIVE is an inert guard, and a close-out is the last moment at
+        # which a command should bring one into existence.
+        return [], False
+    os.makedirs(tasks_root, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    with os.fdopen(fd, "r+", encoding="utf-8") as fh:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            lines = fh.read().splitlines()
+            kept = ([ln for ln in lines if ln.strip() != remove]
+                    if remove else list(lines))
+            changed = len(kept) != len(lines)
+            if add and not any(ln.strip() == add for ln in kept):
+                kept.append(add)
+                changed = True
+            if changed:
+                fh.seek(0)
+                fh.truncate()
+                fh.write("".join(ln + "\n" for ln in kept))
+                fh.flush()
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    return [ln.strip() for ln in kept if ln.strip()], changed
+
+
+# ---------------------------------------------------------------- the stream
+def events_path(task_dir):
+    return os.path.join(task_dir, "events.jsonl")
+
+
+def read_events(task_dir):
+    """Every parseable event line, oldest first. A bad line is skipped."""
+    events = []
+    try:
+        with open(events_path(task_dir), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+    except OSError:
+        return []
+    return events
+
+
+def existing_card_ids(task_dir, run_card=False):
+    """The distinct card ids this stream already carries.
+
+    `start` asks for these by NAME and not only by count: a re-seed must not
+    re-emit `plan/queued` for a card that is already `running` or `done`.
+    `plan` is a reserved stage that SETS the badge and the fold is last-wins,
+    so a second seed would walk live sub-plans backwards on the dashboard —
+    the same regression the monotonic-max `plans_total` fold refuses.
+    """
+    seen = set()
+    for event in read_events(task_dir):
+        plan = event.get("plan")
+        if isinstance(plan, str) and plan and (run_card or plan != "orchestrator"):
+            seen.add(plan)
+    return seen
+
+
+def existing_cards(task_dir, run_card=False):
+    """How many distinct cards this stream already carries.
+
+    `run_card=False` — the default, and the one the `plans_total` fold uses —
+    leaves the `orchestrator` card out. That card is the RUN, not a plan, and
+    counting it would make the fold compare unlike things: a re-seed would read
+    back its own run card as a plan and ratchet the declared denominator up by
+    one every time. `status` asks with it included, because there it is
+    reporting cards on a dashboard rather than feeding a denominator.
+    """
+    return len(existing_card_ids(task_dir, run_card=run_card))
+
+
+def run_is_closed(task_dir):
+    """The terminal `orchestrator complete` line, if some rung already wrote it.
+
+    GD-D6 layers four sources and the first to fire wins; `close` is the
+    belt-and-braces rung, so it asks whether one of the earlier ones has already
+    spoken instead of writing a second, contradictory close.
+    """
+    for event in reversed(read_events(task_dir)):
+        if (event.get("plan") == "orchestrator"
+                and event.get("stage") == "complete"
+                and event.get("state") in ("done", "failed")):
+            return event
+    return None
+
+
+def emit(task_dir, plan, stage, state, detail, title=None, plans_total=None,
+         roster=None):
+    """One event, THROUGH `bin/touch-status` (GD-D5).
+
+    `status.sh` owns the format, the flock, the 1 KB cap and the `w:"agent"`
+    attribution, so nothing here writes JSON to `events.jsonl` — the two
+    ledgerless roster lines on disk are the cautionary example (MONITORING-5).
+
+    INVENTORY-12 wanted the seed batched into one interpreter holding one lock.
+    It is not, and that is deliberate: the only way to batch is to bypass the
+    writer, and GD-D5 outranks a cost GD-D15 itself calls immaterial at this
+    cadence — a seed is a handful of lines, once, at launch. The single-event
+    path stays exactly what every agent uses.
+    """
+    env = dict(os.environ)
+    env["ORCH_STATE_DIR"] = task_dir
+    # Every seed variable is SET or POPPED, never inherited — the same list the
+    # watcher drops (`decision_watcher.STATUS_ENV_DROP`). A driver that exported
+    # `ORCH_ROSTER` for one command would otherwise attach a roster to every
+    # later line this file writes, silently, the moment status.sh learns to
+    # read it (GD-D11).
+    for var, value in (("ORCH_TITLE", oneline(title, 120) if title else None),
+                       ("ORCH_PLANS_TOTAL",
+                        str(int(plans_total)) if plans_total else None),
+                       ("ORCH_ROSTER", roster or None)):
+        if value:
+            env[var] = value
+        else:
+            env.pop(var, None)
+    writer = os.path.join(ROOT, "bin", "touch-status")
+    try:
+        res = subprocess.run([writer, plan, stage, state, sanitize_detail(detail)],
+                             env=env, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refused("could not write an event through %s (%s: %s)"
+                      % (writer, type(exc).__name__, oneline(exc)))
+    if res.returncode != 0:
+        raise Refused("%s refused to write %s/%s/%s (%s)"
+                      % (writer, plan, stage, state,
+                         oneline(res.stderr or res.stdout)))
+
+
+# ---------------------------------------------------------------- daemons
+def pid_file(task_dir, which):
+    return os.path.join(task_dir, DAEMONS[which][0])
+
+
+def read_pid_file(path):
+    """The pid recorded in one file, or None when there is not one to read."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_pid(task_dir, which):
+    return read_pid_file(pid_file(task_dir, which))
+
+
+def cmdline_of(pid):
+    """The process's own command line, or None where /proc does not exist.
+
+    /proc is Linux; on a platform without it this returns None and the caller
+    falls back to `kill(pid, 0)` liveness alone, saying so. That is a weaker
+    guarantee, and it is reported rather than hidden.
+    """
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as fh:
+            return fh.read().decode("utf-8", "replace").replace("\0", " ")
+    except OSError:
+        return None
+
+
+#: The fourth answer `daemon_state` can give about ownership: the pid is alive
+#: and this user may not signal it, so `cmdline_of` was never consulted and
+#: NOTHING is known about what it is. Distinct from `False` on purpose — that
+#: one is the reused-pid finding, and it names a fact ("its command line does
+#: not carry the marker") that a permission failure never established.
+EPERM = "eperm"
+
+
+def daemon_state(pid, marker):
+    """(alive, ours) — is that pid running, and is it still the thing we started?
+
+    Pids are reused. A recorded number that now belongs to somebody else must
+    never be signalled, so `ours` is False unless /proc confirms the marker; on
+    a system with no /proc it is None — unknown, and printed as unknown; and on
+    an EPERM it is `EPERM` — alive, unsignalable, and unexamined.
+    """
+    if pid is None:
+        return False, False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, False
+    except PermissionError:
+        return True, EPERM                       # alive, but not ours to signal
+    except OSError:
+        return False, False
+    line = cmdline_of(pid)
+    if line is None:
+        return True, None
+    return True, marker in line
+
+
+def ownership_note(ours):
+    """The one clause `status` appends to a live daemon line, or ''.
+
+    One function so the four answers `daemon_state` can give are spelled once:
+    a reader who is told "a reused pid" has to be able to trust that the
+    command line really was read and really did not carry the marker.
+    """
+    if ours is True:
+        return ""
+    if ours is EPERM:
+        return " — alive but not signalable by this user, so what it is was never checked"
+    if ours is None:
+        return " — and it is not knowable whether it is the process we started (no /proc)"
+    return " — and it is NOT the process we started (a reused pid)"
+
+
+def still_running(pid, marker):
+    """True / False / None — is that pid a LIVE process, as far as /proc knows?
+
+    Three answers, because "stopped" is a claim a close-out must not make
+    loosely and "still running" is one it must not make wrongly:
+
+    * **False** — `kill(pid, 0)` failed, or the pid is a `Z` zombie. A daemon
+      this command SIGTERMs is very often the child of somebody who has not
+      called `wait()` yet (a driver's shell, a test harness), so its pid stays
+      valid and `kill(pid, 0)` keeps succeeding long after it died. Reporting
+      that corpse as a surviving orphan would send a driver hunting a process
+      that no longer exists.
+    * **True** — /proc says it is there and is not a corpse.
+    * **None** — alive per `kill(pid, 0)`, but /proc could not be read: no
+      /proc at all on this platform, or a hardened mount (`hidepid=`) that
+      hides another user's entries. Not knowable, and the callers treat it as
+      such — the wait loop keeps waiting, and the did-it-die check declines to
+      accuse.
+    """
+    if not daemon_state(pid, marker)[0]:
+        return False
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as fh:
+            data = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    # `comm` is parenthesised and may itself contain spaces and parentheses, so
+    # the state is the first field after the LAST ')' — never `split()[2]`.
+    tail = data.rpartition(")")[2].split()
+    if not tail:
+        return None
+    return tail[0] != "Z"
+
+
+def launch(task_dir, argv, pid_path, log_path):
+    """Start one daemon detached, record its pid, return (pid, log path).
+
+    `start_new_session=True` so a Ctrl-C in the driver's terminal does not take
+    the run's monitoring down with it — the daemons outlive the command that
+    started them by design, and `close` stops them by the pid recorded here.
+
+    The pid path is passed in rather than derived: the watcher and the reporter
+    record inside the task folder, the shared monitor records beside the
+    sentinel, and a function that decided that for itself would have to know
+    which of those it was starting.
+    """
+    env = dict(os.environ)
+    env["ORCH_STATE_DIR"] = task_dir
+    handle = open(log_path, "a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(argv, env=env, stdout=handle, stderr=handle,
+                                stdin=subprocess.DEVNULL, start_new_session=True,
+                                cwd=task_dir)
+    finally:
+        handle.close()
+    with open(pid_path, "w", encoding="utf-8") as fh:
+        fh.write("%d\n" % proc.pid)
+    return proc.pid, log_path
+
+
+def launch_daemon(task_dir, which, argv):
+    """`launch` for one of the two per-task daemons, using its recorded names."""
+    name, log_name, _ = DAEMONS[which]
+    return launch(task_dir, argv, os.path.join(task_dir, name),
+                  os.path.join(task_dir, log_name))
+
+
+def start_watcher(task_dir, wf_dir):
+    """(Re)start the watcher on ONE known journal. Returns lines to print.
+
+    The directory goes in ARGV — the first rung of
+    `decision_watcher.resolve_wf_dir`, and the only one that cannot be
+    overtaken by a stale config or by the machine-wide newest-run fallback.
+
+    A watcher already recorded here is STOPPED first, never left beside a
+    second one: it was started before this answer existed (or on an earlier
+    run's journal), and two watchers on one task race the same
+    `.watcher-state.json` checkpoint, which is the file that makes a restart
+    safe in the first place. One at a time, it is exactly safe — the checkpoint
+    is what a relaunch reads to avoid double-counting.
+    """
+    lines = []
+    if read_pid(task_dir, "watcher") is not None:
+        lines.append("stop " + stop(task_dir, "watcher"))
+    pid, log = launch_daemon(
+        task_dir, "watcher", [os.path.join(ROOT, "bin", "touch-watcher"), wf_dir])
+    lines.append("watcher: pid %d tailing %s (log %s)" % (pid, wf_dir, log))
+    return lines
+
+
+def stop(task_dir, which):
+    """Stop one daemon by RECORDED, verified pid. Returns a sentence."""
+    marker = DAEMONS[which][2]
+    pid_path = pid_file(task_dir, which)      # the PATH, not the bare filename:
+    pid = read_pid(task_dir, which)           # every line this file prints is
+    if pid is None:                           # one a reader can paste.
+        return "%s: no pid recorded in %s — nothing stopped" % (which, pid_path)
+    alive, ours = daemon_state(pid, marker)
+    # A corpse counts as gone. `kill(pid, 0)` succeeds for a zombie — a daemon
+    # whose parent has not reaped it yet — and treating that as "alive" would
+    # report a dead watcher as a live one this command refuses to touch.
+    if not alive or still_running(pid, marker) is False:
+        try:
+            os.remove(pid_path)
+        except OSError:
+            pass
+        return "%s: pid %d is not running (stale %s removed)" % (which, pid, pid_path)
+    if ours is EPERM:
+        # Alive and not ours to signal — and, because the signal failed, its
+        # command line was never read. Saying "a reused pid" here would name a
+        # fact this code did not establish.
+        return ("%s: pid %d is alive but not signalable by this user — not "
+                "stopped, and what it is was never checked; %s kept"
+                % (which, pid, pid_path))
+    if ours is False:
+        # The one refusal that matters here: a reused pid. Never signalled, and
+        # the file is left in place so a human can look at what it now names.
+        return ("%s: pid %d is alive but its command line does not carry %r — "
+                "REFUSING to signal a reused pid; check it by hand"
+                % (which, pid, marker))
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        return "%s: pid %d could not be signalled (%s)" % (which, pid, oneline(exc))
+    for _ in range(50):                                   # up to ~5 s
+        time.sleep(0.1)
+        if still_running(pid, marker) is False:
+            break
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        for _ in range(20):                               # up to ~1 s more
+            time.sleep(0.05)
+            if still_running(pid, marker) is False:
+                break
+    # "stopped" is the ONE sentence in a close-out a driver acts on, and an
+    # orphaned watcher is the failure this repo's commit gate exists for — so
+    # it is only ever printed after the process is CONFIRMED gone. A pid /proc
+    # still shows as live keeps its file: `touch-run status` must go on being
+    # able to see the orphan, and "no pid recorded" would hide it.
+    if still_running(pid, marker) is True:
+        return ("%s: pid %d did NOT die (SIGTERM, then SIGKILL) — %s kept so "
+                "the orphan stays visible to `touch-run status`"
+                % (which, pid, pid_path))
+    try:
+        os.remove(pid_path)
+    except OSError:
+        pass
+    unverified = "" if ours else " (liveness only — no /proc on this platform)"
+    return "%s: pid %d stopped%s" % (which, pid, unverified)
+
+
+def monitor_port(task_dir, requested=None):
+    """argv > $ORCH_PORT > orch-config.json > 8931 — the daemon's own order."""
+    for candidate in (requested, os.environ.get("ORCH_PORT")):
+        if candidate:
+            try:
+                return int(candidate)
+            except (TypeError, ValueError):
+                raise Usage("port %r is not an integer" % candidate)
+    config = {}
+    path = os.path.join(task_dir, "orch-config.json")
+    if os.path.isfile(path):
+        try:
+            config = read_json(path, "orch-config.json")
+        except Refused:
+            config = {}
+    try:
+        return int(config.get("port") or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+
+
+def monitor_health(port, timeout=1.5):
+    """The untokened `/health` probe, or None when nothing answers.
+
+    `/health` is the one route with no token in front of it, which is exactly
+    what makes it the right way to ask "is a monitor already serving this
+    project" without minting or reading a secret.
+    """
+    url = "http://127.0.0.1:%d/health" % port
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def dashboard_url(task_dir, port):
+    """The tokened URL, read from the file the daemon already writes."""
+    path = os.path.join(task_dir, "monitor.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    url = data.get("url")
+    return url if isinstance(url, str) else None
+
+
+# ---------------------------------------------------------------- wf_dir
+def claude_root():
+    """The CLI's own directory — READ ONLY, and never written to.
+
+    `$TOUCH_CLAUDE_ROOT` is the same override `aggregator.sessions` honours, so
+    a test (and an operator with a relocated tree) points both at one place.
+    """
+    return os.environ.get("TOUCH_CLAUDE_ROOT") or os.path.expanduser("~/.claude")
+
+
+def newest_wf_dir():
+    """The most recently written Workflow journal's directory, or None.
+
+    The watcher's OWN order is argv > `$ORCH_WF_DIR` > `orch-config.json` >
+    this discovery, and it resolves ONCE at import and never again. So what
+    `bind` does is not only record the answer in `orch-config.json`: it hands
+    the directory to the watcher it starts in ARGV, the first rung, because a
+    watcher that is already running cannot be corrected by a config written
+    after it booted. The recorded value is for the NEXT reader — a hand-started
+    watcher, a reporter, a later `touch-run status`.
+
+    KNOWN ASYMMETRY, stated rather than hidden: this glob is a second spelling
+    of `decision_watcher.resolve_wf_dir`'s discovery rung (verified equal
+    against the real tree today), and it additionally honours
+    `$TOUCH_CLAUDE_ROOT`, which that one does not. It is not CALLED because
+    importing a 2 kloc daemon module to read one glob is the larger cost, and
+    the answer it produces is written straight into `orch-config.json` — after
+    `bind`, the watcher reads the recorded value and the two paths cannot
+    disagree. A correction to the watcher's rung that changes the ANSWER (a new
+    layout under the configuration directory) has to be mirrored here.
+    """
+    import glob
+    pattern = os.path.join(claude_root(), "projects", "*", "*", "subagents",
+                           "workflows", "wf_*", "journal.jsonl")
+    candidates = glob.glob(pattern)
+    if not candidates:
+        return None
+    try:
+        newest = max(candidates, key=os.path.getmtime)
+    except OSError:
+        return None
+    return os.path.dirname(newest)
+
+
+# ---------------------------------------------------------------- config
+def write_json(path, payload):
+    """Atomic JSON write: a UNIQUE temp file beside the target, then replace.
+
+    The temp name is minted by `tempfile.mkstemp` in the target's own directory
+    and not spelled `path + ".tmp"` — that is the fixed, shared temp path this
+    file's own header condemns in the `grep -vxF … > "$f.tmp"` idiom, and a
+    program that names a hazard in its header must not then ship it. Two
+    `touch-run` invocations against one task are not a normal scenario; the
+    cost of not relying on that is one function call.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".",
+                               suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        # mkstemp opens 0600; these files carry no secret (the token lives in
+        # the daemon's own 0600 monitor.json) and every other file this command
+        # writes is umask-default, so the replacement must not be the one file
+        # a second reader cannot open.
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def script_copies(task_dir):
+    """The `orch-scripts/*.workflow.js` copies of one task, sorted."""
+    scripts_dir = os.path.join(task_dir, "orch-scripts")
+    if not os.path.isdir(scripts_dir):
+        return []
+    return sorted(os.path.join(scripts_dir, name)
+                  for name in os.listdir(scripts_dir)
+                  if name.endswith(".workflow.js"))
+
+
+def load_config(task_dir):
+    path = os.path.join(task_dir, "orch-config.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        return read_json(path, "orch-config.json")
+    except Refused:
+        return {}
+
+
+# ---------------------------------------------------------------- RESUME.md
+RESUME_TEMPLATE = """# RESUME — {task} {kind} run
+
+Rendered by `touch-run bind` at {when}. Values are substituted here; the
+PROCEDURES are linked, not restated, so this file cannot drift from them.
+
+- **Task folder**: `{task_dir}`
+- **Run id**: `{run_id}`
+- **wf_dir**: `{wf_dir}`
+- **Script**: `{script}`
+- **args**: `{args}`
+- **Port**: {port} — the tokened dashboard URL is in `{task_dir}/monitor.json`
+  (mode 0600; it is the token's only resting place)
+- **Daemons**: watcher pid in `watcher.pid` (log `watcher.log`), cycle reporter
+  pid in `cycle-reporter.pid` (log `cycle-reporter.log`). The monitor is shared
+  per project and `touch-run close` never stops it.
+- **Run scope**: `ACTIVE` carries the line `{task}`.
+
+## Health
+
+```bash
+touch-run status {task}
+```
+
+## Resume (same session)
+
+```
+Workflow({{ scriptPath: "{script}",
+           resumeFromRunId: "{run_id}" }})
+```
+
+Never reword an earlier prompt before a resume: the journal cache replays on
+the prompt text, so an edit re-runs work that was already paid for.
+
+## Close-out
+
+```bash
+touch-run close {task} --state done --summary "<one line>"
+```
+
+## Procedures (linked, not restated)
+
+- daemons, sentinels and the run scope: `skills/monitor/SKILL.md`
+- infrastructure/network recovery: `skills/monitor/network-recovery.md`
+- the event schema: `shared/monitoring/monitoring.md`
+"""
+
+
+# ---------------------------------------------------------------- verbs
+def resolve_tasks_root(paths, override=None):
+    """The tasks root, resolved ONCE by the shipped ladder and PRINTED.
+
+    An explicit `--tasks-root` is also exported as `$ORCH_TASKS_ROOT` for every
+    child this command starts. That is not a wrapper guessing at an environment
+    it was told not to read (the doctrine at the top of this file): it is the
+    USER's own explicit answer being handed down, so the monitor discovers the
+    same set of tasks the command just wrote into instead of re-resolving to
+    the project walk-up and listing a different tree.
+    """
+    root = paths.tasks_root(override)
+    if override:
+        os.environ["ORCH_TASKS_ROOT"] = root
+    say("tasks root: %s" % root)
+    return root
+
+
+def check_port_option(requested):
+    """Reject a non-integer port BEFORE anything is created.
+
+    `monitor_port` raises the same `Usage`, but it is called deep inside
+    `start`, after the task folder exists — and a wrong command line must never
+    leave a half-done step behind (the `Usage` docstring says so, so the order
+    has to make it true).
+    """
+    for candidate, where in ((requested, "--port"),
+                             (os.environ.get("ORCH_PORT"), "$ORCH_PORT")):
+        if candidate:
+            try:
+                int(candidate)
+            except (TypeError, ValueError):
+                raise Usage("%s %s is not an integer"
+                            % (where, oneline(repr(candidate), 40)))
+
+
+def task_folder(tasks_root, name):
+    if not TASK_NAME_RE.match(name or ""):
+        raise Usage("%r is not a task name (a directory basename under the "
+                    "tasks root)" % name)
+    if name in SENTINELS:
+        raise Usage("%r is a run-scope sentinel, never a task" % name)
+    return os.path.join(tasks_root, name)
+
+
+def verb_start(paths, argv):
+    positionals, options = parse(
+        argv, valued=("spec", "tasks_root", "port"), boolean=("no_daemons",))
+    if len(positionals) != 1:
+        raise Usage("start takes exactly one task name")
+    task = positionals[0]
+    if not options.get("spec"):
+        raise Usage("start needs --spec <file> (GD-D9: the run spec is the only "
+                    "thing a driver authors)")
+    check_port_option(options.get("port"))
+
+    tasks_root = resolve_tasks_root(paths, options.get("tasks_root"))
+    task_dir = task_folder(tasks_root, task)
+
+    # ---- everything that can refuse happens BEFORE anything is created, so
+    # "bad spec -> nothing half-created" is a property of the ORDER of these
+    # statements and not a promise in a comment.
+    spec = read_json(options["spec"], "run spec")
+    project_dir = spec.get("project_dir") or paths.project_root()
+    constants, constants_path = project_constants(project_dir)
+    spec = merge_spec(spec, constants)
+    spec.setdefault("task", task)
+    spec.setdefault("project_dir", project_dir)
+    kind = spec_kind(spec)
+    shipped = template_path(spec, kind)
+    if constants_path:
+        say("project constants: %s (merged under the spec)" % constants_path)
+
+    say("preflight (D-12):")
+    preflight(spec, shipped, task=task)
+    if FAILS:
+        raise Refused("preflight failed — refusing to launch; nothing was "
+                      "created under %s" % tasks_root)
+    # The envelope has already been JUDGED by the preflight arms above; these
+    # two calls cannot raise here, and they are what the seed below reads.
+    roster = roster_entries(spec)
+    declared = declared_plans_total(spec, roster)
+
+    # ---- from here on it creates.
+    for sub in TASK_SUBDIRS:
+        os.makedirs(os.path.join(task_dir, sub), exist_ok=True)
+    say("task folder: %s (%s)" % (task_dir, ", ".join(TASK_SUBDIRS)))
+
+    copy = os.path.join(task_dir, "orch-scripts", os.path.basename(shipped))
+    shutil.copyfile(shipped, copy)
+    shutil.copymode(shipped, copy)
+    say("script: %s <- %s (byte-for-byte)" % (copy, shipped))
+
+    args = workflow_args(spec)
+    write_json(os.path.join(task_dir, "run-spec.json"), spec)
+
+    config = load_config(task_dir)
+    port = monitor_port(task_dir, options.get("port"))
+    config["port"] = port
+    config["strategy"] = spec.get("strategy") or (
+        "parallel" if spec.get("parallel") else "sequential")
+    if spec.get("max_attempts"):
+        config["max_plan_attempts"] = spec["max_attempts"]
+    if spec.get("finalgate_attempts"):
+        config["max_finalgate_attempts"] = spec["finalgate_attempts"]
+    write_json(os.path.join(task_dir, "orch-config.json"), config)
+    say("orch-config.json: caps and strategy published by touch-run, never by "
+        "the script (INVENTORY-2)")
+
+    # ---- the roster file (GD-D11). `ORCH_ROSTER` is a FILE PATH env var and
+    # never env-inlined JSON, so a roster cannot be as long as an argv allows
+    # and is bounded at the writer. One entry per line, `"<id> — <title>"` —
+    # the shape `monitoring.md` documents on the wire, in the one format a
+    # shell writer can read without a JSON parser it is not allowed to have.
+    roster_path = os.path.join(task_dir, "roster.txt")
+    if roster:
+        with open(roster_path, "w", encoding="utf-8") as fh:
+            for plan_id, plan_title in roster:
+                fh.write(oneline("%s — %s" % (plan_id, plan_title)
+                                 if plan_title else plan_id, 300) + "\n")
+        say("roster: %d entries -> %s (ORCH_ROSTER)" % (len(roster), roster_path))
+
+    # ---- the cards (GD-D11). `plans_total` is max(existing cards, declared):
+    # a re-seed over a stream that already has more cards than the spec declares
+    # must not shrink the denominator, and the monotonic-max fold downstream
+    # expects the same monotonicity from its seed.
+    seen = existing_card_ids(task_dir)
+    total = max(len(seen), declared) or None
+    title = spec.get("title") or "%s (%s)" % (task, kind)
+    emit(task_dir, "orchestrator", "launch", "running",
+         "launched by touch-run start", title=title, plans_total=total,
+         roster=roster_path if roster else None)
+    # A card is seeded ONCE. `plan` is a reserved stage that sets the badge and
+    # the fold is last-wins, so re-seeding a sub-plan that is already `running`
+    # or `done` would walk the dashboard backwards on a re-run.
+    seeded = 0
+    for plan_id, plan_title in roster:
+        if plan_id in seen:
+            continue
+        emit(task_dir, plan_id, "plan", "queued", "seeded by touch-run start",
+             title=plan_title, plans_total=total)
+        seeded += 1
+    kept = len(roster) - seeded
+    say("cards: %d seeded through touch-status (plans_total=%s%s)"
+        % (seeded + 1, total,
+           "" if not kept else "; %d roster card(s) already on the stream, left "
+                               "at the state they had" % kept))
+
+    listed, changed = active_edit(tasks_root, add=task)
+    say("run scope: ACTIVE %s %s (now: %s)"
+        % ("now lists" if changed else "already listed", task, ", ".join(listed)))
+
+    if options.get("no_daemons"):
+        say("daemons: not started (--no-daemons)")
+    else:
+        # The monitor is probed before it is started, never restarted: one
+        # server serves every task on the project, and restarting it would mint
+        # a new per-boot token and invalidate every dashboard URL already open.
+        monitor_pid_path = os.path.join(tasks_root, "monitor.pid")
+        if monitor_health(port):
+            # A positive probe is not proof it is OURS. One monitor serves every
+            # task on a PROJECT, not on a machine, and 8931 is a convention every
+            # checkout shares — so another project's server answers this probe
+            # too, and it will never list this task. Reporting it as "already
+            # serving" is exactly the silent-wrong-tree failure this file's
+            # header calls out for the tasks root.
+            alive, ours = daemon_state(read_pid_file(monitor_pid_path),
+                                       "monitor_server")
+            if alive and ours is not False:
+                say("monitor: already serving on %d — left alone (one server, "
+                    "every task)" % port)
+            else:
+                say("monitor: something answers /health on %d, but this project "
+                    "records no live monitor of its own in %s — it is most "
+                    "likely another project's server and it will NOT list this "
+                    "task; pass --port N or stop it" % (port, monitor_pid_path))
+        else:
+            pid, log = launch(
+                task_dir, [os.path.join(ROOT, "bin", "touch-monitor"), str(port)],
+                monitor_pid_path, os.path.join(tasks_root, "monitor.log"))
+            say("monitor: started on %d (pid %d, log %s)" % (port, pid, log))
+            healthy = False
+            for _ in range(20):                               # up to 5 s
+                time.sleep(0.25)
+                if monitor_health(port):
+                    healthy = True
+                    break
+                if still_running(pid, "monitor_server") is False:
+                    break                     # it died; no point waiting out 5 s
+            # Silence here is a report in its own right. Without it this command
+            # prints a dashboard URL for a server that is already dead, having
+            # spent five seconds saying nothing, and the reason sits unread in
+            # the log file nothing points at.
+            if not healthy:
+                if still_running(pid, "monitor_server") is False:
+                    say("monitor: pid %d exited before it answered /health — "
+                        "see %s (the port may already be taken)" % (pid, log))
+                else:
+                    say("monitor: did not answer /health within 5 s — see %s"
+                        % log)
+        # THE WATCHER IS NOT STARTED HERE unless there is already a journal for
+        # it to tail (see the header): this run's Workflow has not been launched
+        # yet, and a watcher with no `wf_dir` binds — once, at import — to
+        # whatever run was newest on the MACHINE and replays that run's cards
+        # and verdicts into this task's stream.
+        recorded = config.get("wf_dir")
+        if recorded and os.path.isdir(str(recorded)):
+            for line in start_watcher(task_dir, str(recorded)):
+                say(line)
+        else:
+            say("watcher: deferred to `touch-run bind` — there is no journal to "
+                "tail until the Workflow below has been launched, and a watcher "
+                "started without one attaches to another run")
+
+    url = dashboard_url(task_dir, port)
+    say()
+    say("dashboard: %s" % (url or "http://127.0.0.1:%d/ (token in %s/monitor.json)"
+                           % (port, task_dir)))
+    say("launch:")
+    say("  Workflow({ scriptPath: %s," % json.dumps(copy))
+    say("             args: %s })" % json.dumps(args, sort_keys=True))
+    say()
+    say("then, once that Workflow is running: touch-run bind %s" % task)
+    say("  (bind is what starts the watcher, on the journal it binds)")
+    return 0
+
+
+def verb_bind(paths, argv):
+    positionals, options = parse(
+        argv, valued=("wf_dir", "run_id", "port", "tasks_root"),
+        boolean=("no_daemons",))
+    if len(positionals) != 1:
+        raise Usage("bind takes exactly one task name")
+    task = positionals[0]
+    check_port_option(options.get("port"))
+    tasks_root = resolve_tasks_root(paths, options.get("tasks_root"))
+    task_dir = task_folder(tasks_root, task)
+    if not os.path.isdir(task_dir):
+        raise Refused("%s does not exist — run `touch-run start %s --spec …` "
+                      "first" % (task_dir, task))
+
+    config = load_config(task_dir)
+    wf_dir = (options.get("wf_dir") or os.environ.get("ORCH_WF_DIR")
+              or (config.get("wf_dir") if os.path.isdir(
+                  str(config.get("wf_dir") or "")) else None)
+              or newest_wf_dir())
+    if not wf_dir:
+        raise Refused("no Workflow journal found — pass --wf-dir <dir> (the "
+                      "run has to have been launched before it can be bound)")
+    run_id = options.get("run_id") or os.path.basename(os.path.normpath(wf_dir))
+    port = monitor_port(task_dir, options.get("port"))
+    config.update({"wf_dir": wf_dir, "resume_from_run_id": run_id, "port": port})
+    write_json(os.path.join(task_dir, "orch-config.json"), config)
+    say("bound: wf_dir=%s run_id=%s port=%d" % (wf_dir, run_id, port))
+
+    spec = {}
+    spec_path = os.path.join(task_dir, "run-spec.json")
+    if os.path.isfile(spec_path):
+        spec = read_json(spec_path, "run spec")
+    scripts = script_copies(task_dir)
+    resume = RESUME_TEMPLATE.format(
+        task=task, kind=spec_kind(spec).upper() if spec else "",
+        when=now(), task_dir=task_dir, run_id=run_id, wf_dir=wf_dir,
+        script=scripts[0] if scripts else "(no script copied)",
+        args=json.dumps(workflow_args(spec), sort_keys=True), port=port)
+    resume_path = os.path.join(task_dir, "plan", "RESUME.md")
+    os.makedirs(os.path.dirname(resume_path), exist_ok=True)
+    with open(resume_path, "w", encoding="utf-8") as fh:
+        fh.write(resume)
+    say("resume: %s rendered" % resume_path)
+
+    if options.get("no_daemons"):
+        say("daemons: not started (--no-daemons)")
+    else:
+        # Both per-run daemons start HERE, on the directory this verb just
+        # bound (see `start_watcher` for why it travels in argv, and why any
+        # predecessor is stopped rather than left running beside it).
+        for line in start_watcher(task_dir, wf_dir):
+            say(line)
+        pid, log = launch_daemon(
+            task_dir, "reporter",
+            [os.path.join(ROOT, "bin", "touch-cycle-reporter"), wf_dir])
+        say("reporter: pid %d (log %s)" % (pid, log))
+    return 0
+
+
+def reporter_supports_settle():
+    """Whether the shipped reporter has `--settle` yet (it lands in D-14).
+
+    Asked of the file rather than assumed, because this command must work
+    BEFORE that item lands and must use it the moment it does. A reporter
+    without the flag is not an error: `close` says so and moves on, and the
+    cards it would have settled are settled by the watcher's own run-end pass.
+    """
+    path = os.path.join(ROOT, "skills", "implement", "templates",
+                        "cycle_reporter.py")
+    try:
+        return "--settle" in open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return False
+
+
+def verb_close(paths, argv):
+    positionals, options = parse(
+        argv, valued=("state", "summary", "tasks_root"))
+    if len(positionals) != 1:
+        raise Usage("close takes exactly one task name")
+    task = positionals[0]
+    state = options.get("state") or "done"
+    if state not in ("done", "failed"):
+        raise Usage("--state takes done or failed (got %r)" % state)
+    # R-58, applied to the run close: `failed` is only ever the caller's own
+    # explicit claim. Nothing here infers it, and a run whose agents all
+    # returned without a decisive verdict settles `done` with the honest
+    # wording — a fabricated FAILED badge was a real defect once.
+    summary = options.get("summary") or "closed — no verdict"
+
+    tasks_root = resolve_tasks_root(paths, options.get("tasks_root"))
+    task_dir = task_folder(tasks_root, task)
+    if not os.path.isdir(task_dir):
+        raise Refused("%s does not exist" % task_dir)
+    config = load_config(task_dir)
+
+    # 1. settle the cards a loop left open, if the reporter can (D-14).
+    wf_dir = config.get("wf_dir")
+    if not reporter_supports_settle():
+        say("settle: this payload's cycle_reporter.py has no --settle yet "
+            "(D-14) — skipped; the watcher's run-end pass still closes cards")
+    elif not wf_dir:
+        say("settle: no wf_dir recorded (run `touch-run bind` next time) — skipped")
+    else:
+        env = dict(os.environ)
+        env["ORCH_STATE_DIR"] = task_dir
+        # A wedged or missing reporter must not turn a close-out into a
+        # traceback: the sentinel would still list this task and the daemons
+        # would still be up. Step 1 is the OPTIONAL one — steps 2, 3 and 4 are
+        # the ones a run cannot be left without, so every failure here is a
+        # printed sentence and the command carries on.
+        try:
+            res = subprocess.run(
+                [os.path.join(ROOT, "bin", "touch-cycle-reporter"), wf_dir,
+                 "--settle"], env=env, capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as exc:
+            say("settle: reporter did not complete (%s: %s) — cards it would "
+                "have settled are left to the watcher's run-end pass"
+                % (type(exc).__name__, oneline(exc)))
+        else:
+            say("settle: %s" % ("ok" if res.returncode == 0
+                                else "reporter exited %d (%s)"
+                                     % (res.returncode, oneline(res.stderr))))
+
+    # 2. the run card, only if no earlier GD-D6 rung has already closed it.
+    closed = run_is_closed(task_dir)
+    if closed:
+        say("close: already closed by an earlier rung (%s — %s); no second "
+            "event written" % (closed.get("state"),
+                               oneline(closed.get("detail"), 80)))
+    else:
+        emit(task_dir, "orchestrator", "complete", state, summary)
+        say("close: orchestrator complete %s — %s" % (state, sanitize_detail(summary)))
+
+    # 3. the run scope. ONLY this task's line.
+    listed, changed = active_edit(tasks_root, remove=task)
+    say("run scope: %s from ACTIVE (still listed: %s)"
+        % ("removed " + task if changed else task + " was not listed",
+           ", ".join(listed) or "nothing"))
+
+    # 4. the daemons, by recorded pid. The monitor is shared and is left alone.
+    for which in ("watcher", "reporter"):
+        say("stop %s" % stop(task_dir, which))
+    say("monitor: left running (one server serves every task on this project)")
+    return 0
+
+
+def verb_verify(paths, argv):
+    positionals, options = parse(
+        argv, valued=("spec", "script", "task", "tasks_root"))
+    if len(positionals) > 1:
+        raise Usage("verify takes at most one task name")
+    task = positionals[0] if positionals else options.get("task")
+    spec_path = options.get("spec")
+    script = options.get("script")
+
+    if positionals:
+        tasks_root = resolve_tasks_root(paths, options.get("tasks_root"))
+        task_dir = task_folder(tasks_root, task)
+        spec_path = spec_path or os.path.join(task_dir, "run-spec.json")
+        if not script:
+            copies = script_copies(task_dir)
+            if not copies:
+                raise Refused("%s/orch-scripts holds no *.workflow.js copy"
+                              % task_dir)
+            script = copies[0]
+    if not spec_path:
+        raise Usage("verify needs a task name or --spec <file>")
+
+    spec = read_json(spec_path, "run spec")
+    project_dir = spec.get("project_dir") or paths.project_root()
+    constants, _ = project_constants(project_dir)
+    spec = merge_spec(spec, constants)
+    if task:
+        spec.setdefault("task", task)
+    spec.setdefault("project_dir", project_dir)
+    kind = spec_kind(spec)
+    shipped = template_path(spec, kind)
+    # The byte-identity arm is asked ONLY of a task folder's copy, which is what
+    # GD-D9 legislates. A bare `--script <file>` is somebody preflighting a file
+    # they named on purpose — comparing it against the shipped template would
+    # report a rule that does not apply to it, and a check that fires where its
+    # rule does not is how a gate gets switched off wholesale.
+    preflight(spec, script or shipped, task=task,
+              shipped=shipped if positionals else None)
+    say()
+    if FAILS:
+        say("%d check(s) failed — this run would be REFUSED at launch" % FAILS)
+        return 1
+    say("preflight clean — this spec may launch")
+    return 0
+
+
+def verb_status(paths, argv):
+    positionals, options = parse(argv, valued=("tasks_root",))
+    if len(positionals) != 1:
+        raise Usage("status takes exactly one task name")
+    task = positionals[0]
+    tasks_root = resolve_tasks_root(paths, options.get("tasks_root"))
+    task_dir = task_folder(tasks_root, task)
+    say("task folder: %s%s" % (task_dir, "" if os.path.isdir(task_dir)
+                               else "  (does not exist)"))
+    if not os.path.isdir(task_dir):
+        return 1
+
+    config = load_config(task_dir)
+    say("wf_dir: %s" % (config.get("wf_dir") or "(unbound — run touch-run bind)"))
+    say("run id: %s" % (config.get("resume_from_run_id") or "(unbound)"))
+
+    listed = active_list(tasks_root)
+    say("run scope: ACTIVE %s this task (listed: %s)"
+        % ("lists" if task in listed else "does NOT list",
+           ", ".join(listed) or "nothing"))
+
+    port = monitor_port(task_dir)
+    health = monitor_health(port)
+    # `/health` is the one untokened route, so its whole payload is fair to
+    # print — but only the two summary numbers, not the per-stream block, which
+    # is long and is the dashboard's business rather than a status line's.
+    detail = ""
+    if isinstance(health, dict):
+        detail = " (status %s, %d stream(s) scanned)" % (
+            oneline(health.get("status", "?"), 20),
+            len(health.get("streams") or {}))
+    say("monitor: %s on %d%s"
+        % ("alive" if health else "no answer", port, detail))
+    url = dashboard_url(task_dir, port)
+    if url:
+        say("dashboard: %s" % url)
+
+    for which in ("watcher", "reporter"):
+        pid = read_pid(task_dir, which)
+        if pid is None:
+            say("%s: no pid recorded" % which)
+            continue
+        alive, ours = daemon_state(pid, DAEMONS[which][2])
+        say("%s: pid %d %s%s"
+            % (which, pid, "alive" if alive else "NOT running",
+               ownership_note(ours) if alive else ""))
+
+    events = read_events(task_dir)
+    say("stream: %d events, %d distinct cards"
+        % (len(events), existing_cards(task_dir, run_card=True)))
+    if events:
+        last = events[-1]
+        say("last: %s %s/%s/%s %s"
+            % (last.get("ts"), last.get("plan"), last.get("stage"),
+               last.get("state"), oneline(last.get("detail"), 80)))
+    closed = run_is_closed(task_dir)
+    say("run close: %s" % ("%s (%s)" % (closed.get("state"),
+                                        oneline(closed.get("detail"), 60))
+                           if closed else "open"))
+    return 0
+
+
+VERBS = {"start": verb_start, "bind": verb_bind, "close": verb_close,
+         "verify": verb_verify, "status": verb_status}
+
+
+def main():
+    if not ARGV or ARGV[0] in ("-h", "--help", "help"):
+        sys.stdout.write(USAGE)
+        return 0 if ARGV else 2
+    verb = ARGV[0]
+    if verb not in VERBS:
+        oops("unknown verb %r (try --help)" % verb)
+        return 2
+    try:
+        paths = load_paths()
+    except Exception as exc:                     # a broken or partial payload
+        oops("the aggregator package would not import from %s (%s: %s)"
+             % (ROOT, type(exc).__name__, oneline(exc)))
+        return 1
+    try:
+        return VERBS[verb](paths, ARGV[1:])
+    except Usage as exc:
+        oops("%s" % exc)
+        sys.stderr.write(USAGE)
+        return 2
+    except Refused as exc:
+        oops("%s" % exc)
+        return 1
+    except KeyboardInterrupt:
+        oops("interrupted")
+        return 130
+
+
+sys.exit(main())
+PY

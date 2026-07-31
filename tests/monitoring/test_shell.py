@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stdlib-only tests for sp-shell fixes (status.sh + implement-plan implement
+"""Stdlib-only tests for sp-shell fixes (status.sh + implement implement
 workflow template + docs). Run as `python3 test_shell.py`; exits non-zero on the first failure.
 No pytest, no omnigent imports. Uses ephemeral dirs under /tmp/claude-1000.
 """
@@ -26,11 +26,11 @@ WATCHER_PY = MON / "decision_watcher.py"
 # copy, in the payload. These constants follow them — the assertions below are
 # about the reference protocol's text, wherever that text now lives.
 SKILLS = PAYLOAD / "skills"
-TEMPLATE = SKILLS / "implement-plan/templates/implement.workflow.js"
-RESEARCH_TEMPLATE = SKILLS / "execute-research/templates/research.workflow.js"
+TEMPLATE = SKILLS / "implement/templates/implement.workflow.js"
+RESEARCH_TEMPLATE = SKILLS / "research/templates/research.workflow.js"
 MONITORING_MD = MON / "monitoring.md"
-M_SKILL = SKILLS / "m-orchestrator/SKILL.md"
-D_SKILL = SKILLS / "implement-plan/SKILL.md"
+M_SKILL = SKILLS / "monitor/SKILL.md"
+D_SKILL = SKILLS / "implement/SKILL.md"
 GITIGNORE = REPO / ".gitignore"
 
 TMP_ROOT = "/tmp/claude-1000"
@@ -338,6 +338,87 @@ def test_status_ladder_is_three_rungs():
         shutil.rmtree(base, ignore_errors=True)
 
 
+#: Words that mark a mention of the deleted rung as HISTORY rather than as a
+#: live fallback. Same bargain `test_status_ladder_is_three_rungs` above makes
+#: for `status.sh`'s own docstring: a comment that cannot say "this used to
+#: exist and does not any more" is a comment that leaves the next reader to
+#: rediscover the deletion.
+RUNG_RETIRED = ("delet", "no fourth", "not four", "gone", "no longer",
+                "removed", "does not exist")
+
+
+def test_no_wrapper_documents_a_fourth_resolver_rung():
+    """D-25: the first file a debugger opens must not document a dead fallback.
+
+    Three `bin/` wrappers described the tasks-root resolver as "the four rungs
+    both daemons use", ending in "a module-relative legacy path kept only if it
+    already exists". That rung was DELETED with GD-U1 — `status.sh`'s
+    `resolve_tasks_root()` has three — and the arm above proves the deletion in
+    the code. This one proves nobody is still promising it in prose, which is
+    the half a source-of-truth test cannot see: a wrapper is the first thing
+    read when events land nowhere, and it was sending readers to look for a
+    sibling-directory fallback that cannot fire.
+
+    Sentence-scoped, not file-scoped. Every wrapper that mentions the deleted
+    rung SHOULD say it is deleted — that is the useful comment — so the guard
+    fires only on a sentence that names it without retiring it.
+    """
+    print("test_no_wrapper_documents_a_fourth_resolver_rung")
+    wrappers = sorted(p for p in (PAYLOAD / "bin").iterdir() if p.is_file())
+    # Pinned at seven, not `>= 6`: D-13 made it seven (the six a session runs
+    # plus `touch-selfcheck`), and a floor would stay green if one vanished —
+    # which would also silently shrink what the fourth-rung scan below covers.
+    check(len(wrappers) == 7,
+          f"the bin/ wrappers were found (7 expected, {len(wrappers)} present: "
+          f"{', '.join(p.name for p in wrappers)})")
+    live_claims, ladders = [], []
+    for wrapper in wrappers:
+        text = wrapper.read_text(encoding="utf-8", errors="replace")
+        # Comments only: this is a claim about documentation, and the code the
+        # wrappers run resolves nothing (that is the whole design — one
+        # resolver, in the callee).
+        comments = " ".join(ln.lstrip().lstrip("#").strip()
+                            for ln in text.splitlines()
+                            if ln.lstrip().startswith("#"))
+        flat = re.sub(r"\s+", " ", comments)
+        for sentence in re.split(r"(?<=[.!?])\s+", flat):
+            low = sentence.lower()
+            names_it = ("../../local-orchestrators" in low
+                        or "module-relative" in low
+                        or "four rungs" in low or "fourth rung" in low)
+            if not names_it:
+                continue
+            if any(word in low for word in RUNG_RETIRED):
+                continue
+            live_claims.append(f"{wrapper.name}: {sentence.strip()[:90]}")
+        # The positive half, scoped to the wrappers that ENUMERATE the ladder —
+        # marked by naming its first rung, `$ORCH_TASKS_ROOT`, in a comment.
+        # "tasks root" + "rung" alone is too wide: `touch-run` and
+        # `touch-selfcheck` say "rung" about `wf_dir` discovery, close-out rungs
+        # and delegation ("never copied — a second copy would pin the callee's
+        # first rung"), which is the CORRECT thing for a wrapper to say and must
+        # not be forced to recite a count it deliberately does not restate.
+        if "$ORCH_TASKS_ROOT" in flat and "rung" in flat.lower():
+            ladders.append(wrapper.name)
+            # "three rungs", or a comment that enumerates them and then counts
+            # what it listed ("any of the three") — `touch-selfcheck` spells it
+            # the second way and is not wrong, so the guard reads for the COUNT,
+            # not for one phrasing of it.
+            low = flat.lower()
+            check("three rung" in low or "the three" in low
+                  or "all three" in low,
+                  f"{wrapper.name} says the tasks-root ladder has THREE rungs")
+            check("status.sh" in flat,
+                  f"{wrapper.name} names shared/monitoring/status.sh as the "
+                  f"ladder's owner, rather than restating it as its own")
+    check(not live_claims,
+          f"no bin/ wrapper documents the deleted module-relative fourth rung "
+          f"as if it still resolved (bad: {live_claims})")
+    check(len(ladders) >= 3,
+          f"the wrappers that describe the tasks-root ladder were found and "
+          f"checked (found {ladders})")
+
+
 # --- status.sh: ORCH_PLANS_TOTAL declares the run's plan-card total (additive,
 #     best-effort like ORCH_TITLE: garbage warns and is omitted, never fails)
 def test_status_plans_total():
@@ -373,14 +454,15 @@ def test_template_static():
     # SHELL-2 / D2: Test marker is role=test, and no gate:run remains in the reference loop.
     check("stage=test role=test attempt=" in src, "Test marker line reads role=test")
     check("role=gate:run" not in src, "no role=gate:run remains in the reference loop")
-    # SHELL-10: statusCmd quotes the path interpolations. Item 09 replaced the
-    # baked `bash "${S}"` writer path with the bare command name `${STATUS}`
-    # (`touch-status`) — a PATH lookup survives a plugin update, a path into the
-    # version-stamped plugin cache does not. The QUOTING is what this arm is
-    # about, and it is unchanged: ${TASK} and ${plan} still carry agent-authored
-    # text into a shell.
-    check('ORCH_STATE_DIR="${TASK}" ${STATUS} "${plan}"' in src,
-          "statusCmd quotes ${TASK}/${plan} around the bare writer command")
+    # SHELL-10 used to pin `statusCmd`'s quoting, because the prompt text it
+    # built carried agent-authored values (${TASK}, ${plan}) into an agent's
+    # shell. D-09 deleted the mandated FIRST/LAST calls those strings existed
+    # for, and D-10 deleted the script-side emitter beside them, so there is no
+    # status command in either template to quote. The quoting risk is gone
+    # because the construct is gone — assert THAT, not a shape that no longer
+    # exists. (`tests/test_skills_payload.py` owns the full D-09/D-10 pins.)
+    check("const statusCmd" not in src and 'ORCH_STATE_DIR="' not in src,
+          "no template-built status command survives (D-09/D-10)")
     # SHELL-8, superseded by the infra guard: a dead gate used to be laundered
     # into a fabricated `{ passed: false, summary: 'gate agent died' }` red via
     # a placeholder findings file — an attempt spent on infrastructure. The
@@ -408,19 +490,19 @@ def test_docs_static():
 
     # cache_write in token schema blocks of both docs.
     check("cache_write" in md, "monitoring.md documents cache_write")
-    check("cache_write" in ms, "m-orchestrator SKILL.md documents cache_write")
+    check("cache_write" in ms, "monitor SKILL.md documents cache_write")
     # stale in the state enum of both docs.
     check("failed|info|stale" in md, "monitoring.md state enum includes stale")
-    check("done|failed|info|stale" in ms, "m-orchestrator SKILL.md state enum includes stale")
+    check("done|failed|info|stale" in ms, "monitor SKILL.md state enum includes stale")
     # files_changed added to the shape-key list in both docs.
     check("fixed_ids`/`files_changed`" in md, "monitoring.md shape list includes files_changed")
-    check("fixed_ids`/`files_changed`" in ms, "m-orchestrator SKILL.md shape list includes files_changed")
+    check("fixed_ids`/`files_changed`" in ms, "monitor SKILL.md shape list includes files_changed")
     # agent sub-object documented in both docs.
     check('"agent"' in md and '"runtime"' in md, "monitoring.md documents the agent sub-object")
-    check('"agent"' in ms and '"runtime"' in ms, "m-orchestrator SKILL.md documents the agent sub-object")
-    # config-driven caps noted (D4/#11) in monitoring.md and implement-plan SKILL.md.
+    check('"agent"' in ms and '"runtime"' in ms, "monitor SKILL.md documents the agent sub-object")
+    # config-driven caps noted (D4/#11) in monitoring.md and implement SKILL.md.
     check("max_gate_attempts" in md, "monitoring.md notes config attempt caps")
-    check("max_gate_attempts" in ds, "implement-plan SKILL.md notes config attempt caps")
+    check("max_gate_attempts" in ds, "implement SKILL.md notes config attempt caps")
     # M2: the config is re-read while the watcher runs (it starts before the
     # orchestrator script that publishes the caps).
     check("re-reads this file" in md,
@@ -850,123 +932,95 @@ def test_status_argv_call_is_injection_safe():
         shutil.rmtree(base, ignore_errors=True)
 
 
-# --- R-09 / R-58: both templates emit the terminal plan + run events themselves
-def test_templates_emit_terminal_events():
-    print("test_templates_emit_terminal_events")
+# --- GD-D5 / D-10: neither template emits events; the daemons do
+def test_templates_emit_no_events():
+    """The script-side emitters are GONE, and that is the correction.
+
+    These templates used to carry `runStatus`/`closeRun`/`publishConfig`, and
+    this test used to pin their shape. Every one of them silently no-opped in
+    every real run: the workflow runtime has no Node API, so the
+    `import('node:child_process')` inside them threw and was swallowed by the
+    helper's own try/catch — 105 dead-import proof lines across 14 of 28
+    recorded runs, one of which failed on nothing else. Pinning the shape of a
+    call that never happens is how a maintainer debugging a missing badge ends
+    up in the wrong file, so D-10 deleted the plumbing and this arm inverted.
+
+    Who emits what now (GD-D5, and the templates say so in their own headers):
+    `decision_watcher.py` derives spawn/result/verdict/token events from the
+    journal and the `[monitor]` marker; `cycle_reporter.py` emits the
+    loop-terminal `plan done|failed` events; `touch-run` owns the run envelope
+    and stops the daemons by recorded pid. `status.sh` is still the ONE write
+    path into events.jsonl (its three legitimate callers are a human, a driver
+    and those emitters), which is what the rest of this file tests.
+
+    Ownership note: `tests/monitoring/test_shell.py` belongs to the docs
+    sub-plan of the touch-determinism run, which owns one unrelated assertion
+    in it. This function was rewritten here rather than left red because a
+    sub-plan may not hand a later one a broken suite.
+    """
+    print("test_templates_emit_no_events")
     for path in (TEMPLATE, RESEARCH_TEMPLATE):
         src = path.read_text()
         name = path.name
-        # Script-emitted, not agent-emitted: the events must come from a call the
-        # script makes, at a fixed control-flow point.
-        check("const runStatus" in src, f"{name}: has a script-side status emitter")
-        # The run-close state must be a VARIABLE, never a literal: a hardcoded
-        # 'done' painted a thrown run green on the home grid (the mirror image of
-        # the fabricated `failed` badge R-58 exists to kill).
-        check(re.search(r"runStatus\(\s*'orchestrator',\s*'complete',\s*state\b", src),
-              f"{name}: the run-close event carries the run's real state")
-        check(not re.search(r"runStatus\(\s*'orchestrator',\s*'complete',\s*'", src),
-              f"{name}: no hardcoded orchestrator-complete state")
-        # Both arms of the contract, per template: same closeRun arity in both, a
-        # 'done' close on the success path, 'failed' on every throw path.
-        check(re.search(r"const closeRun = async \(state, summary\)", src),
-              f"{name}: closeRun(state, summary) — same shape in both templates")
-        check("closeRun('failed'" in src,
-              f"{name}: the throw path closes the run FAILED")
-        check("closeRun('done'" in src
-              or re.search(r"closeRun\(\w+ \? 'done' : 'failed'", src),
-              f"{name}: the success path closes the run done")
-        check(re.search(r"runStatus\([^)]*'plan',\s*'done'", src),
-              f"{name}: emits a terminal `plan done`")
-        # R-40: the epilogue must never name-match kill other tasks' daemons, and
-        # must never stop the SHARED monitor server (one server serves all tasks).
-        check("pkill" not in src, f"{name}: no pkill in the epilogue (wrong-target kill)")
-        check("watcher.pid" in src, f"{name}: the watcher is stopped by recorded pid")
-        check("monitor.pid" not in src,
+        # Code only: both headers NAME the deleted helpers while explaining why
+        # nothing calls them, and that explanation is what keeps them deleted.
+        code = "\n".join(ln for ln in src.splitlines()
+                          if not ln.lstrip().startswith("//"))
+        check("import('node:" not in code,
+              f"{name}: no dynamic node: import survives")
+        for helper in ("runStatus", "closeRun", "publishConfig"):
+            check(f"{helper}(" not in code,
+                  f"{name}: nothing calls the dead `{helper}(` helper")
+        # The deterministic emitters are NAMED, so a reader looking for the
+        # missing badge is sent to the right file.
+        for daemon in ("decision_watcher.py", "cycle_reporter.py", "touch-run"):
+            check(daemon in src, f"{name}: names {daemon} as an emitter")
+        # R-40's kill discipline still holds, now by being absent: the daemon
+        # epilogue moved to `touch-run close`, which stops watcher and reporter
+        # by RECORDED, /proc-verified pid. A template that grew a kill path
+        # again would be a per-task epilogue able to take down the shared
+        # monitor server that serves every other live run.
+        check("pkill" not in code, f"{name}: no pkill (wrong-target kill)")
+        check("process.kill" not in code, f"{name}: no signal from the script")
+        check("monitor.pid" not in code,
               f"{name}: the shared monitor server is never killed per task")
-        # m3: a RECORDED pid is not enough — a stale pid file is the same
-        # wrong-target hazard as a name-matched kill, so the target is verified
-        # before the signal and the kill is skipped when it cannot be verified.
-        check("/proc/${pid}/cmdline" in src,
-              f"{name}: the pid is verified against /proc before signalling")
-        check(re.search(r"includes\('decision_watcher'\)", src),
-              f"{name}: only a real decision_watcher is signalled")
-        check(src.index("cmdline") < src.index("process.kill"),
-              f"{name}: verification happens BEFORE process.kill")
-        # M1: status events are executed as argv, never as a shell string — the
-        # plan id / detail can be agent-authored (divider output, file paths).
-        check("['-c'" not in src and '["-c"' not in src,
-              f"{name}: no `bash -c` execution of a status command")
-        # Item 09 turned the writer into the bare command `STATUS`
-        # (`touch-status`), with an absolute-wrapper fallback for a runtime
-        # whose PATH lacks the plugin's bin/. BOTH spawns must stay argv —
-        # the fallback is the easy one to forget.
-        check(re.search(r"(spawnSync|execFileSync)\(STATUS, argv", src),
-              f"{name}: the writer is invoked with argv, not a shell string")
-        check(re.search(r"(spawnSync|execFileSync)\('bash', \[STATUS_FALLBACK, \.\.\.argv\]", src),
-              f"{name}: the PATH-less fallback is argv too")
-        check("ORCH_STATE_DIR: TASK" in src,
-              f"{name}: the state dir travels in the child env, not in a shell string")
-        # n1: status.sh warns on stderr and still exits 0 — the warning must be
-        # captured and logged, never discarded with stdio:'ignore'.
-        check("stdio: 'ignore'" not in src,
-              f"{name}: the status call does not discard status.sh's stderr")
-        check("r.stderr" in src and "log(" in src,
-              f"{name}: a status.sh warning is logged, not swallowed")
-        # plans_total: each template declares the run's expected plan-card
-        # count at a fixed control-flow point (env, never argv), so dashboards
-        # can render progress over ALL plans, unstarted ones included.
-        check("ORCH_PLANS_TOTAL" in src,
-              f"{name}: declares the run's plan-card total via ORCH_PLANS_TOTAL")
-        check(re.search(r"\.\.\.\(extraEnv \|\| \{\}\)", src),
-              f"{name}: extra status env rides the child env, not the argv contract")
-        # R-09: caps/strategy published to orch-config.json so the watcher quotes
-        # the real numbers. The watcher re-reads the file while running, so the
-        # comment must not claim (nor rely on) publishing before daemon start.
-        check("orch-config.json" in src, f"{name}: publishes orch-config.json")
-        check("strategy" in src, f"{name}: publishes the strategy key")
-        # m1/GD-10: `serial` is the LEGACY opt-in that re-enables the retired
-        # sequenced plan-close heuristic. No template may stamp a new run with it.
-        check(not re.search(r"strategy:\s*'serial'", src)
-              and "'parallel' : 'serial'" not in src,
-              f"{name}: never publishes the legacy strategy 'serial'")
-        # M2: the comments must credit the real R-58 fix (the watcher's close
-        # predicate), not the config write — a maintainer who believes the old
-        # claim could "simplify" the predicate and resurrect the defect.
-        check("close_state_for" in src,
-              f"{name}: names close_state_for() as what prevents the fabricated badge")
-        check("what stops a fabricated" not in src,
-              f"{name}: no longer claims the strategy key is what fixes R-58")
+        # M1's injection lesson, kept as an absence: no status command is built
+        # as a shell string anywhere, for the script OR for a prompt.
+        check("['-c'" not in code and '["-c"' not in code,
+              f"{name}: no `bash -c` execution of anything")
+        # GD-D1a: the marker is the one prompt line that must never be trimmed
+        # — every event the watcher derives is classified from it.
+        check("[monitor] plan=" in src,
+              f"{name}: the [monitor] marker is still authored into the prompts")
 
     impl = TEMPLATE.read_text()
-    check("max_plan_attempts: MAX_ATTEMPTS" in impl,
-          "implement template publishes MAX_ATTEMPTS as max_plan_attempts")
-    check("max_finalgate_attempts: FINALGATE_ATTEMPTS" in impl,
-          "implement template publishes the final-gate cap")
-    check(re.search(r"runStatus\(sp\.id,\s*'plan',\s*'failed',\s*`attempts exhausted", impl),
-          "implement template emits `plan failed \"attempts exhausted N/N\"`")
     check("FINALGATE_ATTEMPTS; fga++" in impl,
           "the final-gate loop bound is the published cap, not a literal")
+    # The caps are still the loop's own numbers; they reach orch-config.json
+    # through `touch-run`, which publishes them from the run spec (D-13).
+    check("const MAX_ATTEMPTS = ARGS.max_attempts" in impl,
+          "implement template takes its attempt cap from the run spec")
+    check("const FINALGATE_ATTEMPTS = ARGS.finalgate_attempts" in impl,
+          "implement template takes its final-gate cap from the run spec")
 
     research = RESEARCH_TEMPLATE.read_text()
-    check(re.search(r"runStatus\('research',\s*'plan',\s*'done'", research),
-          "research template closes the research plan at the barrier")
-    check(re.search(r"runStatus\('synthesis',\s*'plan',\s*'done'", research),
-          "research template closes the synthesis plan from the script")
-    check("statusCmd('synthesis', 'plan', 'done'" not in research,
-          "the synthesis plan-done is no longer left to the agent's prompt")
-    # n-4: with zero reports there is nothing to synthesize. Spawning synthesis
-    # anyway produced a second failure while the log read as a normal run.
-    zero_branch = research[research.index("no researcher returned"):
-                           research.index("phase('Synthesize')")]
-    check("closeRun('failed'" in zero_branch and "throw new Error" in zero_branch,
-          "the zero-report branch closes the run and throws, never spawns synthesis")
-    # M-2: the epilogue signals the watcher immediately, which is only safe
-    # because the watcher drains on SIGTERM. Say so where the signal is written,
-    # so neither side is "simplified" away in isolation.
-    for path in (TEMPLATE, RESEARCH_TEMPLATE):
-        src = path.read_text()
-        check("DRAIN" in src or "drain" in src,
-              f"{path.name}: the epilogue documents the watcher's SIGTERM drain")
+    # n-4, unchanged in substance: with a short board there is nothing to
+    # synthesize, so the branch throws instead. What changed is what it CLAIMS.
+    # The script cannot write an event (GD-D5), and the badge it would like to
+    # claim is not the one that lands: cycle_reporter.py's zero-return rule
+    # closes a research card `failed` only on an EMPTY board, while a PARTIAL
+    # board carries results with `findings` and reads as `done`. A log line
+    # announcing "closes failed" beside a green dashboard is R-58's defect with
+    # the sign flipped, so the branch reports only what it did.
+    start = research.find("|| reports.length < MIN_REPORTS)")
+    end = research.find("phase('Synthesize')")
+    check(start != -1 and end != -1 and start < end,
+          "the short-board branch stands between the barrier and synthesis")
+    zero_branch = research[start:end] if (start != -1 and end != -1) else ""
+    check("throw new Error" in zero_branch,
+          "the short-board branch throws, never spawns synthesis")
+    check("closes failed" not in zero_branch,
+          "the short-board branch claims no verdict this script cannot cause")
 
 
 # --- .gitignore entries (R-01 + R-42's Mongo additions, SD-3) + negatives
@@ -992,9 +1046,12 @@ def test_gitignore():
     # `*.md`). The `.claude/local-orchestrators/…` line is legacy defence: since
     # the tasks-root move the live tree is `.touch/local-orchestrators/`, ignored
     # by `/.touch/*`, and that rule stays so a re-created old tree is still
-    # ignored.
+    # ignored. `!/.touch/run.json` is the SECOND and only other carve (D-12):
+    # the tracked per-project run constants a workflow template consumes
+    # through `args` — a single file, never widened to a directory.
     for entry in ("/.touch/*", "/.touch?*/", "!/.touch/memory/",
                   "/.touch/memory/*", "!/.touch/memory/*.md",
+                  "!/.touch/run.json",
                   ".claude/settings.local.json", "*.pid",
                   ".claude/local-orchestrators/*/.watcher-state.json",
                   "mongo-data/", "mongo-dump/", "*.bson"):
@@ -1031,7 +1088,14 @@ def test_gitignore():
     # the monitoring suite's own copy of the SD-3 twin and a half-flipped carve
     # must fail on both sides.
     check(not ignored(".touch/memory/does-not-exist.md"),
-          ".touch/memory/*.md is the ONE tracked subtree of .touch/")
+          ".touch/memory/*.md is the one tracked SUBTREE of .touch/")
+    # …and D-12's carve is the one tracked FILE. Two carves, both by name — the
+    # behavioural half of the entry-list assertion above, so a carve that is
+    # present as a line but defeated by ordering still fails here.
+    check(not ignored(".touch/run.json"),
+          ".touch/run.json is the one tracked FILE of .touch/ (D-12)")
+    check(ignored(".touch/run.json.bak") and ignored(".touch/runs.json"),
+          "the run.json carve stays a single file, not a prefix")
     for leaked in (".touch/memory/x.pid", ".touch/memory/x.token",
                    ".touch/memory/draft.md.bak", ".touch/memory/.history/x.md",
                    ".touch/memory/.trash/x.md", ".touch/memory-audit.jsonl",
@@ -1050,7 +1114,8 @@ def main():
               test_status_argv_call_is_injection_safe, test_status_plans_total,
               test_status_walk_up_is_forkless_and_still_walks,
               test_status_ladder_is_three_rungs,
-              test_template_static, test_templates_emit_terminal_events,
+              test_no_wrapper_documents_a_fourth_resolver_rung,
+              test_template_static, test_templates_emit_no_events,
               test_docs_static, test_gitignore):
         t()
     print()

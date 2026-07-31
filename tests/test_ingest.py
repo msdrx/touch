@@ -1099,6 +1099,327 @@ def test_the_snapshot_backfills_without_clobbering():
               "document — back-fill, never clobber (R-49)")
 
 
+#: D-02's shape, FROZEN: one runId with two `<runId>.json` copies under two
+#: session directories, disagreeing about status and every total. The real
+#: `wf_617adbe5-42a` — `failed`/37/3.66 M in the copy that sorts first,
+#: `killed`/59/4.32 M in the authoritative later one. See
+#: `tests/fixtures/PROVENANCE.md`.
+DUP_FIX = FIX / "dup-snapshot-wf_617adbe5"
+DUP_FIX_RUN = "wf_617adbe5-42a"
+DUP_FIX_EARLY = "1be0c928-c46d-424c-ad91-7e3cc56739f0"
+DUP_FIX_LATE = "f6fa2bbd-7c36-42f8-bf35-38e8a4b54d87"
+
+#: The same shape SYNTHESIZED, for the arms the frozen pair cannot serve: the
+#: fixture is snapshots only (its 4 000-record journals are not part of the
+#: corpus), so `read_run`'s counters and the per-node D-03 fields need a run
+#: directory with a journal in it.
+DUP_RUN = "wf_dup00001-a1b"
+DUP_SESSIONS = ("11112222-3333-4444-8555-666677778888",
+                "99990000-1111-4222-8333-444455556666")
+DUP_AGENT = "a1" + "2" * 15
+
+
+def duplicate_snapshot_root(tmp, *, second=True):
+    """A run whose journal is in session one and whose snapshot is in BOTH.
+
+    The earlier snapshot sorts FIRST by path (its session UUID begins `1111`),
+    which is exactly the trap: `sorted()[0]` is an ordering on a session id and
+    has nothing to do with time.
+    """
+    root = os.path.join(tmp, "claude")
+    slug_dir = os.path.join(root, "projects", OWNED_SLUG)
+    run_dir = os.path.join(slug_dir, DUP_SESSIONS[0], "subagents", "workflows", DUP_RUN)
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "journal.jsonl"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "started", "key": "sp-01/implement",
+                             "agentId": DUP_AGENT}) + "\n")
+
+    def snapshot(session, stamp, status, agents, tokens, tools, duration, tool_summary):
+        directory = os.path.join(slug_dir, session, "workflows")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, DUP_RUN + ".json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "runId": DUP_RUN, "timestamp": stamp, "status": status,
+                "agentCount": agents, "totalTokens": tokens, "totalToolCalls": tools,
+                "durationMs": duration,
+                "workflowProgress": [{
+                    "type": "workflow_agent", "agentId": DUP_AGENT,
+                    "label": "sp-01:implement", "state": status,
+                    "attempt": 1, "model": "claude-opus-5[1m]",
+                    "tokens": tokens, "toolCalls": tools, "durationMs": duration,
+                    "queuedAt": 1750000000000, "startedAt": 1750000001000,
+                    "lastProgressAt": 1750000002000 if status == "killed" else 1750000001500,
+                    "lastToolName": "Bash", "lastToolSummary": tool_summary,
+                }],
+            }, fh)
+
+    snapshot(DUP_SESSIONS[0], "2026-07-25T03:00:00.000Z", "failed",
+             37, 3_660_000, 400, 1000, "the earlier copy's summary")
+    if second:
+        snapshot(DUP_SESSIONS[1], "2026-07-25T04:00:00.000Z", "killed",
+                 59, 4_320_000, 512, 2000, "the later copy's summary")
+    sess.reset_scope_cache()
+    reset_read_cache()
+    return root, run_dir
+
+
+def test_the_frozen_duplicate_pair_folds_to_the_authoritative_copy():   # D-02
+    print("test_the_frozen_duplicate_pair_folds_to_the_authoritative_copy")
+    # The REAL bytes: `wf_617adbe5-42a`, written twice by the two sessions that
+    # observed one resumed run. Frozen because the defect is a property of what
+    # the harness actually writes, and a synthesized pair can only ever confirm
+    # the rule the synthesizer already believed.
+    if not DUP_FIX.is_dir():
+        skip("the frozen duplicate-snapshot fixture is absent")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = linked_root(tmp, (OWNED_SLUG, DUP_FIX))
+        reset_read_cache()
+        paths = ingest.find_snapshots(DUP_FIX_RUN, root)
+        check(len(paths) == 2, f"both copies are found ({len(paths)})")
+        check(DUP_FIX_EARLY in paths[0],
+              "…and the one that sorts FIRST is the earlier, wrong copy: `sorted()[0]` "
+              "orders on a session UUID, which has no relation to time")
+
+        copies = ingest.read_snapshots(paths)
+        early = next(c for c in copies if c["status"] == "failed")
+        late = next(c for c in copies if c["status"] == "killed")
+        check(early["timestamp"] < late["timestamp"] and early["agentCount"] == 37
+              and late["agentCount"] == 59,
+              "the two really do disagree — failed/37 against killed/59 — so the fold "
+              "below is deciding something, not restating one document")
+
+        folded = ingest.fold_snapshots(copies)
+        check(folded["status"] == "killed",
+              "the LATER timestamp wins `status`: a run that was killed after 59 "
+              "agents no longer reports the earlier session's `failed`")
+        check(folded["agentCount"] == 59 and folded["totalTokens"] == 4_319_298
+              and folded["totalToolCalls"] == 1437 and folded["durationMs"] == 24_968_896,
+              "…and every total is the $max of the two, so a copy written before some "
+              "accounting landed cannot shrink one")
+        check(folded["error"] == late["error"],
+              "…and `status`'s companions come from the winning copy, never from the "
+              "loser (the earlier `error` names an infrastructure outage that is not "
+              "why this run ended)")
+        rows = {r.get("agentId") for r in folded["workflowProgress"] if r.get("agentId")}
+        early_rows = {r.get("agentId") for r in early["workflowProgress"] if r.get("agentId")}
+        check(early_rows <= rows and len(rows) > len(early_rows),
+              f"every agent the earlier copy knew survives the fold ({len(early_rows)} "
+              f"of {len(rows)}) — a resume drops agents from the live board and losing "
+              f"their record would be the same defect one level down")
+
+
+def test_a_status_change_takes_its_companions_with_it():   # D-02
+    print("test_a_status_change_takes_its_companions_with_it")
+    # The loser's `error` outliving the winner's `status` is D-02's own defect,
+    # one field over: `completed` with a stale "…died 4x…" string attached is a
+    # verdict nobody recorded.
+    earlier = {"runId": "wf_x", "timestamp": "2026-07-25T03:00:00.000Z",
+               "status": "failed", "error": "Error: agent died 4x",
+               "summary": "the earlier session's summary", "totalTokens": 10}
+    later = {"runId": "wf_x", "timestamp": "2026-07-25T04:00:00.000Z",
+             "status": "completed", "totalTokens": 4}
+    folded = ingest.fold_snapshots([earlier, later])
+    check(folded["status"] == "completed", "the later status wins")
+    check("error" not in folded and "summary" not in folded,
+          "…and the earlier copy's `error`/`summary` are DROPPED: what the winning "
+          "copy says about them is the whole truth, including saying nothing")
+    check(folded["totalTokens"] == 10,
+          "…while the numeric totals are still the $max — a companion of `status` is "
+          "not a total, and the two rules do not borrow each other's argument")
+
+    kept = ingest.fold_snapshots([earlier, dict(later, status="failed")])
+    check(kept.get("error") == "Error: agent died 4x",
+          "a later copy that RESTATES the same status keeps the companion it did not "
+          "restate — nothing is dropped for being old, only for being contradicted")
+
+
+def test_a_present_but_unparseable_number_never_beats_a_recorded_one():   # D-02
+    print("test_a_present_but_unparseable_number_never_beats_a_recorded_one")
+    # `folded.update(copy)` would let `null` (or a string) from the later copy
+    # replace a real earlier number. The $max branch's `elif` is what restores
+    # it — the case that makes that branch load-bearing rather than dead.
+    earlier = {"timestamp": "2026-07-25T03:00:00.000Z", "status": "failed",
+               "totalTokens": 3_659_088, "agentCount": 37,
+               "workflowProgress": [{"type": "workflow_agent", "agentId": "a" + "1" * 16,
+                                     "tokens": 900, "attempt": 2}]}
+    later = {"timestamp": "2026-07-25T04:00:00.000Z", "status": "killed",
+             "totalTokens": None, "agentCount": "59",
+             "workflowProgress": [{"type": "workflow_agent", "agentId": "a" + "1" * 16,
+                                   "tokens": None, "attempt": 2}]}
+    folded = ingest.fold_snapshots([earlier, later])
+    check(folded["totalTokens"] == 3_659_088,
+          "a later `null` does not erase a recorded total")
+    check(folded["agentCount"] == 37,
+          "…nor does a later string, which is a value this module will not read as a "
+          "number and so must not publish as one")
+    check(folded["workflowProgress"][0]["tokens"] == 900,
+          "…and the same holds one level down, per workflowProgress row")
+
+
+def test_two_snapshots_of_one_run_fold_rather_than_race(): # D-02
+    print("test_two_snapshots_of_one_run_fold_rather_than_race")
+    with tempfile.TemporaryDirectory() as tmp:
+        root, run_dir = duplicate_snapshot_root(tmp)
+        paths = ingest.find_snapshots(DUP_RUN, root)
+        check(len(paths) == 2, f"both snapshots are found, not one ({len(paths)})")
+        check(find_snapshot(DUP_RUN, root) == paths[0],
+              "…and the singular locator is still the first PATH — an ordering on a "
+              "session UUID, which is the defect D-02 stops read_run relying on")
+
+        scan = read_run(run_dir, root=root, cwd=OWNED_CWD)
+        folded = scan.snapshot
+        check(folded["status"] == "killed",
+              "the LATER timestamp wins the status: `killed` is never overwritten by "
+              "an earlier `failed` (the wf_617adbe5-42a defect, exactly)")
+        check(folded["agentCount"] == 59 and folded["totalTokens"] == 4_320_000
+              and folded["totalToolCalls"] == 512 and folded["durationMs"] == 2000,
+              "…and every numeric total is the $max of the two copies")
+        check(scan.skipped["duplicate_snapshot"] == 1,
+              "the extra copy is COUNTED — 1 of 27 on-disk run ids is duplicated "
+              "today (the run-2 census; run-1's `7 of 27` was a miscount) and the "
+              "mechanism recurs on every resume")
+
+        node = scan.nodes[0]
+        check(node.harness_state == "killed"
+              and node.last_tool_summary == "the later copy's summary",
+              "the node carries the folded copy's liveness, not the loser's")
+
+
+def test_a_single_snapshot_folds_to_itself_unchanged():   # D-02
+    print("test_a_single_snapshot_folds_to_itself_unchanged")
+    with tempfile.TemporaryDirectory() as tmp:
+        root, run_dir = duplicate_snapshot_root(tmp, second=False)
+        scan = read_run(run_dir, root=root, cwd=OWNED_CWD)
+        raw = read_snapshot(find_snapshot(DUP_RUN, root))
+        check(scan.snapshot == raw,
+              "one snapshot folds to ITSELF, byte for byte — the common path is "
+              "provably untouched by D-02")
+        check(scan.skipped["duplicate_snapshot"] == 0,
+              "…and nothing is counted as duplicated")
+        only = ingest.fold_snapshots([raw])
+        check(only is raw, "the fold returns the single dict, not a copy of it")
+        check(ingest.fold_snapshots([]) is None and ingest.fold_snapshots(None) is None,
+              "no snapshot folds to None — absence is never an error (R-26's fourth "
+              "amendment)")
+
+
+def test_a_phase_row_does_not_double_when_the_two_lists_differ_in_length():  # D-02
+    print("test_a_phase_row_does_not_double_when_the_two_lists_differ_in_length")
+    # The two copies of a resumed run hold different numbers of agent rows (37
+    # vs 59 in the real pair), so ONE `workflow_phase` row sits at different
+    # positions in the two lists. Keyed by position it merges as two rows, and
+    # `fold_snapshots` is exported — its return value IS `scan.snapshot`, so a
+    # reader of `workflowProgress` would inherit the duplicates even though
+    # `_progress_by_agent`'s type filter hides them.
+    def copy(stamp, agents):
+        rows = [{"type": "workflow_agent", "agentId": "a" + str(i) + "0" * 15,
+                 "index": i, "label": f"sp-{i:02d}"} for i in range(1, agents + 1)]
+        rows.append({"type": "workflow_phase", "index": 1, "phaseTitle": "implement"})
+        return {"runId": DUP_RUN, "timestamp": stamp, "workflowProgress": rows}
+
+    folded = ingest.fold_snapshots([copy("2026-07-25T03:00:00.000Z", 2),
+                                    copy("2026-07-25T04:00:00.000Z", 4)])
+    rows = folded["workflowProgress"]
+    phases = [row for row in rows if row.get("type") == "workflow_phase"]
+    check(len(phases) == 1,
+          f"the one phase row stays one row ({len(phases)}) — the key is `(type, "
+          f"index)`, which is what the docstring always said it was")
+    check(len({row["agentId"] for row in rows if row.get("agentId")}) == 4,
+          "…and the longer copy's four agents all survive, none merged away")
+
+
+def test_the_snapshots_own_liveness_fields_reach_the_node():   # D-03
+    print("test_the_snapshots_own_liveness_fields_reach_the_node")
+    with tempfile.TemporaryDirectory() as tmp:
+        root, run_dir = duplicate_snapshot_root(tmp)
+        node = read_run(run_dir, root=root, cwd=OWNED_CWD).nodes[0]
+        check(node.harness_state == "killed", "`state` → harness_state")
+        check(node.queued_at is not None and node.last_progress_at is not None,
+              "`queuedAt` and `lastProgressAt` are carried as real datetimes")
+        check(node.queued_at < node.started_at <= node.last_progress_at,
+              "…and they order the way the harness recorded them")
+        check(node.last_tool_name == "Bash"
+              and node.last_tool_summary == "the later copy's summary",
+              "`lastToolName`/`lastToolSummary` are carried — the free deterministic "
+              "replacement for a hand-typed detail string")
+        check(node.ended_at == node.last_progress_at,
+              "with a snapshot present, `lastProgressAt` IS the node's end: it is "
+              "preferred over the O(run) transcript scan (D-03)")
+
+        doc = ms.apply_operations({}, map_run_node(node))["run_nodes"]
+        stored = list(doc.values())[0]
+        for name in ("harnessState", "queuedAt", "lastProgressAt", "lastToolName",
+                     "lastToolSummary"):
+            check(name in stored, f"…and `{name}` reaches the stored document")
+
+
+def test_a_row_missing_startedat_keeps_the_transcripts_clock():   # D-03
+    print("test_a_row_missing_startedat_keeps_the_transcripts_clock")
+    # D-03 skips the O(run) `agent_times` scan when the snapshot covers every
+    # node — but that scan supplies TWO values, and `startedAt` is the one the
+    # snapshot row may be missing. Gating on `lastProgressAt` alone publishes a
+    # node with `startedAt: null` where the pre-D-03 code had the transcript's
+    # first-seen time: cheaper, and wrong.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "claude")
+        slug_dir = os.path.join(root, "projects", OWNED_SLUG)
+        run_dir = os.path.join(slug_dir, DUP_SESSIONS[0], "subagents", "workflows", DUP_RUN)
+        os.makedirs(run_dir, exist_ok=True)
+        with open(os.path.join(run_dir, "journal.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "started", "key": "sp-01/implement",
+                                 "agentId": DUP_AGENT}) + "\n")
+        with open(os.path.join(run_dir, f"agent-{DUP_AGENT}.jsonl"), "w",
+                  encoding="utf-8") as fh:
+            for stamp in ("2026-07-25T03:00:00.000Z", "2026-07-25T03:05:00.000Z"):
+                fh.write(json.dumps({"type": "assistant", "timestamp": stamp}) + "\n")
+        directory = os.path.join(slug_dir, DUP_SESSIONS[1], "workflows")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, DUP_RUN + ".json"), "w", encoding="utf-8") as fh:
+            json.dump({"runId": DUP_RUN, "timestamp": "2026-07-25T04:00:00.000Z",
+                       "status": "completed",
+                       "workflowProgress": [{
+                           "type": "workflow_agent", "agentId": DUP_AGENT,
+                           "label": "sp-01:implement", "state": "completed",
+                           # `lastProgressAt` and NO `startedAt` — the shape the
+                           # short-circuit must not treat as total cover.
+                           "lastProgressAt": 1750000002000}]}, fh)
+        sess.reset_scope_cache()
+        reset_read_cache()
+
+        scan = read_run(run_dir, root=root, cwd=OWNED_CWD)
+        node = scan.nodes[0]
+        check(node.last_progress_at is not None,
+              "the snapshot's `lastProgressAt` is carried as before")
+        check(node.started_at is not None,
+              "…and the node still HAS a start: one clock stated is not total cover, "
+              "so the transcript scan ran and supplied it")
+        check(scan.skipped["snapshot_times"] == 0,
+              "…which is what `snapshot_times` says — the short-circuit did not fire "
+              "for a row that states only half of what it replaces")
+
+
+def test_without_a_snapshot_the_transcript_scan_is_still_the_clock():   # D-03
+    print("test_without_a_snapshot_the_transcript_scan_is_still_the_clock")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = linked_root(tmp, (OWNED_SLUG, LIVE))
+        run_dir = os.path.join(root, "projects", OWNED_SLUG, "subagents",
+                               "workflows", LIVE_RUN)
+        if not os.path.isdir(run_dir):
+            run_dir = os.path.join(root, "projects", OWNED_SLUG, LIVE.name,
+                                   "subagents", "workflows", LIVE_RUN)
+        scan = read_run(run_dir, root=root, cwd=OWNED_CWD)
+        check(scan.snapshot is None and scan.skipped["no_snapshot"] == 1,
+              "the live-run fixture has no snapshot at all (a live run never does)")
+        check(scan.skipped["snapshot_times"] == 0,
+              "…so nothing was taken from a snapshot's clock")
+        timed = [n for n in scan.nodes if n.ended_at is not None]
+        check(timed, f"…and the transcript scan still supplies node times ({len(timed)})")
+        check(all(n.harness_state is None and n.last_tool_summary is None
+                  for n in scan.nodes),
+              "…with the five D-03 fields simply absent, never fabricated")
+
+
 def test_the_runs_document_is_order_independent_across_its_two_sources():
     print("test_the_runs_document_is_order_independent_across_its_two_sources")
     # `runs` is the ONE collection this module writes from two independent
@@ -2013,6 +2334,15 @@ def main():
                  test_the_killed_runs_resultless_nodes_carry_no_state,
                  test_a_live_run_has_no_snapshot_and_that_is_not_an_error,
                  test_the_snapshot_backfills_without_clobbering,
+                 test_the_frozen_duplicate_pair_folds_to_the_authoritative_copy,
+                 test_a_status_change_takes_its_companions_with_it,
+                 test_a_present_but_unparseable_number_never_beats_a_recorded_one,
+                 test_two_snapshots_of_one_run_fold_rather_than_race,
+                 test_a_single_snapshot_folds_to_itself_unchanged,
+                 test_a_phase_row_does_not_double_when_the_two_lists_differ_in_length,
+                 test_the_snapshots_own_liveness_fields_reach_the_node,
+                 test_a_row_missing_startedat_keeps_the_transcripts_clock,
+                 test_without_a_snapshot_the_transcript_scan_is_still_the_clock,
                  test_the_runs_document_is_order_independent_across_its_two_sources,
                  test_two_launch_records_of_one_run_do_not_race_for_the_stop_handle,
                  test_node_times_come_from_transcripts_and_span_sessions,

@@ -15,6 +15,12 @@ and with no `extraKnownMarketplaces` block beside it (GD-C1).
 `test_settings_registration` pins every one of those halves, so neither the
 double registration nor a second Touch identity can silently return.
 
+`test_argument_shape` is the D-20 arm: which `tool_input` keys are scanned as
+PATHS and which as free TEXT, and the deny wording each earns. It is the only
+place a *narrowing* of the guard is asserted (`Grep`'s content regex is no
+longer matched), so its controls — `Grep`'s `path`/`glob`, `Glob`'s `pattern`,
+an unknown tool's keys — are part of the test rather than an afterthought.
+
 The guard is exercised as it runs in production: a subprocess fed the
 PreToolUse JSON on stdin, against a throwaway task tree — never against the
 repo's own local-orchestrators state, so a test run can never scope-restrict
@@ -500,6 +506,142 @@ def test_bash_and_glob():
             "Grep", tmp, pattern="verdict",
             path=".touch/local-orchestrators/task-b/findings"))
         check(decision(out) == "deny", "Grep path into another task denied")
+
+
+def test_argument_shape():
+    """D-20: match path-shaped arguments as paths, everything else as text —
+    and never claim an access the guard did not observe.
+
+    Two defects, both reproduced in the field before this item:
+
+    1. `Grep`'s `pattern` is a REGEX over file content, never a target. A
+       researcher grepping for the literal text `local-orchestrators/[^/]+`
+       was denied for "naming task `[^`" — a task that does not exist, on a
+       call that read nothing (MONITORING-12). That key is not scanned any
+       more; it is the one deliberate narrowing, and it protected nothing,
+       because a content regex cannot select a file. `Grep`'s `path`/`glob`
+       and `Glob`'s `pattern` ARE targets and stay scanned, which is the
+       control that keeps this from being a hole.
+    2. A `Bash` command string is not a path and cannot be turned into one
+       here, so it is still denied on a mention — but the reason says
+       "mentions", labels the match TEXTUAL, and does not assert that the call
+       named a path. `grep -rn "…/task-b" .` reads nothing; the deny wording
+       has to survive being wrong about the access, because it regularly is.
+
+    The `cd`+relative walk (ECONOMICS-10) is the known limit and is asserted in
+    the direction the guard actually behaves — allowed — so it stays disclosed
+    rather than assumed away.
+    """
+    print("test_argument_shape")
+    with tempfile.TemporaryDirectory(prefix="scope-guard-") as tmp:
+        orch = make_tree(tmp)
+        b = orch / "task-b" / "findings" / "f.md"
+        anchored = {"CLAUDE_PROJECT_DIR": tmp}
+
+        # 1. The reproduced MONITORING-12 case: the offending text is the
+        #    search EXPRESSION, and the path searched is the active task's own.
+        rc, out = run_guard(hook_call(
+            "Grep", tmp, pattern=r"local-orchestrators/[^/]+/findings",
+            path=str(orch / "task-a")), **anchored)
+        check(rc == 0 and decision(out) == "allow",
+              "a Grep PATTERN mentioning the tasks root is not a path access")
+        rc, out = run_guard(hook_call(
+            "Grep", tmp, pattern="local-orchestrators/task-b/events.jsonl",
+            path=str(orch / "task-a" / "findings")), **anchored)
+        check(decision(out) == "allow",
+              "...even when it spells another task's path verbatim")
+
+        # ...and the controls: the same tool's real target keys still bite, so
+        # the narrowing is about `pattern` alone.
+        rc, out = run_guard(hook_call(
+            "Grep", tmp, pattern="verdict",
+            path=str(orch / "task-b" / "findings")), **anchored)
+        check(decision(out) == "deny", "control: Grep's path key is still scanned")
+        rc, out = run_guard(hook_call(
+            "Grep", tmp, pattern="verdict",
+            glob=".touch/local-orchestrators/task-b/**/*.md"), **anchored)
+        check(decision(out) == "deny",
+              "control: Grep's glob key is a target and is still scanned")
+        rc, out = run_guard(hook_call(
+            "Glob", tmp, pattern=".touch/local-orchestrators/task-b/findings/*.md"),
+            **anchored)
+        check(decision(out) == "deny",
+              "control: Glob's pattern IS the path expression and still denies")
+
+        # 2. Wording. A path argument earns the path claim...
+        rc, out = run_guard(hook_call("Read", tmp, file_path=str(b)), **anchored)
+        check(decision(out) == "deny", "a real path access is still denied")
+        check("path argument 'file_path'" in out and "names task 'task-b'" in out,
+              "...and the reason names the key and says the path names the task")
+        check("mentions task" not in out,
+              "...and does not hedge a genuine path access")
+
+        # ...and a Bash command earns the honest one.
+        rc, out = run_guard(hook_call(
+            "Bash", tmp,
+            command="cat .touch/local-orchestrators/task-b/events.jsonl"),
+            **anchored)
+        check(decision(out) == "deny", "Bash naming another task is still denied")
+        check("mentions task 'task-b'" in out and "TEXTUAL" in out,
+              "...but the reason says an argument MENTIONS the task, textually")
+        check("names task 'task-b'" not in out,
+              "...and never claims the call named a path (MONITORING-12)")
+        check("matched 'local-orchestrators/task-b/events.jsonl'" in out,
+              "...while still quoting the matched text verbatim (PROTOCOL-13)")
+
+        # A Bash command that only SEARCHES for the text is denied the same
+        # way — the guard cannot tell it apart, which is exactly why it may not
+        # say it saw an access.
+        rc, out = run_guard(hook_call(
+            "Bash", tmp, command='grep -rn "local-orchestrators/task-b" .'),
+            **anchored)
+        check(decision(out) == "deny" and "mentions task 'task-b'" in out,
+              "a Bash grep for the text is denied with the same honest wording")
+
+        # An unexpanded shell variable in the task segment is a name the caller
+        # never wrote. The deny still fires (over-restriction is the safe
+        # direction) but it may not accuse the call of naming a task; the
+        # warn-instead-of-deny redesign is a later item, not this one.
+        rc, out = run_guard(hook_call(
+            "Bash", tmp, command='cat .touch/local-orchestrators/$t/events.jsonl'),
+            **anchored)
+        check(decision(out) == "deny", "an unexpanded variable segment still denies")
+        check("mentions task '$t'" in out and "names task" not in out,
+              "...as a MENTION, never as a claimed access to a task named '$t'")
+
+        # 3. The known limit, pinned as it behaves (ECONOMICS-10): the same
+        #    access spelled with a cd plus relative paths matches nothing. The
+        #    deny above is its control — the rule does bite on the direct
+        #    spelling.
+        rc, out = run_guard(hook_call(
+            "Bash", tmp,
+            command="cd .touch/local-orchestrators && cat task-b/events.jsonl"),
+            **anchored)
+        check(decision(out) == "allow",
+              "known limit: cd + relative path walks past the textual match")
+
+        # 4. A tool the matcher grows into later keeps the pre-D-20 breadth:
+        #    path keys as paths, the two ambiguous keys as text.
+        rc, out = run_guard(hook_call("FutureTool", tmp, file_path=str(b)),
+                            **anchored)
+        check(decision(out) == "deny",
+              "an unknown tool's file_path is still scanned as a path")
+        rc, out = run_guard(hook_call(
+            "FutureTool", tmp, pattern=".touch/local-orchestrators/task-b/x"),
+            **anchored)
+        check(decision(out) == "deny" and "mentions task 'task-b'" in out,
+              "an unknown tool's pattern is scanned as TEXT — denied, honestly")
+
+        # 5. The two exceptions are unchanged by the reclassification.
+        rc, out = run_guard(hook_call(
+            "Read", tmp, file_path=str(orch / "task-b" / "plan" / "f.md")),
+            **anchored)
+        check(decision(out) == "allow", "the plan/ exception survives the split")
+        rc, out = run_guard(hook_call(
+            "Glob", tmp, pattern=".touch/local-orchestrators/*/findings/*.md"),
+            **anchored)
+        check(decision(out) == "allow",
+              "the read-only wildcard exception survives it too")
 
 
 def test_multi_run():
@@ -1102,7 +1244,7 @@ def main():
     for t in (test_settings_registration, test_registration, test_hooks_json,
               test_scoping,
               test_sentinels_reachable, test_halt, test_bash_and_glob,
-              test_multi_run, test_project_root_ceiling,
+              test_argument_shape, test_multi_run, test_project_root_ceiling,
               test_tasks_root_override, test_seg_pattern_is_byte_identical,
               test_dual_root_candidates, test_memory_writes, test_off_switch,
               test_fast_inert_never_reads_stdin, test_inert_modes):

@@ -356,6 +356,35 @@ def test_degraded_and_derived_states_are_labelled():
           "`mirror: absent|down` renders as a label — the page never depends on Mongo")
 
 
+def test_the_asserted_nodes_are_rendered_and_told_apart():
+    print("test_the_asserted_nodes_are_rendered_and_told_apart")
+    # D-04's client half. Without a renderer the server's new payload key is a
+    # silent no-op: the harness nodes would render (they arrive as `nodes`) and
+    # the demoted events.jsonl rows would simply vanish from the UI, which is a
+    # DELETION in everything but name — precisely what GD-D12 forbids.
+    check("assertedNodes" in CODE,
+          "the page reads `assertedNodes` — the demoted events.jsonl rows are "
+          "rendered, not dropped (GD-D12: demoted, never deleted)")
+    check("nodeList(" in CODE,
+          "…through one node-list renderer, so the two lists cannot drift apart")
+    check(CODE.count("nodeList(") >= 3,
+          "…called for the harness set AND the asserted set (plus its definition)")
+    check("node.source" in CODE,
+          "a row's source is read from the server's own word, never re-derived")
+    check('"prov-asserted"' in CODE and "prov-asserted" in CSS,
+          "an asserted row carries its own provenance chip class")
+    check('"prov-harness"' in CODE and "prov-harness" in CSS,
+          "…and an observed one carries the harness class, so a screenshot still "
+          "says which is which")
+    check("payload.harness" in CODE and "harness.wfDir" in CODE,
+          "the join key is shown: 'why did these rows change source' is answerable "
+          "from the page as well as from the response")
+    check("lastToolSummary" not in CODE,
+          "the page never reaches for `lastToolSummary` itself — the server already "
+          "put it on `node.detail`, and a truncated preview is display text that "
+          "nothing parses (GD-D4/SUBSTRATE-10)")
+
+
 def test_the_class_whitelists_match_the_servers_vocabulary():
     print("test_the_class_whitelists_match_the_servers_vocabulary")
     node_states = js_object_keys("NODE_STATE_CLASS")
@@ -378,6 +407,22 @@ def test_the_class_whitelists_match_the_servers_vocabulary():
     for value in sorted(node_states | legacy_states | {"other"}):
         cls = "st-" + value
         check(f".{cls} {{" in CSS, f"the stylesheet defines .{cls}")
+
+    # Two correct tables are not enough: what matters is which one each list
+    # READS. A harness row's state is the reducer's vocabulary, and looking it
+    # up in the legacy table sends `unknown` — every resultless node of a
+    # killed run, i.e. exactly what D-04 exists to surface — to `st-other`.
+    check("function stateClassFor(" in CODE,
+          "the table a row's state is looked up in is chosen by one named function")
+    chooser = CODE.split("function stateClassFor(", 1)[1].split("\n}", 1)[0]
+    check('node.source === "harness"' in chooser and "NODE_STATE_CLASS" in chooser,
+          "…and a harness row is classed from NODE_STATE_CLASS — the vocabulary the "
+          "server's `_harness_node_row` actually emits")
+    check("LEGACY_STATE_CLASS" in chooser,
+          "…while a legacy or asserted row keeps the legacy table")
+    check("classOf(stateClassFor(node)" in CODE
+          and "classOf(LEGACY_STATE_CLASS, node.state)" not in CODE,
+          "…and the node list goes through it, never straight at one table")
 
 
 # --- R-55: the wire, the boundary, and the once-painted replay ------------
@@ -2062,6 +2107,7 @@ def main():
               test_the_agent_tree_is_keyed_by_harness_facts,
               test_token_rollups_are_sums_of_absolute_records,
               test_degraded_and_derived_states_are_labelled,
+              test_the_asserted_nodes_are_rendered_and_told_apart,
               test_the_class_whitelists_match_the_servers_vocabulary,
               test_the_wire_contract_is_restated_verbatim,
               test_only_live_frames_animate,

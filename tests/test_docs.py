@@ -94,8 +94,12 @@ REPO = Path(__file__).resolve().parents[1]
 # repo-root files — they are development documents that deliberately do not
 # ship — so they keep their REPO anchors.
 sys.dont_write_bytecode = True   # no .pyc droppings next to the tests (house
-                                 # pattern, item 06; this file imports only
-                                 # `tests/_roots.py`, nothing under the payload)
+                                 # pattern, item 06). It is load-bearing here,
+                                 # not merely conventional: besides
+                                 # `tests/_roots.py`, the budget arm imports
+                                 # `aggregator.costs` FROM THE PAYLOAD, and an
+                                 # `aggregator/__pycache__` under plugin/touch/
+                                 # is what turns `tests/test_package.py` red.
 from _roots import CATALOG, ORCH, PAYLOAD, SRC   # noqa: E402  (the bytecode
                          # flag must precede the first import, so these cannot
                          # sit with the rest)
@@ -106,6 +110,13 @@ CONTRIBUTING = REPO / "CONTRIBUTING.md"
 INCEPTION = REPO / "inception.md"
 CONTROL_DOC = SRC / "docs/control-semantics.md"
 MONGO_DOC = SRC / "docs/mongo.md"
+# The three documents D-22 split OUT of CLAUDE.md, so the always-on prefix stops
+# carrying prose that is read once a month. They are payload docs (referenced on
+# demand), and the arms that used to read CLAUDE.md for this material read them.
+MEMORY_DOC = SRC / "docs/memory-home.md"
+RUN_FOLDERS_DOC = SRC / "docs/run-folders.md"
+DEV_LOOP_DOC = SRC / "docs/dev-loop.md"
+BUDGET_TEST = REPO / "tests/test_context_budget.py"
 
 # The run-history artifacts. The tasks root is gitignored and untracked
 # (2026-07-27 amendment), so these files exist in a working tree that ran the
@@ -551,6 +562,19 @@ def test_claude_md_layout_table_is_current():
                   "plugin/touch/aggregator/", "plugin/touch/shared/monitoring/"):
         check(any(r.startswith(f"| `{token}`") for r in rows),
               f"CLAUDE.md's layout table has a row whose subject is {token}")
+    # D-13's row, landed by sp-05 and PRESERVED through D-22's rewrite of this
+    # file. The seventh wrapper is the one a shortened layout table would drop
+    # first — it is the newest, and the sentence that names it is the longest —
+    # so the count and the name are pinned on the ROW, not on the file.
+    bin_row = [r for r in rows if r.startswith("| `plugin/touch/bin/`")]
+    check(bin_row, "CLAUDE.md's layout table has a row whose subject is "
+                   "`plugin/touch/bin/`")
+    if bin_row:
+        cell = flatten(bin_row[0])
+        check("seven wrappers" in cell,
+              "the bin/ row says SEVEN wrappers (GD-U4 as amended by GD-D8)")
+        check("touch-run" in cell,
+              "the bin/ row names `touch-run`, the seventh (D-13)")
     check("plugin/touch/hooks/orch_scope_guard.py" in text,
           "CLAUDE.md names the hook at the path that exists (PLUGIN-RUNTIME-13)")
     check(".claude/hooks/orch_scope_guard.py" not in text,
@@ -687,6 +711,54 @@ def test_entry_points_are_the_wrappers():
           "the README's one module-direct line is the PYTHONPATH form (GD-U4)")
 
 
+def test_module_direct_invocations_never_write_bytecode():
+    """A hand-typed `python3 -m aggregator…` must carry PYTHONDONTWRITEBYTECODE=1.
+
+    Without it the interpreter drops `plugin/touch/aggregator/__pycache__`, and
+    `tests/test_package.py` fails on it by name ("no never-ship path exists
+    under plugin/touch/ on disk"). `scripts/release.sh` carries the flag on its
+    own `aggregator.costs` call and `tests/test_cost.py` fails the release
+    script if it ever loses it — so the same property is already gate-worthy
+    one file over. All seven `bin/` wrappers export it too. The only place that
+    could still teach the unflagged form is a document, which is exactly where
+    an agent reads it first.
+
+    Covers all three direction documents: `CONTRIBUTING.md`'s module-direct
+    line gained the flag after the run (the widening
+    `findings/sp-10-docs-budget-carryforward.md` §3 called for).
+    """
+    print("test_module_direct_invocations_never_write_bytecode")
+    for path in DIRECTION_DOCS:
+        text = read(path)
+        unflagged = []
+        for ln in text.splitlines():
+            flat = re.sub(r"\s+", " ", ln)
+            m = re.search(r"python3 (?:-\w+ )*(?:-m aggregator|-c [\"']import aggregator)",
+                          flat)
+            if m is None:
+                continue
+            # Same shape as the PYTHONPATH arm above: look for the assignment
+            # anywhere EARLIER on the line, so `env `, quoting and extra spaces
+            # cannot turn correct text into a failure.
+            if "PYTHONDONTWRITEBYTECODE=1" in flat[:m.start()]:
+                continue
+            unflagged.append(ln.strip())
+        check(not unflagged,
+              f"{path.name}: every module-direct `python3 … aggregator…` line "
+              f"carries `PYTHONDONTWRITEBYTECODE=1` — the unflagged form drops "
+              f"an `aggregator/__pycache__` into the payload and reddens "
+              f"tests/test_package.py (bad: {unflagged})")
+    # The scan is worthless if it matches nothing, and all three documents
+    # genuinely carry such a line — assert the coverage rather than trusting it.
+    matched = sum(1 for p in DIRECTION_DOCS
+                  for ln in read(p).splitlines()
+                  if re.search(r"python3 (?:-\w+ )*(?:-m aggregator|-c [\"']import aggregator)",
+                               re.sub(r"\s+", " ", ln)))
+    check(matched >= 6,
+          f"the scan actually sees the module-direct lines it guards "
+          f"(matched {matched})")
+
+
 def test_shipped_docs_quote_measured_skill_costs():
     print("test_shipped_docs_quote_measured_skill_costs")
     if not (have_plugin(PLUGIN_README) and have_plugin(PLUGIN_CHANGELOG)):
@@ -697,7 +769,12 @@ def test_shipped_docs_quote_measured_skill_costs():
     # (`claude --plugin-dir plugin/touch plugin details touch`), the same
     # standard the hook's ~22 ms disclosure is held to two functions up.
     readme = read(PLUGIN_README)
-    check("1,257" in readme,
+    # Re-measured 2026-07-31 (`claude --plugin-dir plugin/touch plugin details
+    # touch` → ~1,277) after the determinism run reworded the skill prose; the
+    # CHANGELOG arm below deliberately stays at 1,257 — that entry is a dated
+    # record of what the six skills cost when they landed, not a claim about
+    # today (sp-10-docs-budget-carryforward §1).
+    check("1,277" in readme,
           "the shipped README quotes the re-measured always-on figure")
     check(re.search(r"~459 tokens\s+always-on", readme) is None,
           "the shipped README no longer quotes 459 as the CURRENT always-on cost")
@@ -719,6 +796,45 @@ def test_shipped_docs_quote_measured_skill_costs():
           "the shipped README says the six are condensed guidance, not the works")
     check("1,257" in read(PLUGIN_CHANGELOG),
           "the CHANGELOG entry that adds the six also prices them")
+
+
+def test_docs_track_the_determinism_inventory():
+    print("test_docs_track_the_determinism_inventory")
+    # The determinism run grew the wrapper set to seven (touch-run, GD-D8/D-13)
+    # and made the templates spec-driven (GD-D9/D-12) — and CONTRIBUTING taught
+    # the abolished "adapt the template" flow for a full run afterwards, while
+    # the shipped README never named the seventh command at all. Pin the
+    # corrected claims, negative halves included.
+    contributing = read(CONTRIBUTING)
+    check("touch-run" in contributing,
+          "CONTRIBUTING names touch-run among the entry points (D-13)")
+    check("seven wrappers" in contributing,
+          "CONTRIBUTING counts SEVEN wrappers (GD-U4 as amended by GD-D8)")
+    check("Adapt a copy" not in contributing
+          and "adapt the template" not in contributing.lower(),
+          "CONTRIBUTING no longer instructs editing a template copy — copies "
+          "are byte-for-byte and spec-driven (GD-D9/D-12)")
+    check("byte-for-byte" in contributing,
+          "CONTRIBUTING states the template copy is byte-for-byte (GD-D9)")
+    # Same shape as test_docs_state_the_inversion_not_the_placeholder_claim,
+    # one document over: CONTRIBUTING called the shipped page "a v0
+    # placeholder" for a full run after the tick landed (D-25).
+    for sentence in re.split(r"(?<=[.!?])\s+", flatten(contributing)):
+        low = sentence.lower()
+        if "placeholder" not in low:
+            continue
+        check("not a placeholder" in low or "no longer" in low,
+              f"CONTRIBUTING's `placeholder` mention denies the claim rather "
+              f"than making it ({sentence.strip()[:80]!r})")
+    if have_plugin(PLUGIN_README):
+        readme = read(PLUGIN_README)
+        check("touch-run" in readme,
+              "the shipped README names touch-run — the trust surface must "
+              "disclose every command the payload puts on PATH")
+        check("agent_lifecycle" in readme,
+              "the shipped README discloses the second hook "
+              "(agent_lifecycle.py) — a hook a stranger installs is a "
+              "disclosure, not a footnote")
 
 
 def test_manifest_declares_both_skill_families():
@@ -2008,8 +2124,18 @@ def test_claude_md_documents_the_touch_state_tree():
         for token in ("local-orchestrators", "memory", "server.json",
                       "trust classes"):
             check(token in cell,
-                  f"the `.touch/` row names {token} — one directory, four "
+                  f"the `.touch/` row names {token} — one directory, several "
                   f"trust classes (LAYOUT-9/PROTOCOL-9)")
+        # D-12 landed a SECOND carve, `!/.touch/run.json`, and the row is the
+        # canonical account of what may be committed out of that directory. A
+        # row that still says "the ONE tracked subtree" makes the one file
+        # D-12 made committable unstageable under this file's own staging rule.
+        check("run.json" in cell,
+              "the `.touch/` row names `run.json`, the tracked FILE carve "
+              "D-12 added beside the tracked memory subtree")
+        check("ONE tracked subtree" not in cell,
+              "the `.touch/` row no longer claims memory is the only tracked "
+              "path — there are two carves now, memory/*.md and run.json")
     # The operational half of the amended commit gate. The gate's own wording
     # ("inside the paths being committed") is pinned by
     # `test_claude_md_watcher_lifecycle` above and stays; what is new is that
@@ -2021,6 +2147,11 @@ def test_claude_md_documents_the_touch_state_tree():
     check("never `git add .touch/`" in flat or "never** `git add .touch/`" in flat,
           "CLAUDE.md carries the staging rule: `git add .touch/memory`, never "
           "`git add .touch/` (LAYOUT-11)")
+    # …and the rule has to reach BOTH carves, or following it literally leaves
+    # `.touch/run.json` permanently unstageable (D-12).
+    check(".touch/run.json" in flat,
+          "the staging rule names `.touch/run.json` too — two tracked paths, "
+          "each staged by name (D-12)")
     # PROTOCOL-18: never-delete gained a never-REWRITE half, because a path
     # migration that "helpfully" updates a finished run's scripts destroys the
     # only record of what that run actually did.
@@ -2039,26 +2170,42 @@ MEMORY_KINDS = ("MEMORY.md", "autoMemoryDirectory", "CLAUDE.md",
 
 
 def test_claude_md_memory_kind_scope_table():
+    """G2's scope table — MOVED by D-22, not deleted.
+
+    The table used to live in CLAUDE.md, which is always-on context: every
+    agent of every run paid for five rows most of them never needed. D-22 moved
+    it into `plugin/touch/docs/memory-home.md`, read on demand, and this arm
+    moved with it — the claim being guarded is "the scope table exists,
+    complete, somewhere a reader is sent to", never "CLAUDE.md is long".
+
+    What CLAUDE.md must still carry is the POINTER and the one fact that makes
+    the mechanism a program's job (the silent rejection). A moved section with
+    no pointer is a deleted section.
+    """
     print("test_claude_md_memory_kind_scope_table")
     text = read(CLAUDE)
-    for kind in MEMORY_KINDS:
-        check(kind in text,
-              f"CLAUDE.md's memory-kind scope table accounts for {kind} (DOCS-5)")
     flat = flatten(text)
-    # The three that make the mechanism a PROGRAM's job rather than a hand edit:
-    # a rejected value is silent, three undocumented env vars outrank the key,
-    # and the key may only be written to the untracked local settings file.
+    check(str(MEMORY_DOC.relative_to(REPO)) in text,
+          f"CLAUDE.md points at {MEMORY_DOC.relative_to(REPO)} — the moved "
+          f"memory-kind scope table (D-22)")
     check("silently rejected" in flat or "silently" in flat and "rejected" in flat,
-          "CLAUDE.md says a relative or interpolated value is rejected "
-          "SILENTLY — the only reason the mechanism needs verifying (DOCS-1)")
-    for var in ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
-                "CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_MEMORY_STORES"):
-        check(var in text,
-              f"CLAUDE.md names the undocumented override {var} (DOCS-13)")
+          "CLAUDE.md keeps the one fact that makes the mechanism a PROGRAM's "
+          "job: a relative or interpolated value is rejected SILENTLY (DOCS-1)")
     check("settings.local.json" in text,
           "CLAUDE.md says the key goes in `.claude/settings.local.json` — "
           "GD-C1's two-key `settings.json` is untouched")
-    check("no relocation mechanism exists" in flat,
+    if not have_plugin(MEMORY_DOC):
+        return
+    doc = read(MEMORY_DOC)
+    for kind in MEMORY_KINDS:
+        check(kind in doc,
+              f"the memory-home doc's scope table accounts for {kind} (DOCS-5)")
+    for var in ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE",
+                "CLAUDE_CODE_REMOTE_MEMORY_DIR", "CLAUDE_MEMORY_STORES"):
+        check(var in doc,
+              f"the memory-home doc names the undocumented override {var} "
+              f"(DOCS-13)")
+    check("no relocation mechanism exists" in flatten(doc),
           "the table says out loud which kind CANNOT be moved (subagent "
           "memory), instead of leaving it to be assumed")
 
@@ -2137,6 +2284,152 @@ def test_memory_feature_docs_are_honest_about_writing():
           "the new CHANGELOG entry states where run folders live now")
     check("--allow-memory-write" in top,
           "the new CHANGELOG entry names the flag, not just the feature")
+
+
+# ============================================================================
+# D-25 / D-22 — the docs tell the truth, and the always-on prefix has a ceiling
+# ============================================================================
+
+def test_docs_state_the_inversion_not_the_placeholder_claim():
+    """D-25: `touch-serve`'s page is shipped and read-only, not "a placeholder".
+
+    The claim being corrected is a specific false one: the README described the
+    2,000-plus-line page as a placeholder, when the page had shipped for weeks
+    and what was actually missing was the COMPOSITION behind it — nothing drove
+    the derivation modules that fill the read model. D-01's ingest tick closed
+    that, so the honest sentence names the tick, not the page.
+
+    Guarded as a negative plus a positive, because the negative is the one that
+    bites: a document that calls a shipped artifact unimplemented sends the next
+    reader off to build it again.
+    """
+    print("test_docs_state_the_inversion_not_the_placeholder_claim")
+    readme = read(README)
+    flat = flatten(readme)
+    # The negative. `placeholder` may appear ONLY in a sentence that denies it —
+    # deleting the correction should not be free either.
+    for sentence in re.split(r"(?<=[.!?])\s+", flat):
+        low = sentence.lower()
+        if "placeholder" not in low:
+            continue
+        check("not a placeholder" in low or "no longer" in low,
+              f"README's `placeholder` mention denies the claim rather than "
+              f"making it ({sentence.strip()[:80]!r})")
+    check("not implemented yet" not in flat,
+          "README no longer calls the shipped page unimplemented (D-25)")
+    check("read-only" in flat,
+          "README says what the page IS: shipped and read-only")
+    # …and the positive for README too. The three arms above all pass on a
+    # README with the corrected paragraph DELETED: the negative fires only on
+    # sentences containing "placeholder", and "read-only" appears five times in
+    # this file for unrelated reasons. Naming the tick is what makes the
+    # correction's absence visible, and it is the half D-25 names by line.
+    check("ingest tick" in flat,
+          "README names what closed the gap — the ingest tick behind the page, "
+          "not a rewrite of the page (D-25)")
+    # The positive, in both documents that direct a reader: the gap was the
+    # composition, and the tick is what closed it.
+    claude = flatten(read(CLAUDE))
+    check("ingest tick" in claude,
+          "CLAUDE.md's Project status names the ingest tick as what runs the "
+          "derivation modules (D-25's correction of `the read side is "
+          "implemented`)")
+    check("derivation modules are complete" in claude,
+          "CLAUDE.md states the corrected status: the modules are complete and "
+          "tested, and the tick is what runs them")
+
+
+def test_claude_md_declares_the_context_budget():
+    """D-22: the always-on prefix is capped, and the cap is reachable.
+
+    Three properties, because a budget that is only prose is not a budget:
+    CLAUDE.md says what the three sources are and what they cost, the test that
+    enforces it exists and declares the three constants `aggregator/costs.py`
+    reads by name, and CLAUDE.md is actually under its own stated ceiling right
+    now. The last one is deliberately duplicated from
+    `tests/test_context_budget.py` — this file is the docs guard and the claim
+    "≤ 6,000 tok" is a claim in a document.
+    """
+    print("test_claude_md_declares_the_context_budget")
+    text = read(CLAUDE)
+    flat = flatten(text)
+    check("always-on" in flat,
+          "CLAUDE.md says its own content is always-on context")
+    for token in ("test_context_budget.py", "aggregator.costs --baseline",
+                  ".touch/memory/MEMORY.md"):
+        check(token in text,
+              f"CLAUDE.md's budget section names {token}")
+    check("6,000" in text and "800" in text and "1,400" in text,
+          "CLAUDE.md quotes the three declared budgets (6,000 / 800 / 1,400)")
+    # The enclosing CLAUDE.md is out of write scope and must be named as such,
+    # so nobody "fixes" the budget by editing a file this repo does not own.
+    check("write scope" in flat,
+          "CLAUDE.md records that the enclosing directory's CLAUDE.md is out "
+          "of this repo's write scope — reported, never gated (D-22)")
+    if not BUDGET_TEST.is_file():
+        check(False, f"{BUDGET_TEST.relative_to(REPO)} exists — the budget is "
+                     f"enforced by a test, not by good intentions")
+        return
+    budget = read(BUDGET_TEST)
+    for name, value in (("CLAUDE_MD_BUDGET_TOKENS", 6000),
+                        ("MEMORY_BUDGET_TOKENS", 800),
+                        ("SKILLS_BUDGET_TOKENS", 1400)):
+        check(re.search(rf"(?m)^{name}(?:\s*:\s*int)?\s*=\s*{value}\s*$", budget)
+              is not None,
+              f"the budget test declares {name} = {value:,} as a plain "
+              f"module-level literal (aggregator/costs.py reads it by `ast`)")
+    # …and the file it caps is actually under the cap. chars/4 over BYTES.
+    # `aggregator.costs` is the declared home of that constant (the same
+    # one-derivation-home reflex as GD-D10), so import the estimator when the
+    # payload package is importable and only re-spell it when it is not — a
+    # recalibration of `BYTES_PER_TOKEN` must not leave this arm silently
+    # disagreeing with the budget test it duplicates.
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    try:
+        from aggregator.costs import estimate_tokens
+    except ImportError:                       # no payload package on the path
+        def estimate_tokens(data):
+            return len(data) // 4
+    tokens = estimate_tokens(CLAUDE.read_bytes())
+    check(tokens <= 6000,
+          f"CLAUDE.md is under its stated 6,000 tok ceiling ({tokens:,} tok) — "
+          f"move a section into {SRC.relative_to(REPO)}/docs/ and leave a "
+          f"pointer")
+
+
+def test_the_moved_sections_landed_where_claude_md_points():
+    """D-22 moved three sections out; a pointer to nothing is worse than prose.
+
+    Each moved document is checked for the load-bearing content it received,
+    not merely for existing — an empty `run-folders.md` would satisfy a
+    file-exists check and lose the never-delete rule's explanation.
+    """
+    print("test_the_moved_sections_landed_where_claude_md_points")
+    claude = read(CLAUDE)
+    for doc, tokens in ((MEMORY_DOC, ("autoMemoryDirectory", "agent-memory")),
+                        (RUN_FOLDERS_DOC, ("events.jsonl", "wf_dir")),
+                        (DEV_LOOP_DOC, ("extraKnownMarketplaces",
+                                        "enabledPlugins"))):
+        rel = str(doc.relative_to(REPO))
+        check(rel in claude, f"CLAUDE.md points at {rel}")
+        if not have_plugin(doc):
+            continue
+        text = read(doc)
+        for token in tokens:
+            check(token in text, f"{doc.name} carries {token}")
+    # The GD-C1 narrative moved, so the marketplace-hijack reason has to be
+    # readable somewhere. It is the reason the settings file is two keys long,
+    # and the whole point of writing it down was that the next person would
+    # otherwise re-add the key.
+    if have_plugin(DEV_LOOP_DOC):
+        flat = flatten(read(DEV_LOOP_DOC))
+        check("silently REPLACES" in flat or "silently replaces" in flat.lower(),
+              "the dev-loop doc keeps WHY a same-name marketplace add is a "
+              "hijack (GD-C1)")
+        check("defaultEnabled" in flat,
+              "the dev-loop doc keeps the consent-posture half (an "
+              "`enabledPlugins` entry overrides `defaultEnabled: false`)")
 
 
 def test_release_script_tells_a_dirty_memory_tree_from_a_dirty_payload():
@@ -2223,7 +2516,9 @@ def main():
               test_claude_md_records_the_single_hook_registration,
               test_claude_md_status_sh_fallback_is_the_real_one,
               test_entry_points_are_the_wrappers,
+              test_module_direct_invocations_never_write_bytecode,
               test_shipped_docs_quote_measured_skill_costs,
+              test_docs_track_the_determinism_inventory,
               test_manifest_declares_both_skill_families,
               # C-11 / C-15 — the payload runs from a cache copy, and the
               # Releasing section is the only prose account of how it ships
@@ -2249,6 +2544,10 @@ def main():
               test_claude_md_documents_the_touch_state_tree,
               test_claude_md_memory_kind_scope_table,
               test_memory_feature_docs_are_honest_about_writing,
+              # D-25 / D-22 — the inversion told straight, and the ceiling
+              test_docs_state_the_inversion_not_the_placeholder_claim,
+              test_claude_md_declares_the_context_budget,
+              test_the_moved_sections_landed_where_claude_md_points,
               test_release_script_tells_a_dirty_memory_tree_from_a_dirty_payload):
         t()
     print()

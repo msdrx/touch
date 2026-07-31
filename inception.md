@@ -26,8 +26,8 @@ Two components: **aggregator** and **touch-visual**.
 - **Left sidebar**: a list of such terminal sessions; clicking one opens it.
 - **Per-terminal page**: n8n-like UML diagrams/graphs of the run, with controls
   to **pause, restart, start and terminate agent loops**.
-- The "loops" are exactly those defined by the `execute-research` and
-  `implement-plan` skills in `.claude/skills/` — their entities (task, plan,
+- The "loops" are exactly those defined by the `research` and
+  `implement` skills in `.claude/skills/` — their entities (task, plan,
   sub-plan, agent, attempt, gate) are what the UI renders and drives.
 
 ## 2. Repo state
@@ -44,7 +44,7 @@ place to track file counts.
 
 `.claude/` holds the machinery this project was built with:
 
-- `.claude/skills/execute-research/` + `implement-plan/` — the orchestration
+- `.claude/skills/research/` + `implement/` — the orchestration
   skill pair. Research fans out read-only perspective agents (opus) behind a
   barrier, then ONE fable synthesizer writes `plan/<name>-plan.md`.
   Implementation runs a fable divider (file-ownership partitioning, one file =
@@ -157,6 +157,44 @@ LAST API call only (measured 14x under-report) — ignore it; sum deduped
 CLI's retention sweep unlinks transcripts and `rm -rf`s whole subagent trees —
 **Touch must own its history** (`.touch/` store), treating `~/.claude` as a
 read-only tap it never writes to.
+
+**Agent lifecycle hooks — GREEN for the Workflow profile (probe D-17,
+2026-07-31, CLI 2.1.220).** Until this probe, "`SubagentStart`/`SubagentStop`
+fire for Workflow-profile agents" was a hypothesis read out of the binary's own
+strings; only the Agent-tool case was verified. Both fire, once per `agent()`
+call, matcher `"*"`, with zero LLM cooperation. Full method and payloads:
+`.touch/local-orchestrators/touch-determinism/findings/d17-hook-probe-2026-07-31.md`.
+What binds:
+
+- `SubagentStart` carries exactly `{session_id, transcript_path, cwd,
+  prompt_id, agent_id, agent_type, hook_event_name}` — the 17-hex `agentId`, and
+  `agent_type` as the profile discriminator (`"workflow-subagent"` for Workflow
+  agents, the agent type name for Agent-tool ones). **No `runId`, no label, no
+  prompt** — the `[monitor]` marker is not in the payload, so anything
+  plan/stage-shaped must be read from the agent transcript, which at Start may
+  not exist yet (the event fires ~3 ms after launch).
+- `SubagentStop` adds `agent_transcript_path` — `…/workflows/<runId>/agent-<id>.jsonl`
+  for Workflow agents, `…/subagents/agent-<id>.jsonl` for Agent-tool ones, so
+  `wf_dir` and `runId` are a `dirname`/`basename` away — plus
+  `last_assistant_message`, `stop_hook_active` and `background_tasks[]`
+  (`{id, type, status, description, …}`: the Agent-tool entry's `id` **is** the
+  agentId stop handle and its `description` is the Agent-tool description; the
+  Workflow entry is the *run*, which has no per-agent stop — the two
+  granularities of §4, confirmed from a third source). Neither
+  `last_assistant_message` nor `background_tasks[].status` is a verdict: the
+  event observes a *stop*, and the verdict stays the journal `result`.
+- `PostToolUse` with matcher `Workflow` fires **at launch** (`duration_ms: 4`,
+  `status: "async_launched"` even for a foreground call, no second event at run
+  end) and its `tool_response` is the launch record verbatim — `taskId`,
+  `taskType`, `workflowName`, `runId`, `summary`, `transcriptDir`, `scriptPath`.
+  It lands **3 ms before the first `SubagentStart`**, so the run→task bind can
+  be published before any agent event exists to need it.
+- Operationally: hooks are delivered by `--settings` in a throwaway
+  `CLAUDE_CONFIG_DIR` (a second injection point for the R-04 probe-1 result
+  below), the `Workflow` tool is permission-gated, and a *denied* launch
+  produces a `PreToolUse` with no matching `PostToolUse`. Inside a hook,
+  `os.getppid()` is the `claude` process, so `<pid>-<procStart>` is derivable
+  there.
 
 ## 4. The hard truths (independently confirmed by driver + research)
 

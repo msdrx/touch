@@ -1864,6 +1864,63 @@ function widenTimeline() {
     refreshDetail().then(render);
 }
 
+/** The class table a row's state is looked up in — chosen by its own source.
+ *
+ * A harness row's `state` is the REDUCER's vocabulary
+ * (`agents.NODE_STATES` = running | done | unknown); a legacy or asserted
+ * row's is `legacy.STATES` (queued | running | done | failed | …). The two
+ * overlap but neither contains the other, and reading a harness row out of the
+ * legacy table sends `unknown` — the state of every resultless node in a
+ * killed run, which is exactly what D-04 exists to surface — to `st-other`.
+ */
+function stateClassFor(node) {
+    return node.source === "harness" ? NODE_STATE_CLASS : LEGACY_STATE_CLASS;
+}
+
+/** One `<ul>` of node cards — the same shape whatever produced the rows.
+ *
+ * `node.source` is the server's own word for where a row came from
+ * (`harness` = observed, `asserted` = an events.jsonl line, `legacy` = the
+ * unjoined fallback). It is rendered as a chip rather than a class name so the
+ * distinction survives a screenshot.
+ */
+function nodeList(rows, emptyText) {
+    const nodes = el("ul", "cards");
+    (rows || []).forEach((node) => {
+        const item = el("li", "card");
+        const title = el("div", "cardhead");
+        title.appendChild(el("span", "cardtitle",
+            String(node.label || node.key || node.agentId || "")));
+        title.appendChild(chip(classOf(stateClassFor(node), node.state), String(node.state || "")));
+        if (node.source === "asserted") {
+            item.classList.add("derived");
+            title.appendChild(chip("prov-asserted", "asserted",
+                                   "written by an agent into events.jsonl, not observed"));
+        } else if (node.source === "harness") {
+            title.appendChild(chip("prov-harness", "harness",
+                                   "derived from the run's journal and snapshot"));
+        }
+        if (node.derivedFromLegacy === true) {
+            item.classList.add("derived");
+            title.appendChild(chip("prov-derived", "derived",
+                                   node.relabel ? String(node.relabel) : ""));
+        }
+        if (node.unconventional === true) title.appendChild(chip("prov-derived", "unnamed"));
+        (node.flags || []).forEach((flag) => title.appendChild(chip("chip-plain", String(flag))));
+        item.appendChild(title);
+        const sub = el("div", "cardsub");
+        sub.appendChild(el("span", "dim", String(node.plan || "") + " · " + String(node.stage || "")));
+        if (node.agentId) sub.appendChild(el("span", "mono", String(node.agentId)));
+        // Display only: `lastToolSummary` is truncated by the harness itself,
+        // so nothing here or downstream may parse a marker out of it.
+        if (node.detail) sub.appendChild(el("span", "dim", truncate(node.detail, DETAIL_CHARS)));
+        item.appendChild(sub);
+        nodes.appendChild(item);
+    });
+    if (!(rows || []).length) nodes.appendChild(el("li", "card empty", String(emptyText)));
+    return nodes;
+}
+
 function renderTaskDetail(head, body, payload) {
     head.appendChild(el("h2", "", String(payload.task || "")));
     const chips = el("div", "chips");
@@ -1925,31 +1982,32 @@ function renderTaskDetail(head, body, payload) {
     }
     body.appendChild(plans);
 
-    body.appendChild(el("h3", "", "nodes"));
-    const nodes = el("ul", "cards");
-    (payload.nodes || []).forEach((node) => {
-        const item = el("li", "card");
-        const title = el("div", "cardhead");
-        title.appendChild(el("span", "cardtitle",
-            String(node.label || node.key || node.agentId || "")));
-        title.appendChild(chip(classOf(LEGACY_STATE_CLASS, node.state), String(node.state || "")));
-        if (node.derivedFromLegacy === true) {
-            item.classList.add("derived");
-            title.appendChild(chip("prov-derived", "derived",
-                                   node.relabel ? String(node.relabel) : ""));
-        }
-        if (node.unconventional === true) title.appendChild(chip("prov-derived", "unnamed"));
-        (node.flags || []).forEach((flag) => title.appendChild(chip("chip-plain", String(flag))));
-        item.appendChild(title);
-        const sub = el("div", "cardsub");
-        sub.appendChild(el("span", "dim", String(node.plan || "") + " · " + String(node.stage || "")));
-        if (node.agentId) sub.appendChild(el("span", "mono", String(node.agentId)));
-        if (node.detail) sub.appendChild(el("span", "dim", truncate(node.detail, DETAIL_CHARS)));
-        item.appendChild(sub);
-        nodes.appendChild(item);
-    });
-    if (!(payload.nodes || []).length) nodes.appendChild(el("li", "card empty", "no nodes"));
-    body.appendChild(nodes);
+    // D-04/GD-D12: once the server has joined this folder to the harness run
+    // its `wf_dir` names, `nodes` IS the harness set and the events.jsonl rows
+    // arrive separately as `assertedNodes`. The two lists are rendered by one
+    // function and told apart by a chip, because a page that renders an
+    // assertion and an observation identically is a page that teaches its
+    // reader the wrong thing about where the numbers came from.
+    const harness = payload.harness || null;
+    body.appendChild(el("h3", "", harness ? "nodes — harness" : "nodes"));
+    if (harness) {
+        const src = el("div", "cardsub");
+        src.appendChild(el("span", "dim",
+            "derived from the run's own journal and snapshot"));
+        if (harness.wfDir) src.appendChild(el("span", "mono", String(harness.wfDir)));
+        body.appendChild(src);
+    }
+    body.appendChild(nodeList(payload.nodes || [], "no nodes"));
+
+    const asserted = payload.assertedNodes || [];
+    if (asserted.length) {
+        body.appendChild(el("h3", "", "asserted — events.jsonl"));
+        const why = el("div", "cardsub");
+        why.appendChild(el("span", "dim",
+            "kept as annotation: these lines were written by agents, not observed"));
+        body.appendChild(why);
+        body.appendChild(nodeList(asserted, "no asserted nodes"));
+    }
 
     if ((payload.notes || []).length) {
         body.appendChild(el("h3", "", "notes"));

@@ -9,7 +9,7 @@ project. The project-side paths are
 orchestration scripts and monitoring state (events, config, checkpoints),
 selected via the `ORCH_STATE_DIR` env var — and, for the file plane below,
 `.touch/memory/`, the directory Claude Code loads this project's auto memory
-from. See the `m-orchestrator` skill for the integration checklist.
+from. See the `monitor` skill for the integration checklist.
 
 Zero third-party dependencies: bash + Python 3 stdlib + a browser.
 
@@ -24,7 +24,7 @@ Zero third-party dependencies: bash + Python 3 stdlib + a browser.
 | `monitor.html` | Live dashboard — one card per plan, event-driven, no rebuild for updates; header dropdown switches between running tasks live; a header zoom selector (100% default, up to 200%, persisted like the refresh rate) scales the whole task/stats view uniformly via CSS `zoom` (real layout reflow — cards, dials and log text all grow in the same proportion; home never zooms); task page shows a session timeplan strip with time dials (wall-clock bar of agents-working / idle / stall segments derived from event-stream gaps, a 24-hour clock ruler under it, horizontal sliding for multi-day sessions; hovering it draws a time-point cursor line and previews the agents mid-run at that instant) and an artifacts card (pins the final HTML report + the plan document with size/age; every other file sits behind an "all files" popup grouped plan → reports → notes, `.md` opens an in-page preview; each loop card's header carries a "files" pill opening the same popup filtered to that loop's output); the Orchestrator card's fold arrow reveals, above the decision log, a sub-plans bullet list (state dot + name + state, click jumps to that loop's card); a statistics page (`?task=<name>&view=stats`, linked from the timeplan card) shows large-figure run stats — an entire-flow status tile (running/done/failed with a matching state dot, same fold as the home-grid tile: any running plan or agent wins — a failed loop that was resumed never overrides running loops — while idle a failed plan is the verdict, e.g. a loop awaiting the user after its last attempt failed, and all-green folds to done; while running the sub-line reads as progress — settled/all plans, where settled counts green and red both and "all" is `max(cards seen, declared plans_total)` so unstarted plans count — and the green/red breakdown appears only once the run settled), tokens/cache-hit/burn-rate, plans green/red, agents, attempts and retries, agent durations, dead air and stalls |
 | `decision_watcher.py` | Tails a Workflow run's `journal.jsonl`; emits orchestrator decision events + per-agent token accounting into `events.jsonl` |
 | `orch-config.json` | Optional config: `wf_dir` (workflow transcript dir), `port`, attempt caps `max_plan_attempts` (default 4) / `max_gate_attempts` (default 3) / `max_e2e_attempts` (default 3) / `max_finalgate_attempts` (default 2) that the decision watcher quotes in its retry/exhausted narration, the live token-tick cadence cap `token_tick_secs` (seconds; **default 15**, `0` = no ceiling, i.e. the pre-cadence behavior: a delta line on every poll tick that has a non-zero delta — the env var `ORCH_TOKEN_TICK_SECS` pins the value and WINS over this key, so an operator debugging a live run is never overridden by a config the orchestrator script republishes; a negative value reads as `0`), and `strategy` (`parallel` \| `sequential` \| legacy `serial`, which is the only value that re-enables the retired sequenced plan-close heuristic — **no reference template publishes it**, so that branch is reachable only from a hand-written legacy config; do not "fix" a template to emit `serial`, it resurrects the fabricated `plan failed` badge). The watcher **re-reads this file whenever its mtime moves**, so an orchestrator script that publishes its own caps after the daemons started is still honored (it logs `config reloaded: …`). The **first `orch-config.json` that exists** wins outright — task dir, then the module dir — and if it does not parse the watcher keeps the documented defaults, warns on stderr, and re-reads that same file when it is repaired |
-| `.watcher-state.json` | Watcher checkpoint (journal offset, agent classifications, token baselines) — restart-safe, never duplicates events |
+| `.watcher-state.json` | Watcher checkpoint (journal offset, agent classifications, token baselines, and the owning daemon's `pid`) — restart-safe, never duplicates events |
 
 ## Event schema
 
@@ -45,8 +45,10 @@ strip on the plan card:
 - `plan` — one card per unique id, first-seen order. **Reserved id `orchestrator`**: rendered as a wide card pinned last; the decision watcher writes there.
 - `stage` — free-form; each unique stage gets a colored chip on the card. **Reserved stages**: `plan` (sets the card's badge to `state` — use for plan lifecycle: queued/running/done/failed), `complete` (alias of `plan` for badge purposes — use for the final run-summary event on the `orchestrator` card), `tokens` (updates the card's token counter; no chip).
 - `title` — optional on any event; renames the card (or set `ORCH_TITLE` env with `status.sh`).
-- `plans_total` — optional on any event (integer; set `ORCH_PLANS_TOTAL` env with `status.sh`); declares the run's expected TOTAL number of plan cards so progress renders over ALL plans, not only the cards already seen in the stream. Readers fold it as a **monotonic max, floored by cards actually seen** — a resume re-declaring the same number is idempotent, a stray smaller value never shrinks the denominator, and one phase's declaration never hides cards another phase appended to the same stream. The reference templates declare it at their partition/barrier close: implement-plan emits `N sub-plans + 2` (divide + finalgate cards), execute-research emits `2` (research + synthesis cards). A stream with several phases therefore converges upward as later cards appear.
-- `roster` — optional on an `orchestrator`-card event (array of `"<id> — <title>"` strings; **latest wins**, driver-emitted, typically once after a partition lands): declares the run's full planned sub-plan list by name. The dashboard's Orchestrator accordion shows roster entries whose loop has **no card yet** as neutral `planned` bullets — display only, never materialized as cards, so replay/live counts are untouched. Untrusted like every event key: readers bound the count and entry length and treat entries as text.
+- `plans_total` — optional on any event (integer; set `ORCH_PLANS_TOTAL` env with `status.sh`); declares the run's expected TOTAL number of plan cards so progress renders over ALL plans, not only the cards already seen in the stream. Readers fold it as a **monotonic max, floored by cards actually seen** — a resume re-declaring the same number is idempotent, a stray smaller value never shrinks the denominator, and one phase's declaration never hides cards another phase appended to the same stream. The reference templates declare it at their partition/barrier close: implement emits `N sub-plans + 2` (divide + finalgate cards), research emits `2` (research + synthesis cards). A stream with several phases therefore converges upward as later cards appear.
+- `roster` — optional on an `orchestrator`-card event (array of `"<id> — <title>"` strings; **latest wins**, typically once after a partition lands): declares the run's full planned sub-plan list by name. The dashboard's Orchestrator accordion shows roster entries whose loop has **no card yet** as neutral `planned` bullets — display only, never materialized as cards, so replay/live counts are untouched. Untrusted like every event key: readers bound the count and entry length and treat entries as text.
+  **The roster now has a WRITER** (GD-D11). It was readable for a long time with no producer at all — the only two roster lines that ever reached disk were hand-appended raw JSON, which is precisely the thing `w` exists to expose, and precisely why `status.sh` is the only sanctioned write path. It is emitted by `touch-run start` from the run spec and re-emitted by `cycle_reporter` at the divide close, both through `status.sh` via `ORCH_ROSTER` — a **file path** env var, never env-inlined JSON, so a roster cannot be as long as an argv allows and is bounded at the writer. A stream that carries no roster is still normal and complete: the accordion simply shows the cards it has.
+- `run` — optional on the watcher's `run`-stage `info` event at the run close (integer counts: `agent_count`, `agents_done`, `agents_error`, `agents_skipped`, `agents_empty_result`, `subagent_tokens`, `tool_uses`, `duration_ms`): the HARNESS's own tally of the finished run, copied verbatim out of its close notification. It is a **cross-check, never a substitute**: the folded live totals stay the in-flight source, `subagent_tokens` counts a different denominator (it excludes the driver), and nothing may replace a computed total with it. Additive like every key here — a reader that does not know `run` ignores it and loses nothing.
 - `tokens` — **delta** (not absolute) added to the card's counter; grand total is derived by the page. `in` is TOTAL input (fresh + cache writes + cache reads); optional `cached` is the cache-read (`r:`) portion and optional `cache_write` is the cache-write (`w:`) portion, letting the page display the fresh input plus an `r:`/`w:` cache breakdown (an agent loop re-reads its whole prefix every turn, so cache reads dominate `in`). Events without `cached`/`cache_write` render as plain `in`. The per-agent `agent.tokens` block is the **opposite** kind of number — see the `agent` bullet.
 - `agent` — optional per-subagent sub-object (watcher-emitted; see the block above) with the agent's `id`/`label`, its own `state` (`running|done|failed|stale`), a nested `tokens` breakdown, and `started`/`runtime`.
   **`agent.tokens` is that agent's ABSOLUTE running total, last-event-wins** — unlike the top-level `tokens`, which is a delta. The asymmetry is deliberate and load-bearing, so readers must not treat the two alike: summing `agent.tokens` inflates a per-agent figure by the number of ticks it was reported on, while last-winsing the top-level `tokens` collapses a plan's total to its final delta. It is also what makes a lossy replay recoverable — a fold that drops quiet ticks (any snapshot/prelude design) rebuilds totals from `agent.tokens` last-wins per `(plan, agent.id)` on ANY event (terminal events carry a higher cumulative than the last tick did), excluding agent-less deltas, and NEVER by summing the surviving deltas. Deltas are wire-only: sum them over a gappy stream and the answer is measurably wrong. Four further keys are optional: `shortId` (the first 8 hex of `id`, **display only**), `identity` (the `[touch]` marker's `name`/`parent`/`root`/`ledger`, labels only), `flags` (e.g. `["marker-misplaced"]` when a real `[touch]` marker sits below the marker window), and `unconventional: true` for an agent whose prompt carried no usable marker — the node still exists, it just has no plan/stage label.
@@ -203,29 +205,119 @@ writers append lines exactly as they always did.
    last transcript activity; the dashboard also freezes any still-"running"
    rows as `stale` when their plan card closes. (2) Completion time: journal
    entries carry no timestamps and a transcript can stop flushing mid-run
-   (a long final Bash call), so when tailing live the watcher stamps results
-   with the read moment unless the transcript's last line is fresh (≤30s).
+   (a long final Bash call), so when tailing live the watcher prefers the
+   agent's own **last assistant-message** timestamp, then the transcript's
+   last line of any kind, and falls back to the read moment when neither is
+   fresh (≤30s). Both candidates are stamps the harness itself wrote; the
+   fallback is honest about being an observation. See **Timestamps** below for
+   the residual trade this leaves.
 
    Roles `impl`, `test`, `critique`, `gate:run`, `gate:fix`, `e2e:run`,
    `e2e:fix` get semantic decision lines (approve/reject/retry/advance);
-   any other role gets a generic "finished" line. Token accounting works for
+   any other role gets a generic "finished" line. **A result that carries the
+   agent's own `summary` has it appended to the derived line**, single-lined,
+   quote-stripped and inside the 1 KB cap: the derived verdict is what the loop
+   decided, and the summary is the one thing the journal records that the
+   marker cannot derive. That is what makes the trace-call deletion in step 3
+   information-neutral rather than a loss. Token accounting works for
    every role.
-3. **Optionally mandate trace calls in agent prompts** for intra-agent
-   detail (progress notes between spawn and result — the only thing the
-   journal cannot see):
-   ```
-   FIRST run: bash <abs-path>/status.sh <plan> <stage> running "attempt N: ..."
-   LAST  run: bash <abs-path>/status.sh <plan> <stage> done|failed "attempt N: <summary>"
-   ```
-   These are best-effort color on top of the deterministic stream — an agent
-   that skips them costs nothing but its own extra detail lines.
+3. **Do NOT mandate trace calls in agent prompts.** The FIRST/LAST
+   `status.sh` pair prompts used to require is **deleted** — not deprecated,
+   deleted — and no template emits it. The reason is correctness, never
+   tokens: those two lines were 0.05% of a run's bill (~$0.14), so nobody
+   should ever re-introduce or defend them with a cost argument in either
+   direction. What was wrong with them is that an instruction is not a
+   mechanism. A mandated line can be forgotten, mistyped, or written into the
+   wrong task folder with a missing `ORCH_STATE_DIR`, and the watcher already
+   derives the same spawn and the same result **deterministically** from the
+   journal and the marker — measured 96–99% twin coverage, usually *earlier*
+   than the agent's own line, against 79–100% compliance. The one thing the
+   pair carried that derivation could not — the agent's own `summary` — is now
+   on the derived result line (step 2), which is what made the deletion
+   information-neutral.
 
-   **When the whole run ends, the driver SHOULD emit a final badge event for
-   the orchestrator card** with the run summary and token totals only the
-   driver knows:
-   ```bash
-   ./status.sh orchestrator complete done "wf_<id> complete: <summary>"
+   `status.sh` itself (and its `touch-status` wrapper) is **not** deleted and
+   never will be: it stays the ONE write path into `events.jsonl` — it owns the
+   flock, the 1 KB cap and the `w` attribution (see **State-dir authority**) — and it
+   keeps three legitimate callers — a human, a driver, and the deterministic
+   emitters (`decision_watcher.py`, `cycle_reporter.py`, `touch-run`). An
+   agent prompt may still carry an OPTIONAL progress note for a genuinely
+   unobservable middle — a long single tool call with nothing between spawn
+   and result — like this:
    ```
+   Optional, for a long unobservable middle only:
+     bash <abs-path>/status.sh <plan> <stage> info "<what is happening now>"
+   ```
+   Never for spawn or result state: those are derived, and a second assertion
+   of them is a duplicate that can disagree with the record. The event plane
+   therefore still has exactly **two writers** — `status.sh`-mediated `agent`
+   lines and the watcher's own — which is the property the `w` key exists to
+   keep legible.
+
+   **When the whole run ends, the run close is DERIVED — a driver-typed close
+   is belt-and-braces, no longer a MUST.** The watcher polls two recorded
+   sources and the first to land wins, with the rung it fired on recorded in
+   the event's `detail`:
+
+   1. **the run snapshot** `<session>/workflows/<runId>.json`, written at the
+      second the run ends, carrying the harness's own status vocabulary
+      (`completed|failed|killed`) plus its totals;
+   2. **the driver session's close notification**, matched on
+      `record.origin.kind == "task-notification"` and joined to this run by the
+      launch record's `taskId` — never by the literal tag, which is the generic
+      background-task block a finishing `sleep` also wears;
+   3. a driver-typed `./status.sh orchestrator complete done "wf_<id> complete: <summary>"`
+      — still honoured, still useful, simply no longer required;
+   4. the existing quiet/abandon timeouts, unchanged.
+
+   Rungs 1 and 2 are polled every `ORCH_CLOSE_POLL_SECS` (default 2 s) and
+   fire **once** — and so does rung 3, which the watcher does not write but
+   does **recognise**: if a driver's own `w:"agent"` close has already landed
+   after the watcher's startup baseline, the ladder has fired and no second
+   terminal event is added beside it (two closes that disagreed would flip the
+   badge on last-event-wins). The close is appended by running `status.sh`, so it reads
+   `"w": "agent"` exactly like a typed one and the exit protocol below needs no
+   new predicate; the watcher does not forge that attribution with a raw
+   append. `killed` never renders `done` — an unrecognised status word settles
+   `failed` with the raw word kept in the detail, because inventing green out
+   of a vocabulary we do not know is the fabricated badge this module already
+   forbids. **Neither source is guaranteed**: ~7% of runs never get a snapshot,
+   one recorded run has a snapshot and no journal at all, and absence is
+   normal on every path — never an error, and never a reason to weaken the
+   timeout rungs. Rung 1 fires on snapshot **appearance**, baselined at
+   startup, because a resumed run re-uses its runId and the previous attempt's
+   snapshot is already on disk.
+
+   Two further outputs ride on rung 2's notification when it exists:
+   a `run`-stage `info` event carrying the harness's own `<usage>` counts under
+   the additive `run` key (a cross-check for the statistics page, never a
+   substitute for the folded totals), and the verbatim `<recovery>` call
+   written into `plan/RESUME.md` between `<!-- touch:recovery -->` markers —
+   nothing outside those markers is touched, a RESUME.md that does not exist is
+   not created, the fence widens past any backticks in the body, and a body
+   carrying those markers is refused rather than spliced. **Per-agent death
+   causes** are emitted as one `<stage> failed` line per dead agent so a
+   529-killed agent reads *failed, with a cause* instead of merely `stale`; the
+   primary source is the snapshot's own
+   `workflowProgress[].error`/`lastAttemptReason`, with the notification's
+   `<failures>` block as corroboration only (it appears in 2 of 28 recorded
+   runs).
+
+   Those three outputs keep being polled for **until the watcher exits**, not
+   only in the poll that closed the run. The close is one-shot; the
+   notification is a separate record in a separate file appended by a separate
+   writer, and nothing orders it against the snapshot — so a version that
+   stopped looking at the close would drop `<usage>` and `<recovery>` on every
+   run whose notification was a beat late. All three are idempotent, so asking
+   again writes nothing.
+
+   A cause line (and a `--reconcile` correction) is always written under a
+   **non-reserved** stage: the stage of an agent row is derived from the
+   harness's own label text, so a label ending in `:plan:` or `:complete:`
+   would otherwise set a card's badge from an annotation. It is rewritten to
+   `agent` at the writer — not left to labels being well-behaved — because a
+   cause line must never be the thing that closes a card.
+
    The watcher also closes the badge on its own (safety net): once every
    tracked agent has a result, every plan's loop is closed, and the journal
    stays quiet for `ORCH_QUIET_SECS` (default 60s), it emits
@@ -234,7 +326,7 @@ writers append lines exactly as they always did.
    the card `running` forever. A premature watcher close (unusually long
    pause between loops) self-heals: the next spawn reopens the badge with
    `complete running`. The same heal covers phase continuations: one task
-   folder hosts several phases (research, then implement-plan) appending to
+   folder hosts several phases (research, then implement) appending to
    one `events.jsonl`, so at startup a watcher whose stream already ENDS on
    an earlier phase's `complete done|failed` badge arms the reopen — the
    first spawn it sees emits `complete running` so no replaying dashboard
@@ -243,8 +335,17 @@ writers append lines exactly as they always did.
    reserved `orchestrator` card reopens a done/failed badge during replay of
    histories written before this heal existed.
 
-   **When the run ends, stop its watcher** — and the driver's terminal event
-   above is what does it. The watcher stops itself when (a) an
+   **When the run ends, stop its watcher** — and the terminal event above is
+   what does it, whichever rung produced it. The predicate is deliberately
+   unchanged by the layered close: because rungs 1 and 2 append **through**
+   `status.sh`, a deterministically derived close is the same `"w":"agent"`
+   line route 1 has always waited for, and the rule that the watcher's own
+   INFERENCE cannot authorize an exit is **not** relaxed. A rung is recorded
+   evidence the harness wrote; a quiet journal is a guess about it, and those
+   stay different things. Once a rung has closed the run, the settle pass may
+   still settle open plan cards but never re-announces the run — its own
+   verdict is a fold over the journal, and a `killed` run whose plans all
+   resulted would fold to `done`. The watcher stops itself when (a) an
    `orchestrator complete done|failed` line written by a script/agent
    (`"w":"agent"`) lands *after* the watcher started, (b) the journal has
    then been quiet for `ORCH_EXIT_QUIET_SECS` (default 120s), and (c) nothing
@@ -340,6 +441,45 @@ writers append lines exactly as they always did.
    The watcher auto-discovers the most recently active
    `~/.claude/projects/*/*/subagents/workflows/wf_*/journal.jsonl` when not
    configured — set `wf_dir` in `orch-config.json` to pin a specific run.
+
+   The watcher takes two flags beside its one positional `wf_dir` argument
+   (each also readable from the environment; an unknown flag warns and is
+   ignored, because a typo must not cost you the live view):
+
+   ```bash
+   ORCH_STATE_DIR=<task-dir> python3 decision_watcher.py --reconcile   # ORCH_RECONCILE=1
+   ORCH_STATE_DIR=<task-dir> python3 decision_watcher.py --no-tokens   # ORCH_NO_TOKENS=1
+   ```
+
+   `--reconcile` is a **one-shot post-run pass, not a daemon**: it reads the
+   run snapshot as an oracle and emits corrections for agents the live tail
+   could not classify (a transcript that had not flushed leaves a row rendered
+   as `agentId[:8]` forever) and for runs whose watcher never ran at all. It is
+   idempotent — every corrected agent is checkpointed, so a second pass emits
+   nothing — and it never parses `promptPreview`/`resultPreview`, which are
+   TRUNCATED: a marker cut in half would classify an agent onto a plan card
+   that does not exist. Token totals are re-derived from the transcripts, never
+   copied from the snapshot's own display figure. With no snapshot it says so
+   and exits 0; a snapshot is not guaranteed, so that is not an error.
+   "Post-run" is enforced, not just asked for: `.watcher-state.json` has one
+   writer at a time, and the daemon records its own `pid` there on every save,
+   so the pass **refuses to save** when that pid is still alive — or, for a
+   checkpoint written before that key existed, when the file simply moved
+   underneath. A live daemon owns it and the save would rewind its offsets. The
+   corrections already appended stand (`events.jsonl` is append-only and
+   flock'd); only the checkpoint is withheld, which costs at most a re-emit on
+   a later pass.
+
+   `--no-tokens` suppresses this watcher's token accounting entirely — no
+   transcript read, no `tokens` event, and an `agent` block with **no `tokens`
+   key at all** rather than a rendered `0` (zero and unmeasured must never look
+   alike). Spawns, results and decision lines are untouched. It exists so a
+   deployment that has wired the aggregator's ingest tick can make
+   `ingest.rollup` the single reachable implementation of a pure function
+   Touch currently implements twice; the default is OFF, because the watcher is
+   the live view's token source until that convergence, and the two
+   implementations are held together by `tests/test_token_crosscheck.py`
+   rather than by one of them being quietly preferred.
 5. **Open the dashboard**: the tokened URL
    (`http://127.0.0.1:8931/?token=…`) — printed at startup on a TTY, and always
    available in `<task-dir>/monitor.json`. A tokenless URL loads the page and
@@ -450,8 +590,22 @@ path resolving outside the task folder (traversal/symlink safe).
   is open), and **working** (share of session wall-clock spent in working
   segments).
 - **Timestamps are true occurrence times** where derivable: the watcher stamps
-  spawn events from the agent transcript's first line and results from its
-  last line. Every other live event carries the moment the watcher OBSERVED
+  spawn events from the agent transcript's first line and results from the
+  agent's own last **assistant message**, falling back to the transcript's last
+  line of any kind. Every later line in a transcript (tool results, hook
+  output, harness scaffolding) is bookkeeping about a turn that had already
+  ended, which is why the assistant stamp is the closer answer to "the agent
+  finished".
+  **The residual trade, stated rather than hidden:** journal entries carry no
+  timestamps of their own, so a live result whose transcript has stopped
+  flushing — the long final Bash call — still carries the watcher's READ
+  MOMENT, because neither recorded candidate passes the ≤30 s freshness guard.
+  That stamp is late by however long the flush lagged. It is kept deliberately:
+  a stamp that is honest about being an observation beats one that is
+  confidently wrong, and the alternative (trusting a stale transcript line)
+  would place a result *before* work that demonstrably followed it. The
+  measured tail this narrows was +29 s at p90.
+  Every other live event carries the moment the watcher OBSERVED
   it — journal-derived lines within one 1 s journal poll, and a token tick up
   to `token_tick_secs` (default 15 s) after the transcript growth it reports,
   because the cadence ceiling gates the transcript READ and not merely the
@@ -556,9 +710,9 @@ ${CLAUDE_PLUGIN_ROOT}/
 │                                    #   on PATH while the plugin is enabled
 ├── shared/monitoring/               # this module — stateless, same for every task
 ├── skills/
-│   ├── m-orchestrator/SKILL.md      # monitoring integration skill
-│   ├── execute-research/            # research -> ONE synthesized plan (read-only)
-│   ├── implement-plan/              # plan -> implement->test->critique loops
+│   ├── monitor/SKILL.md      # monitoring integration skill
+│   ├── research/            # research -> ONE synthesized plan (read-only)
+│   ├── implement/              # plan -> implement->test->critique loops
 │   └── …                            # ten skill directories in all
 └── …                                # .claude-plugin/, aggregator/, docs/,
                                      #   hooks/, touch-visual/, README.md,
@@ -577,7 +731,7 @@ Your project, the only place a run writes:
     │   ├── events.jsonl                   # the append-only stream
     │   ├── orch-config.json               # the run's config
     │   ├── .watcher-state.json            # the watcher's checkpoint
-    │   ├── orch-scripts/                  # the task's adapted workflow script
+    │   ├── orch-scripts/                  # the byte-for-byte workflow-template copy
     │   └── …                              # plan/, report/ and the run's other
     │                                      #   documents, served by /artifacts
     ├── memory/                            # Claude Code's auto memory for this

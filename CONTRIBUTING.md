@@ -52,17 +52,18 @@ tree — see [Releasing](#releasing).
 plugin/touch/bin/touch-selfcheck
 ```
 
-Eight PASS/FAIL lines — interpreter version, the package importing *from this
-tree*, the web assets, project-root resolution, task-state resolution, a
-loopback bind, the exec bits on `bin/`, and one event through a real write/read
-round trip. It exits non-zero on any failure and ends with the command to run
-next:
+Ten PASS/FAIL lines — interpreter version, the package importing *from this
+tree*, the web assets, project-root resolution, task-state resolution, the
+auto-memory mapping, a leftover pre-mapping memory directory (the one check
+that can WARN instead of fail), a loopback bind, the exec bits on `bin/`, and
+one event through a real write/read round trip. It exits non-zero on any
+failure and ends with the command to run next:
 
 ```
 PASS  python3 3.13.7 (needs 3.11+) at /usr/bin/python3
 PASS  aggregator 0.1.0 imported from this tree (…/plugin/touch/aggregator/__init__.py)
 …
-8 checks: all passed
+10 checks: all passed
 ```
 
 ## Step 5. Run the tests
@@ -133,24 +134,28 @@ To dogfood exactly what a consumer installs, from the repo root:
 claude --plugin-dir plugin/touch
 ```
 
-The six wrappers are then on `PATH` as bare command names, and the skills are
+The seven wrappers are then on `PATH` as bare command names, and the skills are
 available as `/touch:<name>`.
 
 ## Hacking on the module itself
 
-`touch-serve`, `touch-monitor`, `touch-watcher`, `touch-status` and
-`touch-cycle-reporter` are the supported entry points — one per program. The
-one sanctioned module-direct invocation *of the server* is:
+`touch-serve`, `touch-monitor`, `touch-watcher`, `touch-status`,
+`touch-cycle-reporter` and `touch-run` are the supported entry points — one
+per program (`touch-selfcheck`, the seventh wrapper, is run by hand). The one
+sanctioned module-direct invocation *of the server* is:
 
 ```bash
-PYTHONPATH=plugin/touch python3 -m aggregator.server
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=plugin/touch python3 -m aggregator.server
 ```
 
 There is no `aggregator/` at the repo root, which is why the `PYTHONPATH` is
 required and why the docs omit the `python3 -P` that `touch-serve` prints
 (`-P` keeps the cwd off `sys.path`; here there is nothing in the cwd left to
-shadow the package). The Mongo mirror is the other directly-runnable module —
-an operator tool with no wrapper by design; `CLAUDE.md` carries its line.
+shadow the package). Keep the first env var: every wrapper exports it, so a
+hand-typed run without it is the only way an `aggregator/__pycache__` lands in
+the shipping subtree — which `tests/test_package.py` fails by name. The Mongo
+mirror is the other directly-runnable module — an operator tool with no
+wrapper by design; `CLAUDE.md` carries its line.
 
 ---
 
@@ -194,34 +199,56 @@ JSON, and there is a 1 KB cap. Always set `ORCH_STATE_DIR`, or the event lands
 in whatever task folder the writer resolves instead.
 
 ### `touch-cycle-reporter` — the per-cycle record
-**What.** Renders one report per implement → test → critique cycle and emits
-each loop-terminal verdict.
+**What.** Renders one report per implement → test → critique cycle, emits each
+loop-terminal verdict, and renders the final run report — for both workflows.
 **Why.** So a finished run leaves something readable behind instead of a log
-you have to reconstruct — and so the verdict is written by a deterministic
-renderer rather than a model asked to summarize itself.
+you have to reconstruct — and so verdicts are written by a deterministic
+renderer rather than a model asked to summarize itself. `failed` requires a
+real verdict: a loop with no decisive result settles *done* ("closed — no
+verdict"), never *failed*.
 **How.** `ORCH_STATE_DIR=<task-dir> touch-cycle-reporter <wf_dir> [--once]
 [--interval=N]`. It fronts `cycle_reporter.py`, which ships inside the
-`implement-plan` skill it serves.
+`implement` skill and serves both loop skills; `--settle` is the
+idempotent one-shot `touch-run close` uses to emit only the closes the record
+implies but the stream is missing — it never invents a verdict.
+
+### `touch-run` — the run envelope
+**What.** `start | bind | close | verify | status`: lays out a run's task
+folder, copies the workflow template byte-for-byte, preflights the run spec,
+seeds the plan cards, starts and stops Touch's own daemons, and settles the
+cards at close.
+**Why.** The blocks of shell a driver used to retype for every run were
+mechanical bookkeeping, measured at real token cost — exactly what a script
+should own. It acts on Touch's folders and daemons only: it runs no agent and
+is not a session verb.
+**How.** `touch-run start <task> --spec <file>` — per-project constants merge
+in from the tracked `.touch/run.json`, per-run values winning — then `bind`
+records the `wf_dir` and renders `plan/RESUME.md`, then `close` settles what
+the record implies and stops the pid-verified daemons it started.
 
 ### `touch-selfcheck` — does it work here
-**What.** Eight PASS/FAIL checks of an installation.
+**What.** Ten PASS/FAIL checks of an installation (one of them — the
+legacy-memory check — can WARN instead).
 **Why.** The plugin ships no test suite (fixtures and a git checkout do not
-belong in a payload), but the eight things that actually break on someone
+belong in a payload), but the ten things that actually break on someone
 else's machine are cheap to check — so "it doesn't work" turns into one failing
 line you can act on.
 **How.** `cd <your project> && touch-selfcheck`. It writes nothing except one
-throwaway event in a temp directory it removes. Its report ends with a sentinel
-so a crash halfway through can never be summarized as a pass.
+throwaway event in a temp directory it removes — except `--init`, its one
+writing mode, which maps auto memory into `<project>/.touch/memory`. Its
+report ends with a sentinel so a crash halfway through can never be summarized
+as a pass.
 
-### `touch-serve` — the aggregator, and the page that isn't finished
-**What.** The read/serve side: harness ingest, the event store, the read API,
-the WebSocket, and the `touch-visual` page on port 8932.
+### `touch-serve` — the aggregator and the Touch page
+**What.** The read/serve side: harness ingest, the ingest tick, the event
+store, the read API, the WebSocket, and the `touch-visual` page on port 8932.
 **Why.** One page over everything the CLI writes — sessions included — rather
 than one dashboard per run.
-**How.** `touch-serve [--port P] [--tasks-root DIR] [--assets DIR]`. The
-backend is implemented and tested; **the page it serves is a v0 placeholder**.
-Use `touch-monitor` for real work. The plan is for `touch-serve` to serve that
-same page, extended over everything the aggregator sees.
+**How.** `touch-serve [--port P] [--tasks-root DIR] [--assets DIR]`. The page
+is shipped and read-only; the ingest tick (`aggregator/tick.py`) is what fills
+it — it drives the tailers, applies the derived operations into the read model
+and the WAL, and reports itself in `/health`. `touch-monitor` is still the
+page most runs are watched on; the two pages are meant to converge into one.
 
 ## Under the hood
 
@@ -284,30 +311,40 @@ property. Memory is now public; write it as if it ships.
 ## What ships alongside
 
 ### The ten skills
-**What.** Four orchestration skills (`execute-research`, `implement-plan`,
-`orchestrate`, `m-orchestrator`) and six engineering-practice skills, all
+**What.** Four orchestration skills (`research`, `implement`,
+`orchestrate`, `monitor`) and six engineering-practice skills, all
 invoked as `/touch:<name>`.
 **Why.** The orchestration pair is the loop the dashboard renders:
-`execute-research` → ONE complete plan → `implement-plan` → gated
+`research` → ONE complete plan → `implement` → gated
 implement/test/critique loops divided by file ownership. The other six are what
 the agents inside those loops are asked to do well.
 **How.** The two loop skills carry a `templates/*.workflow.js` that is the
-normative protocol — prompts, schemas, models, markers, status calls. Adapt a
-copy into the task folder's `orch-scripts/`; do not diverge from the
-invariants. All ten skills cost ~1,257 tokens of always-on context between
-them, a measured figure.
+normative protocol — prompts, schemas, models, markers. The templates are
+generic and spec-driven: `touch-run start` copies one **byte-for-byte** into
+the task folder's `orch-scripts/`, never edited, and every per-run value
+arrives through `args` from a run-spec JSON merged over the tracked
+`.touch/run.json`. The scripts emit no events and no prompt mandates a
+self-tracing status call — the watcher, the cycle reporter and `touch-run`
+derive every event from the record. All ten skills cost ~1,277 tokens of
+always-on context between them, a measured figure.
 
-### The scope-guard hook
-**What.** `orch_scope_guard.py`, a `PreToolUse` hook.
+### The two hooks
+**What.** `orch_scope_guard.py`, a `PreToolUse` hook, and
+`agent_lifecycle.py`, an additive SubagentStart/SubagentStop/PostToolUse
+recorder.
 **Why.** While a run is active, a subagent that wanders into another run's
-folder can read or overwrite work it knows nothing about.
-**How.** While `.touch/local-orchestrators/ACTIVE` lists task names, the hook
-denies subagent access to every unlisted task's folder except its `plan/`, and
-denies subagent writes to `.touch/memory/**` outright. The main terminal agent
-is never restricted, and with no ACTIVE file the guard is inert. Both roots are
-consulted during the transition (`.touch/` first, then the legacy `.claude/`
-one), so no flip order can disarm `HALT`. It is registered exactly once, by the
-plugin's own `hooks/hooks.json`, which sits beside the script.
+folder can read or overwrite work it knows nothing about — and a dashboard
+that waits for the journal learns about agent starts later than a hook does.
+**How.** While `.touch/local-orchestrators/ACTIVE` lists task names, the scope
+guard denies subagent access to every unlisted task's folder except its
+`plan/`, and denies subagent writes to `.touch/memory/**` outright. The main
+terminal agent is never restricted, and with no ACTIVE file the guard is
+inert. Both roots are consulted during the transition (`.touch/` first, then
+the legacy `.claude/` one), so no flip order can disarm `HALT`.
+`agent_lifecycle.py` denies nothing, ever: it records agent lifecycle lines
+and merges `wf_dir`/`run_id` into the run config, and is likewise inert with
+no active run. Both are registered exactly once, by the plugin's own
+`hooks/hooks.json`, which sits beside the scripts.
 
 ### The loopback + token posture
 **What.** Both servers bind `127.0.0.1` and mint a per-boot token; every route
@@ -354,16 +391,16 @@ neither may be edited to disagree with the other.
 
 | path | what it is |
 |---|---|
-| `plugin/touch/aggregator/` | the Python package: ingest, store, sessions, agents, WebSocket, server, optional Mongo mirror. One file, exactly one owner |
-| `plugin/touch/touch-visual/` | the web page (`index.html`, `app.js`, `style.css`) — v0 is read-only |
-| `plugin/touch/docs/` | `control-semantics.md` (verb ladder), `mongo.md` (database recipe + security baseline) |
-| `plugin/touch/shared/monitoring/` | the run-monitor substrate — stateless, task-agnostic, exactly five files; its tests live outside the payload |
+| `plugin/touch/aggregator/` | the Python package: ingest, the ingest tick, store, sessions, agents, WebSocket, server, the cost reader, optional Mongo mirror. One file, exactly one owner |
+| `plugin/touch/touch-visual/` | the web page (`index.html`, `app.js`, `style.css`) — read-only; no control affordance renders |
+| `plugin/touch/docs/` | `control-semantics.md` (verb ladder), `mongo.md` (database recipe + security baseline), and the long form the session guide points at: `memory-home.md`, `run-folders.md`, `dev-loop.md` |
+| `plugin/touch/shared/monitoring/` | the run-monitor substrate — stateless, task-agnostic, exactly six files; its tests live outside the payload |
 | `plugin/touch/skills/` | ten skills: four orchestration, six engineering-practice |
-| `plugin/touch/bin/` | the six wrappers Touch puts on `PATH` |
-| `plugin/touch/hooks/` | `orch_scope_guard.py` and the `hooks/hooks.json` that registers it — one registration, nowhere else |
+| `plugin/touch/bin/` | the seven wrappers Touch puts on `PATH` |
+| `plugin/touch/hooks/` | `orch_scope_guard.py`, `agent_lifecycle.py` and the `hooks/hooks.json` that registers them — one registration, nowhere else |
 | `plugin/touch/.claude-plugin/` | `plugin.json`, the one place a version is declared — and nothing else |
 | `.claude-plugin/` (repo root) | `marketplace.json`, the catalog. It sits at the ROOT because a cloned marketplace is only ever read from `<repo>/.claude-plugin/marketplace.json`, and it names the payload with `"source": "./plugin/touch"` |
-| `tests/` | one standalone executable per module + `run_all.sh` + `fixtures/` + `_roots.py` (the anchor every test names the canonical trees through) |
+| `tests/` | one standalone executable per module + `run_all.sh` + `fixtures/` and `cost-corpus/` (frozen corpora) + `_roots.py` (the anchor every test names the canonical trees through) |
 | `tests/monitoring/` | the monitoring module's own suite and fixtures, kept out of the payload |
 | `scripts/` | `release.sh` — the release checklist, executable |
 | `inception.md` | everything verified about the substrate (CLI 2.1.220), summarized |
@@ -543,8 +580,9 @@ They spawn real subagent runs that write into
   are dashboard history, and the Mongo mirror's key space depends on them. Never
   rewrite one either: a finished run is dated record, paths included.
 - Don't commit while a watcher is writing inside the paths being committed.
-- **Never `git add .touch/`; always `git add .touch/memory`** — that one subtree
-  is tracked and the rest of `.touch/` is transcripts and tokens.
+- **Never `git add .touch/`; always `git add .touch/memory` (and
+  `.touch/run.json` if you changed it)** — those are the two tracked paths,
+  staged by name; the rest of `.touch/` is transcripts and tokens.
 - Every `touch-status` call sets `ORCH_STATE_DIR`.
 
 ## Where design decisions live
