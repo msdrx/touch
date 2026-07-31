@@ -19,9 +19,6 @@ It is read-only for now. Future releases will "touch" the agent.
 
 ### 1. Install it in Claude Code
 
-Worth a minute first: the plugin's own [README](plugin/touch/README.md) is the
-full disclosure of what Touch reads, writes and serves.
-
 Inside Claude Code, run:
 
 ```
