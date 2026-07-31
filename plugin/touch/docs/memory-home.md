@@ -65,8 +65,12 @@ memory root is refused rather than followed.
   write path therefore refuses `@`-imports outside code spans, block HTML
   comments, token-shaped and credentialed-URI lines (by category, never
   quoting the match), and `pinned:` without an explicit confirmation.
-- **Memory is public.** In this repository `.touch/memory/*.md` is the one
-  tracked subtree of `.touch/`; write it as if it ships, because it does.
+- **Memory is local, and was briefly public.** `.touch/memory/*.md` used to be
+  the one tracked subtree of `.touch/` (G9). That carve was withdrawn
+  2026-07-31 and the committed files purged from history, so the notes are
+  ordinary ignored state now. The habit it bought is still worth keeping: write
+  them as if they could be read, because a future project may re-publish them
+  and because they are model instructions either way.
 - **Subagents may not write it.** The scope guard denies subagent
   `Write`/`Edit`/`NotebookEdit` on `.touch/memory/**` (G14), because
   co-locating memory with run history would otherwise hand a subagent a bigger
@@ -74,9 +78,9 @@ memory root is refused rather than followed.
   terminal agent or the flag-gated HTTP plane, and the audit log is
   `.touch/memory-audit.jsonl` — never `events.jsonl`, never a plan badge.
 - **The two trees stay apart, both ways.** The aggregator's WAL never lives
-  under run history, and run history never lives under a tracked subtree.
+  under run history, and run history never lives under a tracked path.
   `.touch/` holds both, which is exactly why a repository's ignore carve is an
-  allowlist of one pattern and not a directory.
+  allowlist of named paths and not a directory.
 
 ## The index has a budget
 

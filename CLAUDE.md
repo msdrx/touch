@@ -49,7 +49,7 @@ development-only material that never ships — except the root
 | `scripts/` | `release.sh` — the release checklist, executable; deliberately no RELEASE.md |
 | `README.md` / `CONTRIBUTING.md` / `inception.md` | intent + the honest verb table; ground rules and the release gate; a dated substrate snapshot (CLI 2.1.220) whose pre-plugin paths are history, not directions |
 | `.claude/` | `.claude/settings.json` (exactly two keys: status line + `enabledPlugins: {"touch@inline": true}`, GD-C1 — `plugin/touch/docs/dev-loop.md`), `statusline.sh` (shells out to `jq`: a **status-line-only** exception, never a licence for `jq` in Touch's own code or tests), two `shared/scripts/` helpers, and the untracked `settings.local.json`, the ONE place `autoMemoryDirectory` may be written (G1). Still the project MARKER every resolver walks up to; holds no run state |
-| `.touch/` | project-local state, gitignored except two carves, **five trust classes in one directory**: (1) run history, `local-orchestrators/<task>/`; (2) Touch's own history and secrets — `sessions/`, `server.json`, `mongo.json`, mode `0600`; (3) `memory-audit.jsonl` plus `memory/.history/` and `memory/.trash/`; (4) **the tracked subtree `.touch/memory/*.md`**, Claude Code's auto memory; (5) **the tracked FILE `.touch/run.json`**, the per-project run constants `touch-run start` merges under a run spec (D-12) — configuration, not state. Two carves, both by NAME: stage `git add .touch/memory` and `git add .touch/run.json`, **never** `git add .touch/` (GD-1/GD-16 as amended) |
+| `.touch/` | project-local state, gitignored except ONE carve, **five trust classes in one directory**: (1) run history, `local-orchestrators/<task>/`; (2) Touch's own history and secrets — `sessions/`, `server.json`, `mongo.json`, mode `0600`; (3) `memory-audit.jsonl` plus `memory/.history/` and `memory/.trash/`; (4) `memory/*.md`, Claude Code's auto memory — local state, **not tracked** (the G9 carve was withdrawn 2026-07-31 and the committed copies purged from history); (5) **the tracked FILE `.touch/run.json`**, the per-project run constants `touch-run start` merges under a run spec (D-12) — configuration, not state. One carve, staged by NAME: `git add .touch/run.json`, **never** `git add .touch/` (GD-1/GD-16 as re-amended) |
 
 `LICENSE` is the one deliberate duplicate — repo root and plugin root, required
 by the plugin spec, machine-checked by `tests/test_plugin_tree.py` (GD-U7).
@@ -143,9 +143,10 @@ settings layer, so `--init` writes the key and then verifies it.
 Four things to know before touching that directory: **these bytes are model
 instructions** (they load into future sessions, so the write path refuses
 `@`-imports, block HTML comments, token-shaped lines and unconfirmed `pinned:`
-frontmatter); **memory is public** (`.touch/memory/*.md` is the one tracked
-subtree); **subagents may not write it** (G14, the scope guard); and the
-aggregator's WAL and the run history stay out of it.
+frontmatter); **memory is local, not published** (the tracked-subtree carve was
+withdrawn 2026-07-31 — still write it as if it could be read, but it is no
+longer committed); **subagents may not write it** (G14, the scope guard); and
+the aggregator's WAL and the run history stay out of it.
 
 Full account — the scope table of every memory kind, what does and does not
 move, the `~/.claude` refusal, GD-13's three planes:
@@ -306,9 +307,9 @@ Mongo recipe and security baseline: `plugin/touch/docs/mongo.md`.
   writing** (GD-1 as amended) — "the paths being committed" means the
   **pathspec-resolved tracked paths**, which makes the gate largely structural
   now that run state is gitignored. What replaces it operationally: **never
-  `git add .touch/`; always `git add .touch/memory` (and `.touch/run.json` if
-  you changed it)** — the two tracked paths, staged by name, so a stray token
-  file or a `.history/` copy can never ride along.
+  `git add .touch/`; always `git add .touch/run.json` by name** — the one
+  tracked path, staged by name, so a stray token file, a memory note or a
+  `.history/` copy can never ride along.
   A watcher writing some *other* task's stream never blocks a commit.
   The mirror daemon follows the same lifecycle.
 - **Every generated deliverable is stored in the repo, not only the claude.ai

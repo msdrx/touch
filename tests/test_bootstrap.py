@@ -8,12 +8,19 @@ on disk only), inverting R-01's original negative half.
 
 Amended 2026-07-30 (G9/G10): the tasks root moves to `.touch/local-orchestrators`
 (the legacy `.claude/` rules stay as legacy defence), and `.touch/` stops being a
-blanket `.touch/` + `.touch*/` exclusion. It is now excluded per-CHILD so that
-ONE subtree — top-level `.touch/memory/*.md`, the Claude Code memory files —
-can be tracked. That carve is the delicate part of this file: three of the five
-lines exist only to stop the negation from leaking `.history/`, `.trash/`, a
-stray `foo.token` or a `draft.md.bak` into git, so `test_check_ignore_carve`
-asserts the neighbours that must NOT come through, not just the one that must.
+blanket `.touch/` + `.touch*/` exclusion. It is now excluded per-CHILD so that a
+named carve can be tracked.
+
+Amended 2026-07-31: the MEMORY carve is withdrawn. `.touch/memory/*.md` — the
+Claude Code auto-memory files — used to be the one tracked subtree (G9/GD-16);
+it is now ordinary ignored state, and the eight committed files were purged
+from history. Nothing about the CLI feature changed: the memory home is still
+`.touch/memory`, it is simply not published any more. So `.touch/run.json`
+(D-12) is the ONLY carve left, and this file's job inverts — it now asserts
+that the memory paths ARE ignored and that NOTHING but `run.json` is tracked
+under `.touch/`. These assertions were never about memory content; they are
+git-hygiene guards over a directory that also holds the aggregator token and
+the mirror credentials, which is precisely why they are worth keeping.
 
 These are *repository state* assertions, not unit tests: they read `.gitignore`
 and interrogate git itself, so they are the durable guard that the bootstrap
@@ -46,25 +53,18 @@ LEGACY_ORCH = ".claude/local-orchestrators"
 # SD-3 — the ONE verbatim entry list. sp-03's test_shell.py guard asserts the
 # identical text; both sides must stay character-for-character the same.
 #
-# The five `/.touch…` lines are G9's carve, and their ORDER and exact spelling
-# are the whole mechanism: git cannot re-include a file under an excluded
-# DIRECTORY, so `memory/` is re-included as a directory before its children are
-# re-ignored except `*.md`. `/.touch?*/` is NOT `.touch*/` — `*` matches the
-# empty string, so `.touch*/` also matches `.touch/` itself and would kill the
-# negation. test_check_ignore_carve() asserts the BEHAVIOUR these lines buy, so
-# a "tidy-up" that keeps the entries but reorders them still fails.
+# `/.touch?*/` is NOT `.touch*/` — `*` matches the empty string, so `.touch*/`
+# also matches `.touch/` itself and would kill the negation on the next line.
+# test_check_ignore_carve() asserts the BEHAVIOUR these lines buy, so a
+# "tidy-up" that keeps the entries but reorders them still fails.
 GITIGNORE_ENTRIES = (
     "/.touch/*",
     "/.touch?*/",
-    "!/.touch/memory/",
-    "/.touch/memory/*",
-    "!/.touch/memory/*.md",
-    # The SECOND carve, and the only other one (D-12/SKILLS-7): the tracked
-    # per-project run constants `touch-run start` merges under a run spec
-    # before handing `args` to a workflow template. A single FILE, so no
-    # directory re-include is needed — and deliberately a single file, because
-    # widening this to a directory is how a token file or a watcher checkpoint
-    # becomes committable.
+    # The ONLY carve (D-12/SKILLS-7): the tracked per-project run constants
+    # `touch-run start` merges under a run spec before handing `args` to a
+    # workflow template. A single FILE, so no directory re-include is needed —
+    # and deliberately a single file, because widening this to a directory is
+    # how a token file or a watcher checkpoint becomes committable.
     "!/.touch/run.json",
     ".claude/settings.local.json",
     "*.pid",
@@ -77,8 +77,9 @@ GITIGNORE_ENTRIES = (
 
 # Paths that MUST be ignored. Hypothetical (untracked, non-existent) on purpose:
 # `git check-ignore` consults the index, so a tracked path would answer "not
-# ignored" regardless of the rules — and `.touch/memory/*.md` is tracked now,
-# which is why every call below passes `--no-index` as well (LAYOUT-18).
+# ignored" regardless of the rules. Every call still passes `--no-index`
+# (LAYOUT-18): it costs nothing, and it keeps the arms honest about asserting
+# the RULES rather than the current contents of the index.
 MUST_IGNORE = (
     ".touch/x",
     ".touch/sessions/1-2/pty.log",
@@ -94,6 +95,10 @@ MUST_IGNORE = (
     ".touch/mongo.json",            # mirror credentials
     ".touch/control.jsonl",
     ".touch/custom-state.jsonl",
+    # 2026-07-31: the auto-memory files, since the G9 carve was withdrawn. They
+    # are local state like everything else here now.
+    ".touch/memory/MEMORY.md",
+    ".touch/memory/does-not-exist.md",
     # pre-existing rules that must survive an additive edit
     f"{ORCH}/x/daemon.log",
     # 2026-07-27 amendment: the whole run-state tree is ignored now.
@@ -109,14 +114,21 @@ MUST_IGNORE = (
 # What must never become ignored by a careless rule.
 MUST_NOT_IGNORE = (
     ".gitignore",
-    # The ONE tracked subtree of `.touch/` (G9). Named with a file that does not
-    # exist: the point is that the RULES re-include it, not that it is present.
-    ".touch/memory/does-not-exist.md",
-    # The one tracked FILE beside it (D-12): the per-project run constants a
-    # workflow template consumes through `args`. Also named while absent — a
-    # project that has not configured one yet must still be able to add it
-    # without editing .gitignore, which is exactly how the carve goes stale.
+    # The ONE tracked file of `.touch/` (D-12): the per-project run constants a
+    # workflow template consumes through `args`. Named while absent — a project
+    # that has not configured one yet must still be able to add it without
+    # editing .gitignore, which is exactly how a carve goes stale.
     ".touch/run.json",
+)
+
+# The three lines that re-included the auto-memory subtree, withdrawn
+# 2026-07-31. Asserted ABSENT so a revert of the .gitignore block cannot
+# quietly republish `.touch/memory/` — the behavioural half lives in
+# CARVE_EXCLUDED below, which requires those same paths to be ignored.
+GITIGNORE_WITHDRAWN = (
+    "!/.touch/memory/",
+    "/.touch/memory/*",
+    "!/.touch/memory/*.md",
 )
 
 # Entries that must NOT be in .gitignore (item 04, 2026-07-28). These two lines
@@ -182,6 +194,20 @@ def test_gitignore_entries():
         check(entry in lines, f".gitignore has a line exactly `{entry}`")
 
 
+# --- 2026-07-31: the withdrawn memory carve cannot come back by accident.
+# Compared against RULES only (comment lines stripped), because the block that
+# replaced those lines documents them by name in its provenance note — the
+# whole-text form this file uses for GITIGNORE_FORBIDDEN would fail on the
+# explanation of why they are gone.
+def test_gitignore_has_no_memory_carve():
+    print("test_gitignore_has_no_memory_carve")
+    rules = [ln.strip() for ln in GITIGNORE.read_text().splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    for entry in GITIGNORE_WITHDRAWN:
+        check(entry not in rules,
+              f".gitignore no longer re-includes `{entry}`")
+
+
 # --- item 04: the two sanctioned-leak lines are gone and cannot come back.
 # Asserted on the whole text (not just exact lines) so a re-added rule cannot
 # sneak back in as a prefix/suffix variant of the same path, and paired with a
@@ -236,20 +262,20 @@ def test_check_ignore_negative():
               f"NOT ignored (history): {path} (rc={proc.returncode})")
 
 
-# --- G9: the shape that distinguishes a WORKING carve from a dead one.
-# The five-line block re-includes exactly one thing — top-level `*.md` under
-# `.touch/memory/` — and nothing else. The three-line directory-negation form
-# that reads equivalent was REJECTED because it tracks `foo.token`,
-# `draft.md.bak`, `.history/` and `.trash/` (the LAYOUT-10 / SECURITY-11
-# hazard), so this test asserts BOTH halves: the one thing that must come
-# through, and the specific neighbours that must not. Every name is
-# hypothetical; nothing here is created on disk.
+# --- D-12: the shape that distinguishes a WORKING carve from a dead one.
+# Exactly one thing comes through — the `run.json` FILE — and nothing else.
+# The memory subtree used to be the other half of this test; since the carve
+# was withdrawn (2026-07-31) its paths moved to the excluded side, where they
+# now guard the opposite claim: no `.md` under `.touch/memory/` may be offered
+# for commit. Every name is hypothetical; nothing here is created on disk.
 CARVE_INCLUDED = (
+    ".touch/run.json",
+)
+CARVE_EXCLUDED = (
+    # the withdrawn subtree — the files themselves, not just the neighbours
     ".touch/memory/MEMORY.md",
     ".touch/memory/some-topic.md",
     ".touch/memory/does-not-exist.md",
-)
-CARVE_EXCLUDED = (
     ".touch/memory/x.pid",            # a stray pid file
     ".touch/memory/x.token",          # a token-shaped droppings file
     ".touch/memory/draft.md.bak",     # an editor backup of a memory file
@@ -269,7 +295,7 @@ def test_check_ignore_carve():
     for path in CARVE_INCLUDED:
         proc = check_ignore(path)
         check(proc.returncode == 1 and proc.stdout == "",
-              f"tracked subtree: {path} is NOT ignored (rc={proc.returncode})")
+              f"tracked carve: {path} is NOT ignored (rc={proc.returncode})")
     for path in CARVE_EXCLUDED:
         proc = check_ignore(path)
         check(proc.returncode == 0 and proc.stdout.strip() != "",
@@ -352,40 +378,34 @@ def test_run_state_not_tracked():
               f"nothing under {root} is tracked (found: {len(tracked)} file(s))")
 
 
-# --- GD-1 as amended (Part B): `.touch/memory/**` is the ONE tracked subtree of
-# `.touch/`, and the operational rule is "never `git add .touch/`, always
-# `git add .touch/memory`". The machine half of that rule: nothing tracked under
-# `.touch/` may sit outside `memory/`, and nothing tracked under `.touch/memory/`
-# may be anything but a top-level `*.md`. Vacuously true until the driver
-# migrates the memory files — and then it is the guard that keeps a careless
-# `git add .touch/` from committing a token file.
-def test_only_memory_markdown_is_tracked_under_touch():
-    print("test_only_memory_markdown_is_tracked_under_touch")
+# --- GD-1 as amended (Part C, 2026-07-31): `.touch/run.json` is the ONE tracked
+# path under `.touch/`, and the operational rule is "never `git add .touch/`,
+# always `git add .touch/run.json` by name". The machine half of that rule:
+# nothing else under `.touch/` may be in the index — not a memory file, not a
+# token, not a task folder. This is the guard that keeps a careless
+# `git add .touch/` from committing `server.json` or `mongo.json`.
+def test_only_run_json_is_tracked_under_touch():
+    print("test_only_run_json_is_tracked_under_touch")
     tracked = [p for p in git_out("ls-files", "--", ".touch").splitlines() if p]
-    # Two carves, and only two: the memory subtree (G9) and the per-project run
-    # constants (D-12). Everything else `.touch/` holds — the WAL, the tokens,
-    # the mirror credentials, every task folder — stays out of the index.
-    strays = [p for p in tracked
-              if not p.startswith(".touch/memory/") and p != ".touch/run.json"]
+    # ONE carve, and only one: the per-project run constants (D-12). Everything
+    # else `.touch/` holds — the WAL, the tokens, the mirror credentials, the
+    # auto-memory files, every task folder — stays out of the index.
+    strays = [p for p in tracked if p != ".touch/run.json"]
     check(not strays,
-          f"nothing outside .touch/memory/ and .touch/run.json is tracked "
+          f"nothing but .touch/run.json is tracked under .touch/ "
           f"(found: {strays})")
-    inside = [p[len(".touch/memory/"):] for p in tracked
-              if p.startswith(".touch/memory/")]
-    bad = [n for n in inside if "/" in n or not n.endswith(".md")]
-    check(not bad,
-          f"only top-level *.md is tracked under .touch/memory/ (found: {bad})")
 
 
 def main():
     test_gitignore_entries()
+    test_gitignore_has_no_memory_carve()
     # Its git half skips itself, so it runs in both worlds.
     test_gitignore_has_no_module_dir_state_lines()
     needs_git = (test_check_ignore_positive, test_check_ignore_negative,
                  test_check_ignore_carve,
                  test_head_exists, test_branch_is_main, test_commit_identity,
                  test_no_tracked_watcher_state, test_run_state_not_tracked,
-                 test_only_memory_markdown_is_tracked_under_touch)
+                 test_only_run_json_is_tracked_under_touch)
     if not GIT:
         for t in needs_git:
             skip(f"{t.__name__}: {REPO} is not a git checkout "

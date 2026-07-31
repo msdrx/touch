@@ -319,14 +319,16 @@ def test_gitignore_covers_the_mongo_artifacts():
     for path in (orch + "/a-task/events.jsonl", orch + "/",
                  legacy + "/a-task/events.jsonl", legacy + "/"):
         check(ignored(path), f"…and {path} is ignored (run state is disk-only)")
-    # GD-16 as amended: `.touch/memory/*.md` is the ONE tracked subtree of
-    # `.touch/`, and the carve must not have widened far enough to reach the
-    # mirror's credentials or any other runtime droppings.
-    check(not ignored(".touch/memory/does-not-exist.md"),
-          "…while .touch/memory/*.md is the one tracked subtree (GD-16 amended)")
+    # GD-16 as amended again (2026-07-31): the memory subtree is no longer the
+    # one tracked carve — `.touch/run.json` is, and it is the only one. What
+    # this file cares about is unchanged and now simpler: every other thing
+    # `.touch/` holds, memory included, stays out of the index, so nothing can
+    # widen far enough to reach the mirror's credentials.
+    check(ignored(".touch/memory/does-not-exist.md"),
+          "…while .touch/memory/*.md is ignored too (GD-16 re-amended)")
     for path in (".touch/memory/x.token", ".touch/memory/.history/x.md",
                  ".touch/memory-audit.jsonl"):
-        check(ignored(path), f"…and the carve stays narrow: {path} is ignored")
+        check(ignored(path), f"…and nothing under .touch/ leaks: {path} is ignored")
 
 
 # --- GD-27: credentials ---------------------------------------------------

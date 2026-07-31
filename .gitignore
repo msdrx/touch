@@ -19,32 +19,27 @@
 .claude/local-orchestrators/*/.watcher-state.json
 
 # --- Touch runtime state --------------------------------------------------
-# `.touch/` holds five trust classes in one directory, so the rule is an
-# ALLOWLIST: everything under it is ignored, and exactly the files that are
-# meant to be public are re-included by name. The ORDER of the five memory
-# lines is the mechanism, not a style choice — git cannot re-include a file
-# under an excluded DIRECTORY, so `memory/` is re-included as a directory
-# BEFORE its children are re-ignored except `*.md` (G9). The twin of this list
-# is tests/test_bootstrap.py's GITIGNORE_ENTRIES; keep them character-for-
-# character identical.
-# PROVENANCE: the three memory lines were RESTORED here, not authored here —
-# G9 decided them and tests/test_bootstrap.py has demanded them since d666ce8,
-# but the commit that rewrote `.touch/` into `/.touch/*` dropped them, leaving
-# three suites red against the repo's own law. D-12 opened this file for the
-# `run.json` carve below, and the repair landed in the same, correctly ordered
-# block. Anyone auditing why several suites went green inside one
-# templates-only change-set: this is why.
+# `.touch/` holds several trust classes in one directory, so the rule is an
+# ALLOWLIST: everything under it is ignored, and exactly one file is
+# re-included by name.
+#
+# PROVENANCE (2026-07-31): there used to be a SECOND carve here — three lines
+# re-including `.touch/memory/*.md`, Claude Code's auto memory, as a tracked
+# subtree (G9/GD-16). It was WITHDRAWN. The memory home still lives at
+# `.touch/memory` and nothing about the CLI feature changed; the files are
+# simply local state now rather than a published subtree, and the eight that
+# had been committed were purged from history in the same change-set. Do not
+# "restore" those lines: the twin entry lists in tests/test_bootstrap.py and
+# tests/monitoring/test_shell.py were updated alongside this file and now
+# assert their ABSENCE, so a well-meaning revert fails three suites.
 /.touch/*
 /.touch?*/
-!/.touch/memory/
-/.touch/memory/*
-!/.touch/memory/*.md
-# The second carve, and the only other one (D-12/SKILLS-7): the tracked
-# per-project run constants — targeted/full test commands, the known baseline,
-# the review checklist — that `touch-run start` merges UNDER a run spec before
-# handing `args` to a workflow template. It is configuration, not state, and it
-# is a single FILE, so no directory re-include is needed. Never widen this
-# carve: a token file or a watcher checkpoint must never become committable.
+# The ONE carve (D-12/SKILLS-7): the tracked per-project run constants —
+# targeted/full test commands, the known baseline, the review checklist — that
+# `touch-run start` merges UNDER a run spec before handing `args` to a workflow
+# template. It is configuration, not state, and it is a single FILE, so no
+# directory re-include is needed. Never widen this carve: a token file or a
+# watcher checkpoint must never become committable.
 !/.touch/run.json
 *.pid
 

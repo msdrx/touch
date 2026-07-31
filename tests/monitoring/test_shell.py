@@ -1039,29 +1039,35 @@ def test_gitignore():
           ".gitignore no longer sanctions a module-dir .watcher-state.json")
     # SD-3: the verbatim entry list, asserted here and written by the bootstrap.
     # This tuple is the TWIN of tests/test_bootstrap.py's GITIGNORE_ENTRIES and
-    # must stay character-for-character the same — including the order of G9's
-    # five `/.touch…` lines, which is the mechanism and not a style choice
-    # (git cannot re-include a file under an excluded DIRECTORY, so `memory/`
-    # is re-included as a directory before its children are re-ignored except
-    # `*.md`). The `.claude/local-orchestrators/…` line is legacy defence: since
-    # the tasks-root move the live tree is `.touch/local-orchestrators/`, ignored
-    # by `/.touch/*`, and that rule stays so a re-created old tree is still
-    # ignored. `!/.touch/run.json` is the SECOND and only other carve (D-12):
-    # the tracked per-project run constants a workflow template consumes
-    # through `args` — a single file, never widened to a directory.
-    for entry in ("/.touch/*", "/.touch?*/", "!/.touch/memory/",
-                  "/.touch/memory/*", "!/.touch/memory/*.md",
+    # must stay character-for-character the same. The
+    # `.claude/local-orchestrators/…` line is legacy defence: since the
+    # tasks-root move the live tree is `.touch/local-orchestrators/`, ignored by
+    # `/.touch/*`, and that rule stays so a re-created old tree is still
+    # ignored. `!/.touch/run.json` is the ONLY carve (D-12): the tracked
+    # per-project run constants a workflow template consumes through `args` — a
+    # single file, never widened to a directory.
+    #
+    # 2026-07-31: the three `!/.touch/memory/…` lines that used to sit between
+    # `/.touch?*/` and `!/.touch/run.json` are GONE — the auto-memory subtree is
+    # no longer published (G9 withdrawn). Their absence is asserted below.
+    for entry in ("/.touch/*", "/.touch?*/",
                   "!/.touch/run.json",
                   ".claude/settings.local.json", "*.pid",
                   ".claude/local-orchestrators/*/.watcher-state.json",
                   "mongo-data/", "mongo-dump/", "*.bson"):
         check(entry in gi, f".gitignore contains {entry}")
+    # Rules only — the replacement block names the withdrawn lines in a comment
+    # explaining why they went, which a whole-text search would trip over.
+    gi_rules = [ln.strip() for ln in gi.splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+    for gone in ("!/.touch/memory/", "/.touch/memory/*", "!/.touch/memory/*.md"):
+        check(gone not in gi_rules, f".gitignore no longer re-includes {gone}")
     # 2026-07-27 amendment: the whole per-task run-state tree is ignored and
     # untracked (kept on disk only). `git check-ignore` exits 0 when ignored.
     # `--no-index` (LAYOUT-18): check-ignore consults the index and answers "not
-    # ignored" for a TRACKED path whatever the rules say, and `.touch/memory/*.md`
-    # is tracked now — so the negative arm below has to bypass the index or it
-    # would pass for the wrong reason. Every path here is hypothetical.
+    # ignored" for a TRACKED path whatever the rules say, so the negative arm
+    # below bypasses the index and asserts the RULES rather than the current
+    # contents of the index. Every path here is hypothetical.
     def ignored(rel):
         return subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", rel],
                               cwd=REPO, capture_output=True).returncode == 0
@@ -1083,13 +1089,14 @@ def test_gitignore():
           "the legacy tasks root and its state stay ignored")
     check(ignored(".touch/x") and ignored("mongo-data/x") and ignored("dump.bson"),
           "Touch runtime state and Mongo dumps are ignored")
-    # G9's carve: exactly one subtree comes through, and its awkward neighbours
-    # do not. Asserted here as well as in test_bootstrap.py because this file is
-    # the monitoring suite's own copy of the SD-3 twin and a half-flipped carve
-    # must fail on both sides.
-    check(not ignored(".touch/memory/does-not-exist.md"),
-          ".touch/memory/*.md is the one tracked SUBTREE of .touch/")
-    # …and D-12's carve is the one tracked FILE. Two carves, both by name — the
+    # The withdrawn G9 carve, behavioural half: the auto-memory files are
+    # ordinary ignored state now. Asserted here as well as in test_bootstrap.py
+    # because this file is the monitoring suite's own copy of the SD-3 twin and
+    # a half-restored carve must fail on both sides.
+    check(ignored(".touch/memory/does-not-exist.md")
+          and ignored(".touch/memory/MEMORY.md"),
+          ".touch/memory/*.md is ignored like the rest of .touch/ (G9 withdrawn)")
+    # D-12's carve is the one tracked FILE, and now the only one — the
     # behavioural half of the entry-list assertion above, so a carve that is
     # present as a line but defeated by ordering still fails here.
     check(not ignored(".touch/run.json"),
