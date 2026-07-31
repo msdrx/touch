@@ -43,7 +43,7 @@ https://github.com/msdrx/touch.git` — or set
 ### 2. Check it works
 
 ```
-touch-selfcheck
+! touch-selfcheck
 ```
 
 Ten PASS/FAIL checks, one line each — all green means Touch is installed,
