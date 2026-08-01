@@ -184,7 +184,21 @@ def test_snapshot_stays_bounded_at_the_100k_headroom_target():
         assert s_huge.fold.ev_count == HUGE, s_huge.fold.ev_count
         stream_bytes = os.path.getsize(huge)
         assert len(b_huge) < stream_bytes / 20, (len(b_huge), stream_bytes)
-        assert len(b_huge) < 3 * len(b_small), (len(b_huge), len(b_small))
+        # The multiple, and why it is 3.15 rather than 3: the LOG half of the
+        # payload is budgeted and does not grow with the stream, but the AGENT
+        # ROWS are not budgeted and never were — 162 rows at 12k events against
+        # 1,351 at 100k, because the plan count is what grows. GD-LC-9 added one
+        # additive key (`ctx`, null when the fold holds no reading) to each of
+        # those rows, ~13 B on a ~140 B row: measured 617,122 -> 634,840 B here
+        # against a 206,568 -> 208,685 B small snapshot, i.e. 2.99x -> 3.04x.
+        # The bound is a ceiling on stream-driven growth, not a byte pin — but
+        # it is deliberately tight, so re-measure rather than relax it again:
+        # 3.15 is the measured 3.042 plus ~3.5 % slack, NOT a round number
+        # chosen for comfort. A 3.5 would leave 15 % of unbudgeted headroom in
+        # the one assertion that watches the unbudgeted half of the snapshot,
+        # and the next additive row key would slip inside it unnoticed —
+        # exactly the regression this bound exists to catch.
+        assert len(b_huge) < 3.15 * len(b_small), (len(b_huge), len(b_small))
         snap = json.loads(b_huge)
         shipped = sum(len(p["log"]) for _i, p in snap["plans"])
         assert shipped <= ms.LOG_BUDGET_LINES, shipped

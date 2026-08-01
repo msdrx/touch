@@ -499,6 +499,32 @@ class LegacyEvent:
         return None
 
     @property
+    def agent_ctx(self) -> object:
+        """The watcher's `agent.ctx` occupancy block, validated — or ``None``.
+
+        The opposite kind of number from :attr:`agent_tokens`, and the contrast
+        is the whole point: `tokens` is cumulative SPEND (sum over turns, fold
+        it latest-wins because every line restates the total), while `ctx` is a
+        LEVEL at an instant — how full that agent's context window was when the
+        source row was written. It is NON-monotonic (a compaction legitimately
+        lowers it), absolute, and it is **never summed, never delta'd, never
+        clamped**. Nothing in this module maxes it either.
+
+        ``None`` means the key is ABSENT, which is the entire discipline
+        (GD-LC-4/12): a reading Touch does not have is spelled by having no
+        block, never by `0` and never by `null`. So a malformed block is
+        dropped whole rather than repaired — half a reading is a fabricated
+        one, and a fabricated number on a card is this repo's R-58 defect
+        class. :func:`_tokens`' zero-filling is exactly what must NOT happen
+        here; the shape is defined once, in :func:`_ctx`, for the same reason
+        it is defined once there.
+        """
+        agent = self.agent
+        if isinstance(agent, dict):
+            return _ctx(agent.get("ctx"))
+        return None
+
+    @property
     def is_badge(self) -> bool:
         return self.stage in BADGE_STAGES
 
@@ -533,6 +559,52 @@ def _tokens(value) -> dict:
         raw = value.get(key) if isinstance(value, dict) else None
         out[key] = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
     return out
+
+
+#: `agent.ctx`'s optional keys and the type each must be to survive. `used` and
+#: `at` are required and validated separately — a block missing either is not a
+#: partial reading, it is no reading (GD-LC-4).
+_CTX_OPTIONAL = (("model", str), ("peak", int), ("cap", int), ("src", str))
+
+
+def _ctx(value) -> object:
+    """One `agent.ctx` block, or ``None`` — the mirror image of :func:`_tokens`.
+
+    :func:`_tokens` fills missing fields with `0` because a token count nobody
+    reported really is zero spend. The same move here would be a lie of the
+    exact kind this feature exists to prevent: a 529-killed agent that never
+    billed a turn has an UNKNOWN occupancy, not an empty window (measured: a
+    fresh window already holds 21k–45k tokens of system prompt, tools and
+    always-on files before the first word). So nothing is defaulted, nothing is
+    coerced, and any failure returns ``None`` — the key is absent.
+
+    Whole-object by construction: the keys are rebuilt from what validated, so
+    a consumer that replaces the block wholesale (which is the rule — no merge,
+    or a stale `cap` outlives a model switch) can never inherit a field from a
+    previous reading. Unknown keys are dropped rather than passed through: this
+    module defines the shape once so no consumer has to, and `/health` publishes
+    counts derived from it under a redaction posture that cannot audit a field
+    it has never seen.
+    """
+    if not isinstance(value, dict):
+        return None
+    used = value.get("used")
+    if not isinstance(used, int) or isinstance(used, bool) or used <= 0:
+        return None
+    at = value.get("at")
+    if not isinstance(at, str) or not at:
+        return None
+    block = {"used": used, "at": at}
+    for name, kind in _CTX_OPTIONAL:
+        raw = value.get(name)
+        if isinstance(raw, bool) or not isinstance(raw, kind):
+            continue
+        if kind is int and raw <= 0:
+            continue
+        if kind is str and not raw:
+            continue
+        block[name] = raw
+    return block
 
 
 _KNOWN_KEYS = frozenset(
@@ -835,6 +907,10 @@ class NodeState:
     started: object = None
     ended: object = None
     tokens: object = None
+    #: The last `agent.ctx` block any line of this node carried — a LEVEL, not a
+    #: total (:attr:`LegacyEvent.agent_ctx`). ``None`` is "no reading", spelled
+    #: the one way GD-LC-4 allows.
+    ctx: object = None
     line_nos: tuple = ()
     result_line: object = None
     derived_from_legacy: bool = False
@@ -907,6 +983,18 @@ class TokenRecord:
 
     Additive and defaulted: an older caller that constructs a record without it
     gets the cumulative reading, which is what every folded record is.
+
+    ``ctx`` is a THIRD kind, and the whole reason it is documented beside the
+    absolute/summed pair rather than filed under one of them: it is neither
+    summed nor a cumulative total. It is the agent's context OCCUPANCY — a
+    level at the instant the source line was written, non-monotonic, absolute,
+    with no arithmetic whatever defined over two of them. The only fold it
+    admits is **last reading wins per (task, plan, agent_id)**, which is what
+    `_fold_tokens` and every consumer below apply; summing two of them is
+    meaningless (they measure the same window twice), and maxing them would
+    erase the compaction this reading exists to show. It rides `TokenRecord`
+    because the token tick is the line that carries it (GD-LC-5: zero new event
+    kinds, zero new event lines), not because it is a token quantity.
     """
 
     task: str
@@ -920,6 +1008,7 @@ class TokenRecord:
     window: object = None
     folded: int = 1
     absolute: bool = True
+    ctx: object = None
 
 
 @dataclass
@@ -974,6 +1063,12 @@ def _new_stats() -> dict:
         "relabel_stale": 0,
         "prefix_joins": 0,
         "orphan_terminals": 0,
+        # Occupancy (GD-LC-10). Counts only — never an id, never a path: these
+        # are what `/health.context` publishes on an UNAUTHENTICATED route.
+        "context_readings": 0,          # lines carrying a usable `agent.ctx`
+        "context_invalid": 0,           # lines carrying one that did not validate
+        "context_agents": 0,            # distinct agents with a reading
+        "context_agents_unresolved": 0,  # distinct agents observed without one
     }
 
 
@@ -995,6 +1090,7 @@ def reduce_events(events, *, task, run_id=None, task_id=None, kind="run",
     token_events = []
     open_nodes = {}                    # "<plan>/<stage>" -> NodeState
     ordinals = {}                      # "<plan>/<stage>" -> next ordinal
+    ctx_latest = {}                    # (plan, agent key) -> (line_no, ctx block)
     run_terminals = []                 # every terminal `orchestrator|complete`
     events = tuple(events)
 
@@ -1005,6 +1101,25 @@ def reduce_events(events, *, task, run_id=None, task_id=None, kind="run",
         if not event.ok:
             stats["parse_errors"] += 1
             continue
+
+        if isinstance(event.agent, dict) and "ctx" in event.agent:
+            # A block that fails validation is DROPPED, and dropping silently is
+            # what this repo refuses: the count is the only place a malformed
+            # reading is visible, since nothing downstream will ever see it.
+            block = event.agent_ctx
+            if block is None:
+                stats["context_invalid"] += 1
+            else:
+                stats["context_readings"] += 1
+                # Collected here, applied after the walk. It has to be collected
+                # HERE because the line that carries the reading is usually a
+                # token-stage line, and those are `continue`d below before any
+                # node ever sees them — a node-only collector would report a
+                # reading for finished agents and nothing at all for running
+                # ones, which is the blank live card this feature exists to fix.
+                for key in (event.agent_ref_id(), event.agent_id_raw):
+                    if key:
+                        ctx_latest[(event.plan, key)] = (event.line_no, block)
 
         plan = plans.get(event.plan)
         if plan is None:
@@ -1041,6 +1156,8 @@ def reduce_events(events, *, task, run_id=None, task_id=None, kind="run",
     _close_stale(nodes, run_terminals, stats)
     _resolve_badges(plans, nodes, stats)
     tokens = _fold_tokens(task, token_events, token_window, alias, stats)
+    _apply_context(nodes, ctx_latest)
+    _count_context_agents(nodes, tokens, stats)
 
     stats["nodes"] = len(nodes)
     stats["plans"] = len(plans)
@@ -1198,6 +1315,11 @@ def _observe_agent(node, event, agent_id):
     at all: the widened watcher's `done` row names the full 17-hex id for a node
     whose spawn row named the 8-hex one, and a first-wins field alone would
     throw the evidence away.
+
+    Identity only. The occupancy reading is the deliberate opposite kind of
+    fact — LAST-wins, not first — and it is applied in one place after the walk
+    (:func:`_apply_context`) rather than here, because the lines that carry it
+    are mostly token-stage lines this function never sees.
     """
     if agent_id:
         if not node.agent_id:
@@ -1387,6 +1509,15 @@ def _fold_tokens(task, token_events, window, alias, stats):
     only if a writer starts emitting `agent` without `agent.tokens` on a
     token-stage line, and the fix then is the one noted on
     :class:`TokenRecord` — put `absolute` on the wire.
+
+    `ctx` rides along under a THIRD rule that is neither of those two: last
+    READING wins. Within a bucket the newer line's block replaces the older one
+    whole (never merged — a merge could keep a stale `cap` alive across a model
+    switch), but a newer line that carries **no** block leaves the held reading
+    standing rather than erasing it. That asymmetry is deliberate and is the
+    same one `monitor_server.py`'s `Fold._agent` applies to the same key: the
+    absence of a reading on one tick means "nothing new was measured", not
+    "the window emptied". Nothing here sums, maxes or clamps it.
     """
     if window is None or window <= 0:
         window = DEFAULT_TOKEN_WINDOW
@@ -1395,6 +1526,7 @@ def _fold_tokens(task, token_events, window, alias, stats):
     kept = []
     for event in token_events:
         cumulative = event.agent_tokens
+        ctx = event.agent_ctx
         agent_id = event.agent_ref_id()
         agent_id = alias.get(agent_id, agent_id)
         # A cumulative is only usable as one if it can be attributed: two
@@ -1407,13 +1539,14 @@ def _fold_tokens(task, token_events, window, alias, stats):
                 task=task, plan=event.plan, stage=event.stage, agent_id=agent_id,
                 label=event.agent_label, ts=event.ts, line_no=event.line_no,
                 tokens=(cumulative if absolute else (event.tokens or _tokens(None))),
-                absolute=absolute))
+                absolute=absolute, ctx=ctx))
             continue
         slot = None
         if event.ts is not None:
             slot = int(event.ts.timestamp() // window)
         key = (agent_id, slot)
-        if key not in buckets:
+        previous = buckets.get(key)
+        if previous is None:
             order.append(key)
         else:
             stats["folded"] += 1
@@ -1421,9 +1554,80 @@ def _fold_tokens(task, token_events, window, alias, stats):
             task=task, plan=event.plan, stage=event.stage, agent_id=agent_id,
             label=event.agent_label, ts=event.ts, line_no=event.line_no,
             tokens=cumulative, window=slot,
-            folded=(buckets[key].folded + 1) if key in buckets else 1)
+            folded=(previous.folded + 1) if previous is not None else 1,
+            # Last reading wins; no reading on this line keeps the held one.
+            ctx=(ctx if ctx is not None else (previous.ctx if previous else None)))
     folded = [buckets[key] for key in order]
     return tuple(sorted(folded + kept, key=lambda record: record.line_no))
+
+
+def _apply_context(nodes, ctx_latest):
+    """Give each node the LAST occupancy reading its agent stated (GD-LC-10).
+
+    Last-event-wins per `(task, plan, agent_id)` — the reduction is per task, so
+    the key here is `(plan, agent key)` and "last" is the greatest LINE NUMBER,
+    which for an append-only file is the file's own order. Never a max over the
+    values: occupancy is non-monotonic and a compaction legitimately lowers it,
+    so taking the largest reading would hide the exact event the number exists
+    to show. Never a sum either — two readings of one window are one quantity
+    measured twice.
+
+    Run AFTER `_join_id_widths` so a node whose spawn row named the 8-hex id and
+    whose ticks named the 17-hex one still finds its reading: every key the node
+    was ever observed under is tried, and the highest line wins among them.
+
+    A node with no reading keeps ``None``. That is the answer, not a gap to be
+    filled: GD-LC-12's whole taxonomy — no billed turn yet, `<synthetic>` rows
+    only, `--no-tokens`, a pruned transcript — resolves to "absent", and the one
+    thing that may never happen is a `0` standing in for it.
+    """
+    if not ctx_latest:
+        return
+    for node in nodes:
+        keys = set(node.agent_ids or ())
+        if node.agent_id:
+            keys.add(node.agent_id)
+        if node.agent_id_raw:
+            keys.add(node.agent_id_raw)
+        best = None
+        for key in keys:
+            found = ctx_latest.get((node.plan, key))
+            if found is not None and (best is None or found[0] > best[0]):
+                best = found
+        if best is not None:
+            node.ctx = best[1]
+
+
+def _count_context_agents(nodes, tokens, stats):
+    """How many agents of this task have an occupancy reading, and how many not.
+
+    Run AFTER `_join_id_widths`, on the joined identities, or one agent whose
+    stream carries both id widths is counted twice — once resolved and once
+    unresolved, which is the worst of both answers.
+
+    "Unresolved" is not a failure: GD-LC-12 measured 93.38 % resolve, 2.52 %
+    transcript-absent, 4.10 % no-response-yet over the whole corpus, and the
+    point of naming the unknowns is that an operator can tell "no reading has
+    arrived" from "readings arrive and this agent has none". Two counts, no
+    ids: `/health` is the one route that answers without a token (GD-27).
+    """
+    with_reading = set()
+    seen = set()
+    for node in nodes:
+        key = node.agent_id or node.agent_id_raw
+        if key is None:
+            continue
+        seen.add(key)
+        if node.ctx:
+            with_reading.add(key)
+    for record in tokens:
+        if record.agent_id is None:
+            continue
+        seen.add(record.agent_id)
+        if record.ctx:
+            with_reading.add(record.agent_id)
+    stats["context_agents"] = len(with_reading)
+    stats["context_agents_unresolved"] = len(seen - with_reading)
 
 
 def _notes(plans, nodes):

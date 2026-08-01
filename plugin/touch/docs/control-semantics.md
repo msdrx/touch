@@ -16,6 +16,11 @@ because "Touch writes nothing" stopped being true the day it landed — but it a
 on files, never on a session, so it appears in no verb table and promotes no
 session class.
 
+**Per-agent context occupancy is a read, not a verb**: the figure the monitor
+renders for how full a subagent's context window is comes from transcripts Touch
+already tails and rides an event stream it already writes, so it starts nothing,
+stops nothing, promotes no session class, and adds no `CONTROL_ROUTES` entry.
+
 One rule governs the whole document (D13): **a control is rendered only where
 it can be honest.** A verb that cannot be performed is either absent or shown
 disabled *with its reason*. A verb that was requested but not confirmed reads

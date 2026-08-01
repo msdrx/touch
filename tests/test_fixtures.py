@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stdlib-only tests for sp-fixtures-freeze (R-03 base, R-41 amendment,
-R-58:fixtures). Run as `python3 test_fixtures.py`; exits non-zero on failure.
-No pytest, no runner.
+R-58:fixtures) and sp-fixtures (LC-01). Run as `python3 test_fixtures.py`;
+exits non-zero on failure. No pytest, no runner.
 
 The manifest test is the test (per the sub-plan), but a sha256 list alone only
 proves "these bytes did not change" — it cannot tell a reviewer that the corpus
@@ -11,6 +11,22 @@ the bytes are frozen, and the bytes are still the right bytes.
 
 Everything here is read-only. See tests/fixtures/PROVENANCE.md for what each
 fixture is, where it came from, and how to regenerate the manifest deliberately.
+
+Six of the seven groups are verbatim captures. The seventh, `context/` (LC-01),
+is CONSTRUCTED — the compaction boundary, the >1 `usage.iterations` array and
+the refused-usage row do not exist in any real subagent transcript on this
+machine, and without them GD-LC-2's greatest-timestamp rule and the
+tempting-and-wrong `max`-over-turns rule are indistinguishable. Synthetic
+fixtures therefore get MORE shape assertions than captured ones, not fewer: a
+capture is evidence of itself, whereas a construction is only worth what its
+assertions pin.
+
+That group is also the one whose filenames are deliberately NOT `agent-*.jsonl`:
+`tests/test_token_crosscheck.py`'s corpus arm globs `tests/fixtures/**/agent-*.jsonl`
+and its domain is real harness bytes, one of these specimens is malformed BY
+CONSTRUCTION, and a labelled synthetic must not silently join a corpus that is
+evidence about the harness. `test_context_group_stays_out_of_the_corpus_glob`
+pins that boundary so a sixth specimen cannot re-open it by accident.
 
 The fixtures are TRACKED, so every hash/shape arm runs in a clean checkout too.
 The one exception is `test_fixtures_are_trackable`, which asks git whether any
@@ -43,6 +59,7 @@ RUN = FIX / "run-wf_829e6f58"
 WF = "subagents/workflows/wf_829e6f58-b2f"
 LEGACY = FIX / "legacy"
 MIRROR = FIX / "mirror"
+CONTEXT = FIX / "context"          # LC-01, the one labelled-synthetic group
 
 # Provenance arms of CUSTOMSTATE-3 / GD-28: `agent`/`tokens` => derived,
 # `title` => asserted, anything else => unknown (unattributable).
@@ -526,6 +543,471 @@ def test_discovery_fixtures():
           "so session identity needs (pid, procStart), not pid alone")
 
 
+# --- LC-01: the context-occupancy specimens ------------------------------
+# The five shapes GD-LC-1/2/3 turn on and the real corpus does not contain: a
+# compaction boundary (0 in 689 subagent transcripts), a `usage.iterations`
+# array longer than 1 (0 in 7,256 sampled rows), a refused-usage row, and a
+# retry pair's two independent windows. They are SYNTHETIC and PROVENANCE.md
+# says so — an unlabelled synthetic would violate the freeze.
+#
+# The predicates below deliberately restate GD-LC-2's rule instead of importing
+# any implementation: GD-LC-11 forbids the two implementations importing each
+# other, and a fixture test that borrowed one of them could not fail when that
+# one drifted. This is the third, independent copy, and it is the one that
+# describes the BYTES.
+CTX_MSG_ID = re.compile(r"^msg_")
+
+# The five specimens and the `[monitor]` stage each one's prompt carries. The
+# stages are distinct on purpose (except the retry pair, which MUST share one):
+# `(plan, stage, role, attempt)` is the key the watcher's marker join uses, so
+# two specimens staged into one `wf_*` tree with the same marker would collide
+# on a single card. tests/fixtures/ is frozen, so this is fixable here or never.
+CTX_SPECIMENS = {
+    "ctx-agent-compaction-boundary.jsonl": "ctxcompact",
+    "ctx-agent-iterations-multi.jsonl": "ctxiter",
+    "ctx-agent-retry-attempt1.jsonl": "ctxretry",
+    "ctx-agent-retry-attempt2.jsonl": "ctxretry",
+    "ctx-agent-no-usable-turn.jsonl": "ctxnousable",
+}
+
+# Verbatim from the frozen corpus: 667/667 real assistant records under
+# run-wf_829e6f58/ carry all three, and these are real values of each.
+CTX_ATTRIBUTION = {"attributionAgent": "workflow-subagent",
+                   "attributionSkill": "implement-plan", "effort": "xhigh"}
+
+
+def _ctx_marker(recs):
+    """The `[monitor]` marker line of the first user prompt, or None.
+
+    Returns None rather than raising on any shape that is not a str prompt:
+    real transcripts routinely carry list-valued `message.content` (651 such
+    records in this corpus), and a caller that indexed blindly would abort the
+    whole file instead of reporting a named failure.
+    """
+    first = next((r for r in recs if r.get("type") == "user"), None)
+    content = ((first or {}).get("message") or {}).get("content")
+    if not isinstance(content, str):
+        return None
+    return next((l for l in content.splitlines() if l.strip()), None)
+
+
+def _ctx_components(usage):
+    """GD-LC-1's three prompt-side fields, in order. output_tokens excluded."""
+    return [usage.get("input_tokens"),
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_read_input_tokens")]
+
+
+def _ctx_strict_sum(usage):
+    """The sum, or None when any component is not a plain int.
+
+    `type(v) is int`, never `isinstance`: bool IS an int subclass in Python, and
+    one of the specimens carries `cache_creation_input_tokens: true` precisely
+    so a lenient check is caught here rather than on a card.
+    """
+    vs = _ctx_components(usage)
+    if not all(type(v) is int for v in vs):
+        return None
+    return sum(vs)
+
+
+def _ctx_usage_source(usage):
+    """GD-LC-2's iterations rule: top level, except iterations[-1] when len > 1."""
+    its = usage.get("iterations")
+    if isinstance(its, list) and len(its) > 1:
+        return its[-1]
+    return usage
+
+
+def _ctx_qualifying(path, agent_id):
+    """Every qualifying row as (timestamp, line, occupancy), per GD-LC-2."""
+    rows = []
+    for i, line in enumerate(path.read_bytes().split(b"\n"), 1):
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if r.get("type") != "assistant" or r.get("agentId") != agent_id:
+            continue
+        m = r.get("message") or {}
+        if not CTX_MSG_ID.match(str(m.get("id") or "")):
+            continue
+        if m.get("model") == "<synthetic>":
+            continue
+        total = _ctx_strict_sum(_ctx_usage_source(m.get("usage") or {}))
+        if not total or total <= 0:
+            continue
+        rows.append((r["timestamp"], i, total))
+    return rows
+
+
+def _ctx_agent_id(recs):
+    return next((r["agentId"] for r in recs if r.get("agentId")), None)
+
+
+def _ctx_qualifying_prefix(recs, upto_line):
+    """Qualifying rows among the first `upto_line` records (GD-LC-3's arm)."""
+    rows = []
+    aid = _ctx_agent_id(recs)
+    for i, r in enumerate(recs[:upto_line], 1):
+        if r.get("type") != "assistant" or r.get("agentId") != aid:
+            continue
+        m = r.get("message") or {}
+        if not CTX_MSG_ID.match(str(m.get("id") or "")) or m.get("model") == "<synthetic>":
+            continue
+        total = _ctx_strict_sum(_ctx_usage_source(m.get("usage") or {}))
+        if total and total > 0:
+            rows.append((r["timestamp"], i, total))
+    return rows
+
+
+def test_context_group_stays_out_of_the_corpus_glob():
+    """No specimen here may be named `agent-*.jsonl`. (Attempt-2 correction.)
+
+    `tests/test_token_crosscheck.py:145` is
+    `sorted(FIX.glob("**/agent-*.jsonl"))` — recursive, unfiltered, and its
+    stated domain is *real harness bytes*. This group is labelled-synthetic and
+    `ctx-agent-no-usable-turn.jsonl` cannot satisfy that arm's GD-M2.2
+    invariant by construction: it carries a float, a null and a bool where the
+    harness only ever writes ints, which is the entire specimen.
+
+    The boundary is therefore drawn in the FILENAMES rather than by a filter in
+    an unowned test — it is structural, needs no maintenance, and covers the
+    whole group instead of just the one file that happens to go red. This arm
+    exists so a sixth specimen named `agent-…` cannot silently re-open it.
+    """
+    print("test_context_group_stays_out_of_the_corpus_glob")
+    if not CONTEXT.is_dir():
+        check(False, "tests/fixtures/context/ exists")
+        return
+    intruders = sorted(p.name for p in CONTEXT.rglob("agent-*.jsonl"))
+    check(not intruders,
+          f"no context/ specimen matches test_token_crosscheck's `agent-*.jsonl` "
+          f"corpus glob — a labelled synthetic never joins a real-bytes corpus "
+          f"({intruders})")
+    # And the reverse direction: the glob's own corpus is exactly the captured
+    # groups, so this arm fails loudly if the crosscheck's pattern is widened.
+    corpus = sorted(rel(p) for p in FIX.glob("**/agent-*.jsonl"))
+    check(corpus and not any(p.startswith("context/") for p in corpus),
+          f"and the crosscheck corpus ({len(corpus)} files) holds no context/ file")
+
+
+def test_context_fixture_group():
+    print("test_context_fixture_group")
+    expected = set(CTX_SPECIMENS)
+    check(CONTEXT.is_dir(), "tests/fixtures/context/ exists")
+    if not CONTEXT.is_dir():
+        return
+    found = {p.name for p in CONTEXT.iterdir() if p.is_file()}
+    check(found == expected,
+          f"exactly the five LC-01 specimens, no strays (extra {sorted(found - expected)}, "
+          f"missing {sorted(expected - found)})")
+    # The freeze arm above hashes every file; this one pins that the NEW group
+    # is inside it, so adding a sixth specimen without re-freezing goes red.
+    listed = {line.partition("  ")[2] for line in MANIFEST.read_text().splitlines()}
+    unmanifested = sorted(f"context/{n}" for n in expected
+                          if f"context/{n}" not in listed)
+    check(not unmanifested, f"every specimen has a manifest row ({unmanifested})")
+
+    for name in sorted(found & expected):
+        recs = records(CONTEXT / name)
+        aid = _ctx_agent_id(recs)
+        check(bool(aid) and all(r.get("agentId") == aid for r in recs),
+              f"{name}: every record carries the one agentId {aid}")
+        # GD-LC-2 keys on the record's own timestamp, so every record needs one.
+        check(all(r.get("timestamp") for r in recs), f"{name}: every record is timestamped")
+        assistants = [r for r in recs if r.get("type") == "assistant"]
+        stamps = [r["timestamp"] for r in assistants]
+        check(stamps == sorted(stamps) and len(set(stamps)) == len(stamps),
+              f"{name}: assistant timestamps strictly increase — a total order (GD-LC-2)")
+        ids = [(r.get("message") or {}).get("id") for r in assistants]
+        check(len(ids) == len(set(ids)), f"{name}: distinct message ids")
+
+        # The [monitor] marker is FENCED (GD-D1a). It heads the first user
+        # prompt but is NOT on line 1: every workflow template opens the prompt
+        # with a template-literal newline (implement.workflow.js:221 and five
+        # more sites, research.workflow.js:186/216), and 16/16 marker-carrying
+        # user records in the captured corpus start with "\n". Pinning line 1
+        # here would freeze a fact about the harness that is false.
+        marker = _ctx_marker(recs)
+        if marker is None:
+            check(False, f"{name}: the first user prompt is a str carrying a marker")
+            continue
+        first_user = next(r for r in recs if r.get("type") == "user")
+        check(first_user["message"]["content"].startswith("\n"),
+              f"{name}: the prompt opens with the templates' leading newline")
+        check(marker.startswith("[monitor] "),
+              f"{name}: the [monitor] marker heads the first user prompt (GD-D1a)")
+        check(" attempt=" in marker, f"{name}: and that marker names its attempt")
+        check(f" stage={CTX_SPECIMENS[name]} " in marker,
+              f"{name}: its stage is {CTX_SPECIMENS[name]} ({marker.split(' role=')[0]})")
+
+        # GD-LC-2's row selection reads `message.model` and `message.usage`; the
+        # attribution keys beside them are never read, and are carried only so
+        # the envelope matches the 667/667 real assistant records that have
+        # them. The <synthetic> 529 row is the measured exception: a real one
+        # carries none of the three.
+        for r in assistants:
+            mid = (r.get("message") or {}).get("id")
+            synthetic = (r.get("message") or {}).get("model") == "<synthetic>"
+            want = {} if synthetic else CTX_ATTRIBUTION
+            got = {k: r[k] for k in CTX_ATTRIBUTION if k in r}
+            what = ("the <synthetic> row carries NO attribution keys" if synthetic
+                    else "carries the real attribution envelope")
+            check(got == want, f"{name}: {mid} {what} ({got})")
+
+
+def test_context_markers_do_not_collide():
+    """Distinct `(plan, stage, role, attempt)` per specimen — except the pair."""
+    print("test_context_markers_do_not_collide")
+    if not CONTEXT.is_dir():
+        check(False, "tests/fixtures/context/ exists")
+        return
+    marks = {}
+    for name in sorted(CTX_SPECIMENS):
+        p = CONTEXT / name
+        if p.is_file():
+            marks[name] = _ctx_marker(records(p))
+    check(len(marks) == 5, f"all five specimens readable (got {sorted(marks)})")
+    check(all(m for m in marks.values()), f"all five carry a marker ({marks})")
+    # The retry pair MUST share plan/stage/role and differ only in attempt
+    # (GD-LC-7: same role, retried, two independent windows). Every other pair
+    # must differ, or a downstream test staging two specimens into one wf_*
+    # tree gets two agents claiming one card identity.
+    keys = {n: m for n, m in marks.items() if m}
+    dupes = sorted(n for n in keys
+                   if sum(1 for o in keys if keys[o] == keys[n]) > 1)
+    check(not dupes, f"no two specimens share a whole marker ({dupes})")
+    stages = {n: (m.split(" stage=")[1].split(" ")[0] if m and " stage=" in m else None)
+              for n, m in keys.items()}
+    retry = {n for n in stages if "retry" in n}
+    check(len({stages[n] for n in retry}) == 1,
+          f"the retry pair shares one stage ({[stages[n] for n in sorted(retry)]})")
+    others = [stages[n] for n in stages if n not in retry]
+    check(len(set(others)) == len(others) and not (set(others) & {stages[n] for n in retry}),
+          f"and the other three stages are distinct from it and each other ({others})")
+
+
+def test_context_compaction_separates_latest_from_max():
+    print("test_context_compaction_separates_latest_from_max")
+    p = CONTEXT / "ctx-agent-compaction-boundary.jsonl"
+    if not p.is_file():
+        check(False, "ctx-agent-compaction-boundary.jsonl exists")
+        return
+    recs = records(p)
+    rows = _ctx_qualifying(p, _ctx_agent_id(recs))
+    check(len(rows) == 5, f"5 billed turns (got {len(rows)})")
+    occ = [r[2] for r in rows]
+    check(occ == [40000, 80000, 120000, 12000, 18000],
+          f"three rising then two an order of magnitude lower (got {occ})")
+
+    # THE POINT OF THE WHOLE FIXTURE: greatest-timestamp and max-over-turns
+    # disagree here, and nowhere else in the corpus (`max` coincides with
+    # `latest` on 100 % of the real bytes). Without this file the correct
+    # implementation and the tempting-and-wrong one are indistinguishable.
+    latest = max(rows)[2]
+    check(latest == 18000, f"greatest-timestamp reading is 18000 (got {latest})")
+    check(max(occ) == 120000, f"max-over-turns would say 120000 (got {max(occ)})")
+    check(latest < max(occ),
+          "so occupancy went DOWN: non-monotonic by design, and the D7 monotone "
+          "clamp must never touch it")
+
+    # The boundary must be a parsed RECORD. The known false positive is prose:
+    # research transcripts quote `compact_boundary`/`isCompactSummary` inside
+    # message content, so a grep-shaped test would pass on a file with no record
+    # at all. Pinning the byte-occurrence count to the record count closes that.
+    bounds = [(i, r) for i, r in enumerate(recs, 1)
+              if r.get("type") == "system" and r.get("subtype") == "compact_boundary"]
+    check(len(bounds) == 1, f"exactly ONE compact_boundary record (got {len(bounds)})")
+    raw = p.read_bytes()
+    check(raw.count(b'"compact_boundary"') == 1,
+          "and exactly one byte-occurrence of the token — the record IS the grep hit, "
+          "so this can never pass on prose")
+    check(raw.count(b'"isCompactSummary"') == 1,
+          "one isCompactSummary occurrence, likewise a record and not prose")
+    if not bounds:
+        return
+    bline, b = bounds[0]
+    cm = b.get("compactMetadata") or {}
+    check({"trigger", "preTokens", "postTokens", "cumulativeDroppedTokens"} <= set(cm),
+          f"compactMetadata carries the four fields GD-LC-3 names (got {sorted(cm)})")
+    check(b.get("timestamp"), "the boundary carries its OWN timestamp — the `at` stamp")
+    # A real boundary's preserved uuids name records that EXIST (verified on a
+    # captured 2.1.220 boundary: head/tail/anchor all resolve). Touch reads none
+    # of them, but a fixture whose uuids dangle is a shape claim that is false.
+    present = {r.get("uuid") for r in recs}
+    seg, kept = cm.get("preservedSegment") or {}, cm.get("preservedMessages") or {}
+    referenced = ([seg.get(k) for k in ("headUuid", "anchorUuid", "tailUuid")]
+                  + [kept.get("anchorUuid")]
+                  + list(kept.get("uuids") or []) + list(kept.get("allUuids") or []))
+    dangling = sorted({u for u in referenced if u not in present})
+    check(referenced and not dangling,
+          f"every preservedSegment/preservedMessages uuid names a record in the "
+          f"file (dangling: {dangling})")
+    check(seg.get("tailUuid") == b.get("logicalParentUuid"),
+          "and the segment tail is the boundary's logicalParentUuid — the last "
+          "record before the compaction, exactly as the real capture has it")
+    check(cm["preTokens"] - cm["postTokens"] == cm["cumulativeDroppedTokens"],
+          "pre - post == cumulativeDropped, so the metadata is self-consistent")
+    # CC-STORES-3: preTokens is a DIFFERENT estimator from the usage-row sum and
+    # must never be mixed into GD-LC-1's arithmetic. The 30-token gap is the
+    # measured one, reproduced here so a "preTokens == last row" shortcut fails.
+    check(cm["preTokens"] != 120000 and cm["preTokens"] - 120000 == 30,
+          f"preTokens is 30 above the last pre-compaction usage row (got {cm['preTokens']})")
+    check(cm["postTokens"] != 12000,
+          f"and postTokens differs from the next usage row too (got {cm['postTokens']})")
+
+    # The summary line FOLLOWS the boundary in file order while carrying an
+    # EARLIER timestamp — measured verbatim on the real pair (2 ms). File order
+    # and ts order genuinely disagree at the seam; neither line is a candidate
+    # row, so GD-LC-2 is unaffected, but a whole-file `sorted(by ts)[-1]` is.
+    summary = [(i, r) for i, r in enumerate(recs, 1) if r.get("isCompactSummary")]
+    check(len(summary) == 1, f"one isCompactSummary user line (got {len(summary)})")
+    if not summary:
+        return
+    sline, s = summary[0]
+    check(s.get("type") == "user", "the compact summary is a user record")
+    check(sline == bline + 1, f"it immediately follows the boundary ({sline} vs {bline})")
+    check(_ms(s["timestamp"]) < _ms(b["timestamp"]),
+          "yet its timestamp is EARLIER — file order != ts order at the seam")
+
+    # The provisional branch (GD-LC-3): truncate after the summary and the
+    # newest boundary is newer than the newest qualifying row, so the reading
+    # becomes postTokens stamped with the boundary's own ts.
+    head = _ctx_qualifying_prefix(recs, sline)
+    check(bool(head) and max(head)[0] < b["timestamp"],
+          "truncated at the summary, every billed row predates the boundary — "
+          "this prefix is the src:\"compact\" specimen")
+    check(bool(head) and max(head)[2] == 120000 and cm["postTokens"] < 120000,
+          "and there the reading DROPS from 120000 to postTokens without any new "
+          "usage row: a naive last-row reader would overstate 10x for the gap")
+
+
+def test_context_iterations_multi():
+    print("test_context_iterations_multi")
+    p = CONTEXT / "ctx-agent-iterations-multi.jsonl"
+    if not p.is_file():
+        check(False, "ctx-agent-iterations-multi.jsonl exists")
+        return
+    recs = records(p)
+    usages = [(r.get("message") or {}).get("usage") or {}
+              for r in recs if r.get("type") == "assistant"]
+    lens = [len(u["iterations"]) for u in usages if isinstance(u.get("iterations"), list)]
+    check(lens == [1, 3], f"one len==1 row then one len==3 row (got {lens})")
+    if 3 not in lens:
+        return
+    multi = next(u for u in usages if isinstance(u.get("iterations"), list)
+                 and len(u["iterations"]) == 3)
+    its = multi["iterations"]
+    # The pessimistic assumption GD-LC-2 is written against: the top level is
+    # the SUM of the iterations, so reading it reports a prompt that never
+    # existed. Reading iterations[-1] is unambiguously one API call.
+    for field in ("input_tokens", "cache_creation_input_tokens",
+                  "cache_read_input_tokens", "output_tokens"):
+        check(multi[field] == sum(i[field] for i in its),
+              f"top-level {field} is the SUM of the three iterations")
+    top = _ctx_strict_sum(multi)
+    last = _ctx_strict_sum(its[-1])
+    check(top == 65690, f"a top-level read would say 65690 (got {top})")
+    check(last == 22131, f"iterations[-1] — the correct read — says 22131 (got {last})")
+    check(last < top, "so the two rules are separable on these bytes")
+    check(all(_ctx_strict_sum(i) and _ctx_strict_sum(i) > 20000 for i in its),
+          "each iteration is a realistic prompt, not a filler row")
+    # len == 1: the top level EQUALS the single iteration, so the top level is
+    # what is read there (all 522 + 6,734 measured rows behave this way).
+    single = next(u for u in usages if isinstance(u.get("iterations"), list)
+                  and len(u["iterations"]) == 1)
+    check(_ctx_strict_sum(single) == _ctx_strict_sum(single["iterations"][0]),
+          "on the len==1 row the top level and the single iteration agree")
+
+
+def test_context_retry_pair_has_two_windows():
+    print("test_context_retry_pair_has_two_windows")
+    a = CONTEXT / "ctx-agent-retry-attempt1.jsonl"
+    b = CONTEXT / "ctx-agent-retry-attempt2.jsonl"
+    if not (a.is_file() and b.is_file()):
+        check(False, "both retry specimens exist")
+        return
+    ra, rb = records(a), records(b)
+    ida, idb = _ctx_agent_id(ra), _ctx_agent_id(rb)
+    # GD-LC-7: each retry row is its OWN agent with its own fresh window — which
+    # is why no card-level tie-break is needed and no cross-agent aggregate but
+    # `peak` is sanctioned.
+    check(ida != idb, f"the two attempts are DIFFERENT agentIds ({ida} vs {idb})")
+    marks = [_ctx_marker(ra), _ctx_marker(rb)]
+    if not all(marks):
+        check(False, f"both prompts carry a [monitor] marker ({marks})")
+        return
+    check("attempt=1" in marks[0] and "attempt=2" in marks[1],
+          f"each prompt's marker names its attempt ({marks})")
+    check(marks[0].split("attempt=")[0] == marks[1].split("attempt=")[0],
+          "and the two markers agree on plan/stage/role — same role, retried")
+
+    qa, qb = _ctx_qualifying(a, ida), _ctx_qualifying(b, idb)
+    check(len(qa) == 3 and len(qb) == 2,
+          f"3 billed turns then 2 (got {len(qa)}/{len(qb)})")
+    end_a, start_b = max(qa)[2], min(qb)[2]
+    check(end_a == 148900, f"attempt 1 ends high, at 148900 (got {end_a})")
+    check(start_b < end_a / 4,
+          f"attempt 2 starts on a FRESH window, far lower ({start_b} vs {end_a})")
+    check(max(r[2] for r in qb) < end_a,
+          "attempt 2 never reaches attempt 1's level — summing or merging the "
+          "two would fabricate a level neither agent ever held")
+    # HOOK-PLANE-7: a fresh window is never empty (measured min 21,641 over 610
+    # agents), so a spawn-time `ctx 0` would understate by 21k-45k.
+    check(start_b > 20000,
+          f"and it is not near zero either — a fresh window already holds the "
+          f"system prompt and CLAUDE.md ({start_b})")
+
+
+def test_context_no_usable_turn_resolves_unknown():
+    print("test_context_no_usable_turn_resolves_unknown")
+    p = CONTEXT / "ctx-agent-no-usable-turn.jsonl"
+    if not p.is_file():
+        check(False, "ctx-agent-no-usable-turn.jsonl exists")
+        return
+    recs = records(p)
+    aid = _ctx_agent_id(recs)
+    rows = _ctx_qualifying(p, aid)
+    # THE DEFINING DISCIPLINE: this file must resolve to the KEY BEING ABSENT.
+    # Not 0, not null — 0 is the lie (R-58's defect class).
+    check(not rows, f"ZERO qualifying rows: occupancy is unknown, never 0 (got {rows})")
+
+    assistants = [r for r in recs if r.get("type") == "assistant"]
+    check(len(assistants) == 4, f"4 assistant records, none usable (got {len(assistants)})")
+    usages = [(r.get("message") or {}).get("usage") or {} for r in assistants]
+    refused = [u for u in usages if _ctx_strict_sum(u) is None]
+    check(len(refused) == 3, f"3 rows are refused on TYPE alone (got {len(refused)})")
+    kinds = {type(v).__name__ for u in refused for v in _ctx_components(u)
+             if type(v) is not int}
+    check(kinds == {"bool", "float", "NoneType"},
+          f"the three refusals are a float, a null and a bool (got {sorted(kinds)})")
+
+    # bool is an int subclass in Python: a lenient `isinstance(v, int)` accepts
+    # `True` and a lenient `v or 0` swallows the null. Both would yield a
+    # plausible-looking number from bytes that say nothing.
+    def lenient(u):
+        return sum(int(v or 0) for v in _ctx_components(u)
+                   if isinstance(v, (int, float)) or v is None)
+    check(all(lenient(u) > 0 for u in refused),
+          "every refused row WOULD produce a positive number under a lenient "
+          "reader — that is what makes this fixture bite")
+
+    synth = [r for r in assistants if (r.get("message") or {}).get("model") == "<synthetic>"]
+    check(len(synth) == 1, f"exactly one <synthetic> row (got {len(synth)})")
+    if synth:
+        m = synth[0]["message"]
+        check(all(m["usage"][k] == 0 for k in ("input_tokens", "output_tokens",
+                                               "cache_creation_input_tokens",
+                                               "cache_read_input_tokens")),
+              "the <synthetic> row is all-zero — 30 of 649 real transcripts END on one")
+        check(not CTX_MSG_ID.match(str(m.get("id"))),
+              "and its id is not ^msg_ either, so it fails two of GD-LC-2's tests")
+        check(synth[0].get("apiErrorStatus") == 529,
+              "it is the 529 shape, copied from a real capture")
+        check(max(r["timestamp"] for r in assistants) == synth[0]["timestamp"],
+              "and it is the LAST assistant row — the killed-agent shape exactly")
+
+
 # --- R-03's sanitisation condition, codified so a re-copy cannot slip -----
 def test_no_credentials():
     print("test_no_credentials")
@@ -563,6 +1045,13 @@ def main():
               test_r58_replay_journals_have_no_verdict,
               test_record_specimens,
               test_discovery_fixtures,
+              test_context_group_stays_out_of_the_corpus_glob,
+              test_context_fixture_group,
+              test_context_markers_do_not_collide,
+              test_context_compaction_separates_latest_from_max,
+              test_context_iterations_multi,
+              test_context_retry_pair_has_two_windows,
+              test_context_no_usable_turn_resolves_unknown,
               test_no_credentials):
         t()
     print()

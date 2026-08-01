@@ -318,6 +318,144 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+# --------------------------------------------------------------------------
+# GD-LC-6: the DECLARED context window, and nothing else.
+#
+# Capacity is not recorded on any live path the watcher can read (GD-LC-18):
+# a transcript's `message.model` never carries the `[1m]` suffix (44,412 rows;
+# 72 agents peaked above 200k, max 522,172, every one of them recorded as the
+# bare `claude-opus-5`). So the denominator is DECLARED or it is unknown:
+#
+#   * `orch-config.json` key `context_window` — an int (all models) or a
+#     `{model-string: int}` map — re-read live by refresh_caps() on an mtime
+#     change, exactly like `token_tick_secs`;
+#   * `ORCH_CONTEXT_WINDOW` PINS it, the way ORCH_TOKEN_TICK_SECS pins the
+#     tick: an operator debugging a live run is not overridden by a config the
+#     orchestrator script republishes. Set-but-invalid still pins (the config
+#     does not quietly take over) and warns.
+#   * one grammar, two sources: the env var accepts the same int or JSON
+#     `{model: int}` map the config key does, so an operator never has to learn
+#     a second spelling to pin what the config already says.
+#
+# There is deliberately NO built-in model->window table and NO ">200k means
+# 1M" promotion (rejection R3: observing 522k proves capacity > 200k, not
+# = 1M, and the bare model string cannot tell the variants apart), and NO
+# fallback to 200,000 EVER — on this machine that renders a healthy 522k agent
+# as "261 % full", which is precisely the R-58 defect this feature exists to
+# avoid. An undeclared window is a CORRECT state: absolute tokens, no bar.
+# --------------------------------------------------------------------------
+CONTEXT_WINDOW_MIN = 1_000
+CONTEXT_WINDOW_MAX = 10_000_000
+# int | {model: int} | None. None means "undeclared", which is honest, not
+# degraded — ctx_field() then omits `cap` and the page says "window unknown".
+CONTEXT_WINDOW: int | dict | None = None
+
+
+def _bounded_window(value: int, model: str | None, source: str) -> int | None:
+    """One declared window, bounds-checked (GD-LC-6.2), or None + a warning.
+
+    Out of bounds is refused rather than clamped: a clamp would invent a
+    denominator, and every invented denominator here is a percentage nobody
+    measured. The warning is DEFERRED like every other config warning (R-07) —
+    a typo in someone else's run config must not kill this observer.
+    """
+    if CONTEXT_WINDOW_MIN <= value <= CONTEXT_WINDOW_MAX:
+        return value
+    _CFG_WARNINGS.append(
+        f"decision_watcher: {source} "
+        + (f"[{model}] " if model else "")
+        + f"= {value} is outside {CONTEXT_WINDOW_MIN}..{CONTEXT_WINDOW_MAX}; "
+          "ignored, context window stays undeclared")
+    return None
+
+
+def _parse_context_window(value, source: str) -> int | dict | None:
+    """``context_window`` in either declared form, or None (GD-LC-6.1).
+
+    Accepts an int (every model), a ``{model-string: int}`` map, or — because
+    the env var carries the same grammar as the config key — a string holding
+    either. A `bool` is refused explicitly: it is an `int` subclass, so a bare
+    `isinstance` check would read `true` as a 1-token window.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        try:
+            return _bounded_window(int(raw), None, source)
+        except ValueError:
+            pass
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            decoded = None
+        if not isinstance(decoded, (int, dict)) or isinstance(decoded, bool):
+            _CFG_WARNINGS.append(
+                f"decision_watcher: invalid {source}={raw!r}; expected an int "
+                "or a {model: int} map; context window stays undeclared")
+            return None
+        return _parse_context_window(decoded, source)
+    if isinstance(value, bool):
+        _CFG_WARNINGS.append(
+            f"decision_watcher: invalid {source}={value!r}; expected an int "
+            "or a {model: int} map; context window stays undeclared")
+        return None
+    if isinstance(value, int):
+        return _bounded_window(value, None, source)
+    if isinstance(value, dict):
+        # A bad entry drops ITSELF, not the whole map: one mistyped model must
+        # not silently take the window away from every other model in the file.
+        windows = {}
+        for model, cap in value.items():
+            if isinstance(cap, bool) or not isinstance(cap, int):
+                _CFG_WARNINGS.append(
+                    f"decision_watcher: invalid {source}[{model!r}]={cap!r}; "
+                    "expected an int; that model keeps no declared window")
+                continue
+            bounded = _bounded_window(cap, str(model), source)
+            if bounded is not None:
+                windows[str(model)] = bounded
+        return windows or None
+    _CFG_WARNINGS.append(
+        f"decision_watcher: invalid {source}={value!r}; expected an int or a "
+        "{model: int} map; context window stays undeclared")
+    return None
+
+
+# Presence PINS (see the block comment): a set-but-unparseable env var leaves
+# the window undeclared and says so, rather than letting the config win back a
+# value the operator was trying to override.
+_CONTEXT_WINDOW_PINNED = bool(str(os.environ.get("ORCH_CONTEXT_WINDOW", "")).strip())
+_CONTEXT_WINDOW_ENV = (_parse_context_window(os.environ.get("ORCH_CONTEXT_WINDOW"),
+                                             "ORCH_CONTEXT_WINDOW")
+                       if _CONTEXT_WINDOW_PINNED else None)
+
+
+def context_cap(model: str | None) -> int | None:
+    """The declared window for ``model``, or None (GD-LC-6.4/6.5).
+
+    A map with no entry for this model returns None on purpose: guessing a
+    neighbour's window is the model->window table GD-LC-6 forbids, five times
+    wrong in one direction or the other.
+    """
+    window = CONTEXT_WINDOW
+    if isinstance(window, int):
+        return window
+    if isinstance(window, dict) and model:
+        return window.get(model)
+    return None
+
+
+def context_window_str() -> str:
+    """The declared window, for the ``config reloaded:`` line (LC-03)."""
+    window = CONTEXT_WINDOW
+    if window is None:
+        return "undeclared"
+    if isinstance(window, int):
+        return str(window)
+    return " ".join(f"{model}={cap}" for model, cap in sorted(window.items()))
+
+
 # Attempt caps are not baked into the shared watcher (D4): read them from
 # orch-config.json (defaults preserve today's behavior when the keys are unset).
 CAP_DEFAULTS = {"max_plan_attempts": 4, "max_gate_attempts": 3,
@@ -376,7 +514,7 @@ def apply_caps(cfg: dict) -> tuple:
     the whole point of refresh_caps() below.
     """
     global MAX_PLAN_ATTEMPTS, MAX_GATE_ATTEMPTS, MAX_E2E_ATTEMPTS
-    global MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS
+    global MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS, CONTEXT_WINDOW
     MAX_PLAN_ATTEMPTS = _int_cfg(cfg, "max_plan_attempts", CAP_DEFAULTS["max_plan_attempts"])
     MAX_GATE_ATTEMPTS = _int_cfg(cfg, "max_gate_attempts", CAP_DEFAULTS["max_gate_attempts"])
     MAX_E2E_ATTEMPTS = _int_cfg(cfg, "max_e2e_attempts", CAP_DEFAULTS["max_e2e_attempts"])
@@ -388,6 +526,13 @@ def apply_caps(cfg: dict) -> tuple:
     # worst possible reading of a typo.
     TOKEN_TICK_SECS = (_TOKEN_TICK_ENV if _TOKEN_TICK_ENV is not None
                        else max(0, _int_cfg(cfg, "token_tick_secs", TOKEN_TICK_DEFAULT)))
+    # GD-LC-6: env PINS, else whatever the file declares (or nothing at all).
+    CONTEXT_WINDOW = (_CONTEXT_WINDOW_ENV if _CONTEXT_WINDOW_PINNED
+                      else _parse_context_window(cfg.get("context_window"),
+                                                 "context_window"))
+    # The returned tuple keeps its historic SHAPE — TOKEN_TICK_SECS stays last,
+    # which is what every caller and test reads it by. CONTEXT_WINDOW is a
+    # global like the rest and refresh_caps() compares it alongside this tuple.
     return (MAX_PLAN_ATTEMPTS, MAX_GATE_ATTEMPTS, MAX_E2E_ATTEMPTS,
             MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS)
 
@@ -426,9 +571,12 @@ def refresh_caps() -> tuple | None:
         return None
     _CFG_MTIME = mtime
     before = (MAX_PLAN_ATTEMPTS, MAX_GATE_ATTEMPTS, MAX_E2E_ATTEMPTS,
-              MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS)
+              MAX_FINALGATE_ATTEMPTS, STRATEGY, TOKEN_TICK_SECS, CONTEXT_WINDOW)
     seen = len(_CFG_WARNINGS)
-    after = apply_caps(read_config())
+    # apply_caps() keeps its historic return shape, so the declared window is
+    # appended here: a config that moves ONLY `context_window` must still be
+    # reported as a reload, or a re-declared denominator would land silently.
+    after = apply_caps(read_config()) + (CONTEXT_WINDOW,)
     # A bad value in a RELOAD cannot use the import-time deferred queue (nothing
     # flushes it again), so report it immediately and keep going (R-07).
     for warning in _CFG_WARNINGS[seen:]:
@@ -683,6 +831,218 @@ def _usage_totals(u: dict) -> tuple[int, int, int, int]:
             u.get("output_tokens") or 0)
 
 
+# --------------------------------------------------------------------------
+# GD-LC-1/2/3: CONTEXT OCCUPANCY — a LEVEL at an instant, not a total.
+#
+# `agent.tokens` above is SPEND: the sum over every turn (38.4x the occupancy
+# at the median, 197.7x at the extreme). Occupancy is how full the agent's
+# context window is RIGHT NOW: `input_tokens + cache_creation_input_tokens +
+# cache_read_input_tokens` of the LAST qualifying assistant record — the same
+# arithmetic the documented statusline uses, so the card and the user's own
+# status line agree digit-for-digit. `output_tokens` is excluded; nothing is
+# added for overhead (the row already carries the whole wire prompt).
+#
+# It is derived as a BY-PRODUCT of the incremental walk below — zero new reads,
+# zero new globs, zero new timers — and it is NON-monotonic: a compaction
+# legitimately lowers it, so the D7 monotone clamp must never touch it.
+#
+# This map is deliberately OUTSIDE _USAGE_CACHE: flush_agent_tokens() evicts
+# the parse caches BEFORE its emit, so a reading kept in there would be gone by
+# the time the terminal line is written (WATCHER-EMIT-3). It is popped at the
+# end of flush_agent_tokens() instead — every caller of that is a point where
+# the agent stops being ticked.
+#   {agent_id: {"used": int, "at": iso, "model": str|None, "peak": int,
+#               "src": "compact" (only on the GD-LC-3 branch)}}
+_LAST_CONTEXT: dict[str, dict] = {}
+# Named counters for the two branches that are COLD on today's corpus, so the
+# first wild occurrence is visible instead of silent (GD-LC-2).
+_CTX_COUNTS: dict[str, int] = {"agent_id_mismatch": 0, "iterations_multi": 0}
+_CTX_PATH_ID = re.compile(r"^agent-(.+)\.jsonl$")
+
+
+def _ctx_count(name: str, message: str) -> None:
+    """Count a cold branch — and SAY SO on the first hit.
+
+    A counter nobody reads is not visibility. Both of these branches measure 0
+    over the whole frozen corpus, so the first wild occurrence is precisely the
+    thing an operator has to be told about. Once per process, on stderr, never
+    an event: zero new event lines is the rule (GD-LC-5).
+    """
+    _CTX_COUNTS[name] += 1
+    if _CTX_COUNTS[name] == 1:
+        print(f"decision_watcher: {message}", file=sys.stderr, flush=True)
+
+
+def _agent_id_from_path(path: str) -> str:
+    """The agentId a transcript path ADDRESSES, or "" when it is not one.
+
+    GD-LC-2 verifies the record's own `agentId` against this, so a foreign row
+    can never be attributed to the agent whose file it sits in.
+    """
+    m = _CTX_PATH_ID.match(os.path.basename(path))
+    return m.group(1) if m else ""
+
+
+def _agent_id_ok(d: dict, path_agent: str) -> bool:
+    """GD-LC-2's identity verify: a MISMATCH is dropped and counted.
+
+    A record carrying no `agentId` at all is unverifiable, not mismatched, and
+    is accepted: it lives in the file the glob resolved FROM an agentId. (0
+    records of either kind in the 1,769-record frozen corpus — this is a guard
+    against a future shape, not a live filter.)
+    """
+    if not path_agent:
+        return True
+    recorded = d.get("agentId")
+    if recorded is None:
+        return True
+    if recorded == path_agent:
+        return True
+    _ctx_count("agent_id_mismatch",
+               f"agent-{path_agent}.jsonl carries a record stamped agentId "
+               f"{recorded!r}; dropped from the context reading, never "
+               "attributed (GD-LC-2)")
+    return False
+
+
+def _prompt_total(u: dict) -> int | None:
+    """GD-LC-1's three-component prompt sum, or None when the row does not say.
+
+    `type(v) is int`, never `isinstance` and never `v or 0`: `bool` is an `int`
+    SUBCLASS, so `isinstance` reads `cache_creation_input_tokens: true` as 1,
+    and `or 0` silently reads a `null` as zero. Both produce a positive,
+    plausible-looking number out of bytes that say nothing — the R-58 defect
+    class in miniature. `tests/fixtures/context/ctx-agent-no-usable-turn.jsonl`
+    carries a float, a null and a bool for exactly this arm.
+    """
+    total = 0
+    for field in ("input_tokens", "cache_creation_input_tokens",
+                  "cache_read_input_tokens"):
+        value = u.get(field)
+        if type(value) is not int:
+            return None
+        total += value
+    # A zero prompt is not an occupancy: 30 of 649 real transcripts end on an
+    # all-zero `<synthetic>` row, and `ctx 0` on a killed agent's card is a
+    # fabrication, not a reading (GD-LC-12).
+    return total if total > 0 else None
+
+
+def _note_context(cached: dict, d: dict, path_agent: str, lineno: int) -> None:
+    """Retain this record's occupancy candidates in the path's parse memo.
+
+    Two candidates per path, both keyed by ``(timestamp, line number)`` so the
+    fold in _fold_context() can order them across fragments:
+
+    * ``ctx_row`` — the NEWEST qualifying assistant row (GD-LC-2: `type ==
+      "assistant"`, `message.id` matching `^msg_`, prompt total > 0, model
+      != "<synthetic>", agentId verified). `usage.iterations` is read at the
+      TOP level when absent or of length 1 (all 7,256 sampled rows behave that
+      way); a `len > 1` list reads `iterations[-1]`, which is unambiguously ONE
+      API call's prompt whichever way the top level aggregates — the fixture's
+      top level is the SUM of three iterations, a prompt that never existed.
+    * ``ctx_boundary`` — the newest `compact_boundary` and its `postTokens`.
+      `preTokens` is never mixed into GD-LC-1's arithmetic: it is a different
+      estimator (a measured 30-token gap on real bytes). Any `trigger` value.
+
+    ``ctx_peak`` is the running max over qualifying rows of this path, which is
+    what makes `peak` recomputable by a full re-walk after a restart.
+    """
+    ts = d.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return
+    if d.get("type") == "system" and d.get("subtype") == "compact_boundary":
+        post = (d.get("compactMetadata") or {}).get("postTokens")
+        if type(post) is int and post > 0 and _agent_id_ok(d, path_agent):
+            if (cached["ctx_boundary"] is None
+                    or (ts, lineno) > cached["ctx_boundary"][:2]):
+                cached["ctx_boundary"] = (ts, lineno, post)
+        return
+    if d.get("type") != "assistant":
+        return
+    m = d.get("message") or {}
+    mid = m.get("id")
+    if not isinstance(mid, str) or not mid.startswith("msg_"):
+        return
+    model = m.get("model")
+    if model == "<synthetic>":
+        return
+    usage = m.get("usage")
+    if not isinstance(usage, dict) or not _agent_id_ok(d, path_agent):
+        return
+    iterations = usage.get("iterations")
+    if isinstance(iterations, list) and len(iterations) > 1:
+        _ctx_count("iterations_multi",
+                   f"usage.iterations of length {len(iterations)} seen "
+                   "(0 in the measured corpus); reading iterations[-1] as the "
+                   "prompt, which is unambiguously one API call (GD-LC-2)")
+        if not isinstance(iterations[-1], dict):
+            return
+        usage = iterations[-1]
+    used = _prompt_total(usage)
+    if used is None:
+        return
+    if cached["ctx_row"] is None or (ts, lineno) > cached["ctx_row"][:2]:
+        cached["ctx_row"] = (ts, lineno, used, model if isinstance(model, str) else None)
+    if used > cached["ctx_peak"]:
+        cached["ctx_peak"] = used
+
+
+def _fold_context(agent_id: str, paths: list[str]) -> None:
+    """Fold every fragment's candidates into ``_LAST_CONTEXT[agent_id]``.
+
+    The reading is the qualifying row with the greatest ``(record timestamp,
+    path order, line number)`` across the union of the agent's transcript
+    fragments — NOT `max` over turns. `max` is WRONG here: it coincides with
+    `latest` on 100 % of the current corpus and is silently wrong forever after
+    the first compaction, because occupancy GOES DOWN there. See
+    `tests/fixtures/context/ctx-agent-compaction-boundary.jsonl`, where `max`
+    reads 120,000 and the truth is 18,000 — the next reader's instinct will be
+    `max`.
+
+    GD-LC-3: when the newest `compact_boundary` outranks the newest qualifying
+    row, the reading is `compactMetadata.postTokens` stamped with the
+    BOUNDARY's own timestamp and labelled `src: "compact"` — no usage row lands
+    until the next API call, so a naive last-row reader overstates 19x for the
+    whole gap. The model is carried from the agent's newest qualifying row: the
+    boundary record carries none, and dropping it would take `cap` away from a
+    perfectly healthy agent for the length of that gap.
+
+    Nothing is cleared when a fragment goes unreadable: GD-LC-12 says the
+    previously emitted reading STANDS, visibly aged by its own `at`, and a
+    stale value is never re-stamped.
+    """
+    row = boundary = None
+    peak = 0
+    for order, path in enumerate(paths):
+        cached = _USAGE_CACHE.get(path)
+        if not cached:
+            continue
+        candidate = cached.get("ctx_row")
+        if candidate and (row is None or (candidate[0], order, candidate[1]) > row[:3]):
+            row = (candidate[0], order, candidate[1], candidate[2], candidate[3])
+        edge = cached.get("ctx_boundary")
+        if edge and (boundary is None or (edge[0], order, edge[1]) > boundary[:3]):
+            boundary = (edge[0], order, edge[1], edge[2])
+        peak = max(peak, cached.get("ctx_peak") or 0)
+    if row is None and boundary is None:
+        return
+    previous = _LAST_CONTEXT.get(agent_id) or {}
+    if boundary is not None and (row is None or boundary[:3] > row[:3]):
+        used, at, src = boundary[3], boundary[0], "compact"
+        model = row[4] if row else None
+    else:
+        used, at, src = row[3], row[0], None
+        model = row[4]
+    # `peak` is the one sanctioned aggregate and IS monotone (unlike `used`):
+    # a compaction must not lower the high-water mark it just dropped from.
+    reading = {"used": used, "at": at, "model": model,
+               "peak": max(peak, used, previous.get("peak", 0))}
+    if src:
+        reading["src"] = src
+    _LAST_CONTEXT[agent_id] = reading
+
+
 def _transcript_usage(path: str) -> dict[str, tuple[int, int, int, int]]:
     """Usage rows of ONE transcript copy, parsed incrementally (WRITE-SIDE-10).
 
@@ -706,7 +1066,12 @@ def _transcript_usage(path: str) -> dict[str, tuple[int, int, int, int]]:
     # transcript's totals until it grew back. The offset is the only number that
     # says how many of these bytes we have already believed.
     if cached is None or cached["ident"] != ident or st.st_size < cached["offset"]:
-        cached = {"ident": ident, "offset": 0, "lines": 0, "usage": {}}
+        # ctx_row / ctx_peak / ctx_boundary are the occupancy by-products
+        # (GD-LC-2/3): they are rebuilt from byte 0 by exactly the same rule
+        # that rebuilds `usage`, which is what makes `peak` recomputable from a
+        # full re-walk after a restart.
+        cached = {"ident": ident, "offset": 0, "lines": 0, "usage": {},
+                  "ctx_row": None, "ctx_peak": 0, "ctx_boundary": None}
         _USAGE_CACHE[path] = cached
     if st.st_size == cached["offset"]:  # nothing new since the last read
         return cached["usage"]
@@ -719,6 +1084,7 @@ def _transcript_usage(path: str) -> dict[str, tuple[int, int, int, int]]:
     cut = chunk.rfind(b"\n")
     if cut == -1:  # no complete line yet; leave the offset where it is
         return cached["usage"]
+    path_agent = _agent_id_from_path(path)
     # split(b"\n") on the BYTES, decoding per line — never str.splitlines(),
     # which also splits on \x0b \x0c \x1c-\x1e \x85 and U+2028/U+2029. Those last
     # two are legal UNESCAPED inside a JSON string (JSON.stringify does not
@@ -736,6 +1102,10 @@ def _transcript_usage(path: str) -> dict[str, tuple[int, int, int, int]]:
             d = json.loads(raw.decode(errors="replace"))
         except json.JSONDecodeError:
             continue
+        # Occupancy rides THIS walk (GD-LC-5): same bytes, same pass, no second
+        # read. It is noted before the assistant filter because a
+        # `compact_boundary` is a `system` record.
+        _note_context(cached, d, path_agent, lineno)
         if d.get("type") != "assistant":
             continue
         m = d.get("message") or {}
@@ -768,8 +1138,13 @@ def agent_tokens(agent_id: str) -> tuple[int, int, int, int]:
     # message-id key unions them safely (overlapping messages collapse), and
     # agent_paths() returns them oldest-first so a newer copy's row wins.
     usage_by_msg: dict[str, tuple[int, int, int, int]] = {}
-    for path in agent_paths(agent_id):
+    paths = agent_paths(agent_id)
+    for path in paths:
         usage_by_msg.update(_transcript_usage(path))
+    # The occupancy fold is the by-product of the same walk (GD-LC-5): this
+    # funnel is where every read path meets, so the reading is refreshed
+    # wherever a total is, and nowhere else.
+    _fold_context(agent_id, paths)
     tin = tcached = twrite = tout = 0
     for u_in, u_cached, u_write, u_out in usage_by_msg.values():
         tin += u_in
@@ -797,6 +1172,77 @@ def tokens_field(totals: tuple[int, int, int, int] | None) -> dict | None:
         return None
     tin, tcached, twrite, tout = totals
     return {"in": tin, "out": tout, "cached": tcached, "cache_write": twrite}
+
+
+# One warning per (model, cap) for a contradicted window — a daemon that
+# re-warned every tick would bury the run's real output.
+_CTX_CAP_WARNED: set[tuple[str, int]] = set()
+
+
+def ctx_field(agent_id: str) -> dict | None:
+    """The `agent.ctx` sub-object for this agent's reading — or None.
+
+    None means the key is ABSENT on the wire, which is the whole discipline
+    (GD-LC-4/12): never `0`, never `null`. Every unknown resolves here —
+    spawned but no assistant turn yet, only `<synthetic>` rows, `--no-tokens`,
+    a pruned or unreadable transcript, no fragment yielding a qualifying row.
+    A fabricated number on a card is worse than showing nothing.
+
+    The wire shape is GD-LC-4 exactly: `used` and `at` required, `model` when
+    recorded, `peak` whenever the block is present, `cap` only when DECLARED
+    and not contradicted, `src` only on the compaction branch. `at` is the
+    SOURCE record's own timestamp, never the emit moment, so a stale reading
+    ages visibly instead of being re-stamped. No percentage travels — that is
+    client-derivable, and derivables do not ship.
+    """
+    if NO_TOKENS:
+        # One switch, one read, no third state: context is a by-product of
+        # exactly the transcript parse D-05 suppresses (GD-LC-12).
+        return None
+    reading = _LAST_CONTEXT.get(agent_id)
+    if not reading:
+        return None
+    used = reading.get("used")
+    if type(used) is not int or used <= 0:
+        return None
+    block = {"used": used, "at": reading["at"]}
+    model = reading.get("model")
+    if model:
+        block["model"] = model
+    block["peak"] = reading.get("peak") or used
+    cap = context_cap(model)
+    if cap is not None:
+        if used > cap:
+            # GD-LC-6.3: a contradicted window is OMITTED, never clamped and
+            # never rendered as a >100 % bar. The reading is the measurement;
+            # the declaration is the guess, so the declaration loses.
+            key = (model or "", cap)
+            if key not in _CTX_CAP_WARNED:
+                _CTX_CAP_WARNED.add(key)
+                print(f"decision_watcher: context reading {used} exceeds the "
+                      f"declared window {cap} for model {model or 'unknown'}; "
+                      "omitting cap (check context_window / "
+                      "ORCH_CONTEXT_WINDOW)", file=sys.stderr, flush=True)
+        else:
+            block["cap"] = cap
+    if reading.get("src"):
+        block["src"] = reading["src"]
+    return block
+
+
+def ctx_detail(ctx: dict | None) -> str:
+    """The ` · ctx 144.0k` / ` · ctx 144.0k/1000.0k` detail suffix, or "".
+
+    GD-11 at the writer: single line, no double quotes, tiny. No percentage,
+    and the clause is omitted ENTIRELY when there is no reading — never
+    `ctx 0`, never `ctx ?`. The number travels in `agent.ctx`, not here; this
+    is display text, the same way `fmt_in` already writes the spend.
+    """
+    if not ctx:
+        return ""
+    cap = ctx.get("cap")
+    used = fmt_tokens(ctx["used"])
+    return f" · ctx {used}/{fmt_tokens(cap)}" if cap else f" · ctx {used}"
 
 
 def token_deltas(prev: dict, tin: int, tcached: int, twrite: int,
@@ -1220,14 +1666,21 @@ def flush_agent_tokens(state: dict, agent_id: str, info: dict | None = None,
     schema-ADDITIVE — ``agent`` is already documented as optional on any event
     and readers ignore keys they don't know.
 
-    ``--no-tokens`` (D-05) turns the whole body into the two evictions: no
+    ``--no-tokens`` (D-05) turns the whole body into the evictions: no
     transcript is read and no `tokens` event is written, so spawns, results and
     decision lines are untouched while `ingest.rollup` becomes the single
     reachable token implementation. The evictions still happen because every
     caller is still a point where the agent stops being ticked.
+
+    The line also carries the agent's CONTEXT OCCUPANCY when there is one
+    (GD-LC-4/5) — absolute, non-monotonic, last-event-wins, and simply ABSENT
+    when unknown. It rides this existing line: zero new event kinds and zero
+    new event lines, because the positional `legacy:<task>#<line>` key space
+    downstream makes a twin-line design a permanent +91 % on the stream.
     """
     if NO_TOKENS:
         drop_usage_cache(agent_id)
+        _LAST_CONTEXT.pop(agent_id, None)
         state.setdefault("tok_tick_at", {}).pop(agent_id, None)
         return totals if totals is not None else (0, 0, 0, 0)
     if totals is None:
@@ -1249,7 +1702,14 @@ def flush_agent_tokens(state: dict, agent_id: str, info: dict | None = None,
     tin, tcached, twrite, tout = totals
     prev = state["tok_emitted"].get(agent_id, {})
     deltas, base = token_deltas(prev, tin, tcached, twrite, tout)
+    # Read BEFORE either exit pops it: drop_usage_cache() above has already
+    # taken the per-path parse memos away, and _LAST_CONTEXT is the map that
+    # survives that eviction so this terminal line can still state the level
+    # (WATCHER-EMIT-3). The reading is ABSOLUTE — the deltas beside it are not
+    # its business, and the D7 clamp must never touch it.
+    ctx = ctx_field(agent_id)
     if not force and not any(deltas.values()):
+        _LAST_CONTEXT.pop(agent_id, None)
         return totals
     if info is None:
         info = state["agents"].get(agent_id)
@@ -1261,14 +1721,19 @@ def flush_agent_tokens(state: dict, agent_id: str, info: dict | None = None,
     emit("tokens", "info",
          f"{agent_label(info, agent_id)} used "
          f"{fmt_in(base['in'], base['cached'], base['cache_write'])} · "
-         f"out {fmt_tokens(base['out'])} total",
+         f"out {fmt_tokens(base['out'])} total" + ctx_detail(ctx),
          ts=ts, plan=info["plan"] if info else "orchestrator",
          extra={"tokens": deltas,
-                "agent": agent_block(agent_id, info, row_state, tokens=dict(base))})
+                "agent": agent_block(agent_id, info, row_state,
+                                     tokens=dict(base), ctx=ctx)})
     # Never clear tok_emitted itself — the truncation branch in main()
     # documents why. (The cadence WINDOW was dropped above: this agent has
     # stopped being ticked, so there is nothing left to throttle.)
     state["tok_emitted"][agent_id] = base
+    # Popped LAST, on both exits: the line above is this agent's final word on
+    # its occupancy, and a reading left behind would be re-attached to whatever
+    # a later pass emits for an agent that has stopped being read (GD-LC-5).
+    _LAST_CONTEXT.pop(agent_id, None)
     return totals
 
 
@@ -2554,7 +3019,13 @@ def reconcile(state: dict, snap: dict) -> int:
              + f": reconciled from the run snapshot ({single_line(row.get('state')) or 'unknown'})",
              plan=info["plan"] if info else "orchestrator",
              extra={"agent": agent_block(agent_id, info, row_state,
-                                         tokens=tokens_field(totals))})
+                                         tokens=tokens_field(totals),
+                                         ctx=ctx_field(agent_id))})
+        # --reconcile re-derives from the TRANSCRIPTS (never from the
+        # snapshot's display numbers), so the occupancy here is the same
+        # measured reading the live tail would have emitted. Completed runs'
+        # history is not rewritten: a reader ignoring a missing key IS the
+        # backfill story.
         flush_agent_tokens(state, agent_id, info, row_state=row_state,
                            totals=totals)
         if info:
@@ -2803,7 +3274,8 @@ def main() -> None:
                     "agent": agent_block(aid, info,
                                          tokens={"in": new_base["in"], "out": new_base["out"],
                                                  "cached": new_base["cached"],
-                                                 "cache_write": new_base["cache_write"]})})
+                                                 "cache_write": new_base["cache_write"]},
+                                         ctx=ctx_field(aid))})
         state["tok_emitted"][aid] = new_base
     # The backfill is a one-shot TERMINAL read for every agent that is NOT in
     # flight, and on a RESTART (the documented resume workflow) that is nearly
@@ -2819,6 +3291,11 @@ def main() -> None:
     for path in [p for p in _USAGE_CACHE
                  if os.path.basename(p) not in live_transcripts]:
         _USAGE_CACHE.pop(path, None)
+    # The occupancy map is swept on the same rule and for the same reason: the
+    # backfill above reads every agent the run has ever tracked, and only the
+    # handful still in flight will ever be emitted for again.
+    for aid in [a for a in _LAST_CONTEXT if a not in state["running"]]:
+        _LAST_CONTEXT.pop(aid, None)
     for aid in [a for a in state["tok_tick_at"] if a not in state["running"]]:
         del state["tok_tick_at"][aid]
     save_state(state)
@@ -2974,6 +3451,7 @@ def main() -> None:
                                  extra={"agent": agent_block(
                                      other, oinfo, "stale",
                                      tokens=None if o_base is None else dict(o_base),
+                                     ctx=ctx_field(other),
                                      runtime=elapsed_str(first_ts(other), last_ts(other)))})
                             flush_agent_tokens(state, other, oinfo, ts=ts0,
                                                totals=o_totals)
@@ -3065,6 +3543,7 @@ def main() -> None:
                              extra={"agent": agent_block(
                                  agent_id, info, sst,
                                  tokens=tokens_field(a_totals),
+                                 ctx=ctx_field(agent_id),
                                  runtime=elapsed_str(first_ts(agent_id), tsN))})
                         if isinstance(result, dict) and ("passed" in result or "approved" in result):
                             ok = bool(result.get("passed") or result.get("approved"))
@@ -3134,7 +3613,8 @@ def main() -> None:
             emit("watcher", "info",
                  f"config reloaded: plan cap {MAX_PLAN_ATTEMPTS}, gate cap "
                  f"{MAX_GATE_ATTEMPTS}, finalgate cap {MAX_FINALGATE_ATTEMPTS}, "
-                 f"strategy {STRATEGY or 'unset'}, token tick {TOKEN_TICK_SECS}s")
+                 f"strategy {STRATEGY or 'unset'}, token tick {TOKEN_TICK_SECS}s"
+                 f", context window {context_window_str()}")
         # ABANDONED agents: a session killed mid-agent leaves journal `started`
         # entries with no `result`, so `running` never empties and the run card
         # ticks forever. After the long window, close them `stale` (GD-10: a
@@ -3162,6 +3642,7 @@ def main() -> None:
                  extra={"agent": agent_block(
                      aid, ainfo, "stale",
                      tokens=None if a_base is None else dict(a_base),
+                     ctx=ctx_field(aid),
                      runtime=elapsed_str(first_ts(aid), last_ts(aid)))})
             flush_agent_tokens(state, aid, ainfo, totals=a_totals)
         if gone:
@@ -3333,8 +3814,14 @@ def main() -> None:
                     info = state["agents"].get(aid)
                     plan = info["plan"] if info else "orchestrator"
                     label = agent_label(info, aid)
+                    # GD-LC-5: the occupancy rides THIS line and no other. A
+                    # context change requires a billed turn and a billed turn
+                    # always moves these counters, so every change coincides
+                    # with a tick that was going to be written anyway — no
+                    # heartbeat, no second cadence knob, no new event line.
+                    ctx = ctx_field(aid)
                     emit("tokens", "info",
-                         f"{label} running: {fmt_in(base['in'], base['cached'], base['cache_write'])} · out {fmt_tokens(base['out'])} so far",
+                         f"{label} running: {fmt_in(base['in'], base['cached'], base['cache_write'])} · out {fmt_tokens(base['out'])} so far" + ctx_detail(ctx),
                          plan=plan,
                          extra={"tokens": {"in": din, "out": dout, "cached": dcached,
                                            "cache_write": dwrite},
@@ -3343,7 +3830,8 @@ def main() -> None:
                                     aid, info, "running",
                                     tokens={"in": base["in"], "out": base["out"],
                                             "cached": base["cached"],
-                                            "cache_write": base["cache_write"]})})
+                                            "cache_write": base["cache_write"]},
+                                    ctx=ctx)})
                     # The baseline advances ONLY on an actual emit (GD-D): a
                     # suppressed or empty tick leaves it exactly where it was,
                     # so the next emit — later tick, rollup, stale close or exit

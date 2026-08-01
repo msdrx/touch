@@ -1,6 +1,6 @@
 {
  "evCount": 1200,
- "foldGen": 2,
+ "foldGen": 3,
  "kind": "monitor-snapshot",
  "logTruncated": false,
  "m": "snapshot",
@@ -15,6 +15,7 @@
      [
       "a429f718054304e72",
       {
+       "ctx": null,
        "finishedMs": 1785226253160,
        "label": "mongoschema:research #1",
        "runtime": "10m52s",
@@ -31,6 +32,7 @@
      [
       "add612f92c5daef85",
       {
+       "ctx": null,
        "finishedMs": 1785226519197,
        "label": "customstate:research #1",
        "runtime": "15m18s",
@@ -47,6 +49,7 @@
      [
       "ac84a4f8c5789d10a",
       {
+       "ctx": null,
        "finishedMs": 1785226896626,
        "label": "convo:research #1",
        "runtime": "21m36s",
@@ -63,6 +66,7 @@
      [
       "aaf953294ee06a684",
       {
+       "ctx": null,
        "finishedMs": 1785225902232,
        "label": "liveflow:research #1",
        "runtime": "5m00s",
@@ -79,6 +83,7 @@
      [
       "ad97f70de5027ae8f",
       {
+       "ctx": null,
        "finishedMs": 1785225789465,
        "label": "sessionjsonl:research #1",
        "runtime": "3m06s",
@@ -95,6 +100,7 @@
      [
       "a6a6a70d89c9e0a8b",
       {
+       "ctx": null,
        "finishedMs": 1785226265276,
        "label": "frontend-render:research #1",
        "runtime": "11m01s",
@@ -111,6 +117,7 @@
      [
       "aaad4a6a72aecf3cb",
       {
+       "ctx": null,
        "finishedMs": 1785227751427,
        "label": "write-side:research #1",
        "runtime": "14m12s",
@@ -127,6 +134,7 @@
      [
       "ac8bd4e2827ec60df",
       {
+       "ctx": null,
        "finishedMs": 1785228122193,
        "label": "server-read:research #1",
        "runtime": "20m21s",
@@ -537,6 +545,7 @@
      [
       "a5b2b935158b4fef7",
       {
+       "ctx": null,
        "finishedMs": 1785228380523,
        "label": "convo:research #1",
        "runtime": "4m07s",
@@ -553,6 +562,7 @@
      [
       "a1c3bfc5a3378ce36",
       {
+       "ctx": null,
        "finishedMs": 1785229020914,
        "label": "sessionjsonl:research #1",
        "runtime": "14m47s",
@@ -569,6 +579,7 @@
      [
       "ac3bbbf8702fcc104",
       {
+       "ctx": null,
        "finishedMs": 1785229027538,
        "label": "liveflow:research #1",
        "runtime": "14m53s",
@@ -585,6 +596,7 @@
      [
       "a6d172d0d08983f19",
       {
+       "ctx": null,
        "finishedMs": null,
        "label": "frontend-render:research #1",
        "runtime": "6m04s",
@@ -601,6 +613,7 @@
      [
       "ac8c77ee2cbe5fc6f",
       {
+       "ctx": null,
        "finishedMs": 1785230066625,
        "label": "mongoschema:research #1",
        "runtime": "17m15s",
@@ -617,6 +630,7 @@
      [
       "acf0901b0e0fc1103",
       {
+       "ctx": null,
        "finishedMs": 1785230002017,
        "label": "customstate:research #1",
        "runtime": "16m09s",
@@ -633,6 +647,7 @@
      [
       "a7ce68c5c08ef95c7",
       {
+       "ctx": null,
        "finishedMs": 1785230609180,
        "label": "write-side:research #1",
        "runtime": "9m00s",
@@ -649,6 +664,7 @@
      [
       "a731238ad21902935",
       {
+       "ctx": null,
        "finishedMs": 1785230979279,
        "label": "server-read:research #1",
        "runtime": "15m09s",

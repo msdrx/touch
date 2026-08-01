@@ -286,6 +286,27 @@ runs under a new per-file generation, and records left behind get
 `retracted: true, retractedGen: G` via `updateMany`. They are hidden by
 default in the UI, visible on demand, and never shown as current.
 
+### Context occupancy is a projection, not a field
+
+The per-agent **context occupancy** the dashboards render — how full an agent's
+window was at its last recorded turn — is **not mirrored as its own field, and
+no collection gains one for it**. It is a read-time projection over the `usage`
+collection that is already there: `sort ts desc, limit 1`, projecting
+`in + cached + cache_write` off that one newest document. History gains the
+reading retroactively, with no migration and no backfill of a key nobody wrote.
+
+The rule that makes that safe is §4's `$inc` row one level down: **the `$max`
+fold on `usage` is per-message only and must never become a cross-turn
+reduction.** Occupancy is a LEVEL at an instant, not a total, and it is
+non-monotonic — a compaction legitimately lowers it — so a `$max` across turns
+would report a high-water mark forever while calling it "now". `sort ts desc,
+limit 1` *is* the fold; anything wider is a different number wearing this one's
+name.
+
+That is also why `ingest.py`, `tick.py` and `mongo_store.py` are untouched by
+the feature: occupancy is a way of **reading** the mirror, not a thing to write
+into it.
+
 ---
 
 ## 5. Rebuild and backfill

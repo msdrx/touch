@@ -1404,7 +1404,7 @@ def test_snapshot_carries_every_field_the_page_reads():
                 agents += 1
                 assert len(aid) == 17, aid          # full id, never shortId
                 for key in ("label", "started", "state", "runtime", "finishedMs",
-                            "tokens"):
+                            "tokens", "ctx"):
                     assert key in row, (aid, key)
                 if row["state"] in ("done", "failed"):
                     finished += row["finishedMs"] is not None
@@ -1455,6 +1455,83 @@ def test_snapshot_tokens_are_absolute_and_exactly_equal_the_delta_sum():
         assert totals == stream.fold.tok, (totals, stream.fold.tok)
 
     _run(go())
+
+
+def _ctx_ev(aid, ctx=None, **agent):
+    """One watcher-shaped agent tick for the ctx fold cases (GD-LC-4 wire shape)."""
+    a = {"id": aid, "label": "impl #1", "state": "running",
+         "tokens": {"in": 1000, "out": 10, "cached": 0, "cache_write": 0}}
+    a.update(agent)
+    if ctx is not None:
+        a["ctx"] = ctx
+    return json.dumps({"ts": "2026-07-31T08:00:00.000Z", "plan": "sp-a",
+                       "stage": "impl", "state": "running", "detail": "tick",
+                       "agent": a})
+
+
+def _ctx_row(fold, aid):
+    snap = fold.snapshot("sig0123456789abc", 0)
+    plans = dict(snap["plans"])
+    return dict(plans["sp-a"]["agents"])[aid], snap
+
+
+def test_an_agent_with_no_context_reading_serialises_null_never_zero():
+    """GD-LC-4/UI-CARDS-12 — unknown is the KEY BEING ABSENT on the wire.
+
+    Its fold-internal spelling is ``None``, and it must survive into the
+    snapshot as JSON ``null``. Never ``{}`` (truthy-shaped downstream, and an
+    invitation to reconstruct a ``{"used": 0}``), never ``{"used": 0}`` — a
+    rendered 0 reads as "this agent's context is empty", which is the opposite
+    of "I do not know". 30 of 649 measured transcripts end on a ``<synthetic>``
+    row with no reading at all; every one of them must render as a dash.
+    """
+    aid = "a" * 17
+    fold = ms.Fold()
+    fold.apply(_ctx_ev(aid).encode())
+    row, snap = _ctx_row(fold, aid)
+    assert "ctx" in row, "the key must be present in the row so the page can hydrate it"
+    assert row["ctx"] is None, row["ctx"]
+    assert row["ctx"] != {} and row["ctx"] != {"used": 0}
+    assert '"ctx": null' in json.dumps(snap, indent=1), \
+        "the snapshot must serialise a missing reading as null"
+
+
+def test_context_is_not_a_counter_a_compaction_must_be_allowed_to_lower_it():
+    """GD-LC-4/UI-CARDS-7 — the fold is last-wins, NON-monotonic, no merge.
+
+    Every other token path here is deliberately monotonic (``token_deltas``
+    clamps, the page and the fold sum). That is right for cumulative billing and
+    wrong for occupancy: a ``/compact`` drops the level by design. If ctx were
+    passed through counter-shaped logic the gauge would pin at the
+    pre-compaction high forever — an agent showing "near limit" while 79 % of
+    its window is free, which is a stable, plausible, wrong number.
+
+    The second half is the no-merge rule: a whole-object replace, so a `cap`
+    that was declared for one model cannot survive into a reading that no longer
+    carries one.
+    """
+    aid = "b" * 17
+    fold = ms.Fold()
+    stamp = "2026-07-31T08:00:00.000Z"
+    fold.apply(_ctx_ev(aid, {"used": 90000, "at": stamp, "peak": 90000,
+                             "cap": 200000}).encode())
+    row, _ = _ctx_row(fold, aid)
+    assert row["ctx"]["used"] == 90000, row["ctx"]
+
+    # the compaction: a LOWER level, with peak preserved by the writer
+    fold.apply(_ctx_ev(aid, {"used": 12000, "at": stamp, "peak": 90000}).encode())
+    row, snap = _ctx_row(fold, aid)
+    assert row["ctx"]["used"] == 12000, (row["ctx"], "context is not a counter")
+    assert row["ctx"]["peak"] == 90000, row["ctx"]
+    assert "cap" not in row["ctx"], \
+        "whole-object replace: a partial merge would keep a stale cap alive"
+    assert json.loads(json.dumps(snap)) == snap, "the row must stay JSON-serialisable"
+
+    # a tick with no reading leaves the previous one standing (it ages by its
+    # own `at`); it never resets to zero and never clears the key
+    fold.apply(_ctx_ev(aid).encode())
+    row, _ = _ctx_row(fold, aid)
+    assert row["ctx"]["used"] == 12000, row["ctx"]
 
 
 def test_snapshot_log_budget_is_global_with_a_per_plan_floor():

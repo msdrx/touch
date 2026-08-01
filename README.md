@@ -4,14 +4,13 @@
   <img src="resources/touch_the_agent.png" alt="The Creation of Adam — touch the agent" width="820">
 </p>
 
-Touch is a Claude Code plugin for **watching your agents work**. When a session
-spawns subagents, the terminal shows you almost nothing about them. Touch puts that run on a local web
+Touch is a Claude Code plugin for watching your agents work. When a session spawns subagents, the terminal shows you almost nothing about them. Touch puts that run on a local web
 page: which plans are running, what stage each loop is in, what the gates
 decided, and what it all costs in tokens.
 
 It is read-only for now. Future releases will "touch" the agent.
 
-> **Alpha — v0.2.2.** Touch is early software: incomplete, moving, and rough in
+> **Alpha — v0.2.3.** Touch is early software: incomplete, moving, and rough in
 > places. Interfaces, layout and command behaviour can change between releases
 > without a migration path.
 

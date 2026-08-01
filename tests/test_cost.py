@@ -31,6 +31,26 @@ priced, the driver resolution from a `wf_dir` (and its refusal on a path of
 another shape), and — because this module reads `~/.claude` — that a whole
 analysis writes not one byte anywhere.
 
+And the offline LEVEL half (LC-12), which is a different question from every
+figure above it: `contextPeak` / `contextFinal` / `contextFinalTs` /
+`contextByOwner` are how FULL a window was at an instant, not what a run spent.
+Four clauses are pinned because each has a tempting wrong answer: the level is
+the greatest-TIMESTAMP turn (not the largest, not the last dict entry — on a
+corpus with no compaction those coincide on every run and then stop, silently);
+it is non-monotonic, so `final` below `peak` is correct and is never clamped up;
+an unmeasured level is **absent**, never `0`, down to an owner with nothing but
+`<synthetic>` turns being missing from `contextByOwner` rather than present with
+a zero; and the driver's level carries the scope that produced it, because a
+sliced final turn is not "the driver's context now". The money block is pinned
+byte-identical across the whole addition — the four keys live outside it.
+
+Two of those clauses are pinned against the MONEY reading specifically, because
+the level is a second read of the same bytes and the two are meant to disagree
+there: a `null` component that money floors to 0 must yield no level at all
+(24,502 tok of "nobody measured this" is the defect in miniature), and a
+multi-iteration `usage` that money sums at the top level must read
+`iterations[-1]` — one API call's prompt, not an aggregate of three.
+
 The corpus freeze lives here rather than in `tests/fixtures/MANIFEST.sha256`:
 that manifest has one owner and this sub-plan is not it, and the corpus is
 synthesized rather than copied, which `tests/fixtures/PROVENANCE.md` forbids of
@@ -181,6 +201,44 @@ EXPECTED_COTENANT = {
     # 10/1e6*5 + 100/1e6*0.5 + 200/1e6*6.25 + 20/1e6*25 = 0.00185
     "driverTotal": 0.00185,
 }
+
+#: The LEVEL half over the same corpus, hand-computed from the same rows. Every
+#: agent record is stamped `2026-07-31T00:00:00.000Z`, so the "latest" turn is
+#: decided by the timestamp tie-break — fold position, i.e. (path order, line
+#: number): `msg_c6` is the last row of the last transcript read.
+#:
+#:   peak   = max(3100, 5020, 610, 940, 1020)          = 5020   (msg_c2)
+#:   final  = the greatest (ts, fold position) turn    = 1020   (msg_c6)
+#:   agent 1 (a1)  peak 5020 (msg_c2), final 5020 — msg_c4 is `<synthetic>`
+#:                 with zero context and never qualifies as a LEVEL
+#:   agent 2 (a2)  peak  610, final  610
+#:   agent 3 (a3)  peak 1020, final 1020 (msg_c6 after msg_c5's 940)
+#:
+#: Note what is NOT here: `contextIntegral` (10,690) is a sum over all six
+#: turns including the synthetic's zero, and the peak is not a term of it.
+LEVEL_TS = "2026-07-31T00:00:00+00:00"
+EXPECTED_LEVEL = {
+    "contextPeak": 5020,
+    "contextFinal": 1020,
+    "contextFinalTs": LEVEL_TS,
+    "contextByOwner": {
+        "a00000000000000a1": {"peak": 5020, "final": 5020, "ts": LEVEL_TS},
+        "a00000000000000a2": {"peak": 610, "final": 610, "ts": LEVEL_TS},
+        "a00000000000000a3": {"peak": 1020, "final": 1020, "ts": LEVEL_TS},
+    },
+}
+
+#: The summary keys that existed BEFORE the level half, and the four it added.
+#: Named as two frozen sets so the regression arm can say the exact thing the
+#: sub-plan promises — the addition is additive, nothing was renamed, nothing
+#: moved into or out of the money block — rather than spot-checking a few.
+MONEY_ERA_KEYS = frozenset({
+    "agents", "turns", "contextIntegral", "baselinePerTurn", "baselineShare",
+    "promptTokensPerAgent", "tokens", "dollars", "topReReadFiles",
+    "unpricedModels", "files", "unusableUsage", "cacheWritesWithoutTtlSplit",
+})
+LEVEL_KEYS = frozenset({"contextPeak", "contextFinal", "contextFinalTs",
+                        "contextByOwner"})
 
 #: `--driver-whole-session` over SESSION's transcript folds BOTH runs' driver
 #: turns: 705 (RUN_ID's) + 310 (RUN_ID2's) = 1015, plus session 2's 910 = 1925.
@@ -589,6 +647,396 @@ def test_a_zero_context_turn_never_drags_an_agents_baseline():
     check(only["baselinePerTurn"] == 0 and only["agents"] == 1,
           "an agent with nothing but zero-context turns has a zero baseline "
           "and is still counted — no exception, no crash")
+
+
+# --- the offline LEVEL half (LC-12) ----------------------------------------
+
+
+def _assistant(message_id, prompt, *, stamp=None, model="claude-opus-5"):
+    """One assistant record whose three prompt components sum to ``prompt``.
+
+    Split across all three on purpose: the level is
+    `input + cache_read + cache_creation`, and a record that puts the whole
+    figure in `input_tokens` would pass a reader that dropped either of the
+    other two.
+    """
+    usage = {"input_tokens": prompt - (prompt // 2) - (prompt // 4),
+             "cache_read_input_tokens": prompt // 2,
+             "cache_creation_input_tokens": prompt // 4,
+             "output_tokens": 7}
+    record = {"type": "assistant",
+              "message": {"id": message_id, "model": model, "usage": usage}}
+    if stamp is not None:
+        record["timestamp"] = stamp
+    return record
+
+
+def test_the_context_level_is_the_latest_turn_not_the_largest_or_the_last_one():
+    print("test_the_context_level_is_the_latest_turn_not_the_largest_or_the_last_one")
+    # THE trap this whole reading exists to avoid. Until something compacts,
+    # the largest turn IS the latest turn on every run ever recorded, so `max`
+    # passes every test anyone would think to write — and is wrong forever
+    # afterwards, silently, in the one direction that overstates. This fold
+    # makes the three candidate answers three different numbers: 9,000 is the
+    # largest, 5,000 is the last dict entry, 3,000 is the truth.
+    fold = costs_mod.Fold()
+    # Folded in PATH order, which is NOT time order: a run spans several
+    # transcripts, they are read sorted by name, and the last one read can hold
+    # the oldest rows.
+    costs_mod._fold_record(_assistant("msg_big", 9000,
+                                      stamp="2026-07-31T10:00:00.000Z"), fold)
+    costs_mod._fold_record(_assistant("msg_latest", 3000,
+                                      stamp="2026-07-31T12:00:00.000Z"), fold)
+    costs_mod._fold_record(_assistant("msg_oldest", 5000,
+                                      stamp="2026-07-31T09:00:00.000Z"), fold)
+    summary = costs_mod.summarize(fold)
+    check(summary["contextFinal"] == 3000,
+          f"the final level is the greatest-TIMESTAMP turn — not the largest "
+          f"(9000) and not the last entry folded (5000) "
+          f"(got {summary['contextFinal']})")
+    check(summary["contextFinalTs"] == "2026-07-31T12:00:00+00:00",
+          f"stamped with that record's OWN timestamp, never a wall clock "
+          f"(got {summary['contextFinalTs']})")
+    check(summary["contextPeak"] == 9000,
+          f"the peak is the max over the same turns (got {summary['contextPeak']})")
+    check(summary["contextFinal"] < summary["contextPeak"],
+          "a level BELOW its own peak is correct, not a bug: occupancy is "
+          "non-monotonic — a compaction lowers it — and `final` is never "
+          "clamped up to `peak`")
+    check(summary["contextIntegral"] == 17000,
+          f"and the integral still sums all three, untouched by any of it "
+          f"(got {summary['contextIntegral']})")
+    # The timestamp tie-break: fold position, i.e. (path order, line number).
+    # Every record in the frozen corpus shares one millisecond, so without this
+    # the answer there would depend on dict iteration order.
+    #
+    # Asserted in BOTH arrangements, and that is the whole point of the pair.
+    # One arrangement cannot tell "later fold position wins" from three other
+    # rules that happen to agree with it — a `>=` on the timestamp with no
+    # ordinal term at all, "largest wins", "first folded wins". Swapping the
+    # two turns and demanding the answer swap with them kills all three at
+    # once, because no rule but fold position answers 2000 here and 4000 there.
+    for first, second, want in ((4000, 2000, 2000), (2000, 4000, 4000)):
+        tied = costs_mod.Fold()
+        costs_mod._fold_record(_assistant("msg_first", first,
+                                          stamp="2026-07-31T10:00:00.000Z"), tied)
+        costs_mod._fold_record(_assistant("msg_second", second,
+                                          stamp="2026-07-31T10:00:00.000Z"), tied)
+        got_tie = costs_mod.summarize(tied)["contextFinal"]
+        check(got_tie == want,
+              f"two turns stamped to the same millisecond resolve by fold "
+              f"position — the order the bytes are on disk, not the order a "
+              f"dict iterates, not the larger of the two, not the first seen "
+              f"(folded {first} then {second}, wanted {want}, got {got_tie})")
+    # A turn nothing could PLACE cannot win "latest" — the same floor direction
+    # `note_undated` takes — but it is still a real reading, so it counts for
+    # the peak, which needs no ordering at all.
+    undated = costs_mod.Fold()
+    costs_mod._fold_record(_assistant("msg_dated", 1000,
+                                      stamp="2026-07-31T10:00:00.000Z"), undated)
+    costs_mod._fold_record(_assistant("msg_undated", 8000), undated)
+    got = costs_mod.summarize(undated)
+    check(got["contextFinal"] == 1000 and got["contextFinalTs"] is not None,
+          f"an undated turn never becomes 'the latest' by default "
+          f"(got {got['contextFinal']})")
+    check(got["contextPeak"] == 8000,
+          f"but it still counts for the peak, which needs no ordering "
+          f"(got {got['contextPeak']})")
+
+
+def test_an_unmeasured_context_level_is_absent_never_zero():
+    print("test_an_unmeasured_context_level_is_absent_never_zero")
+    # The defining discipline: unknown is spelled as an ABSENCE. A fabricated
+    # or guessed number on a card is worse than showing nothing, and `0` is the
+    # most fabricable number there is — `<synthetic>` turns carry all-zero
+    # usage and a transcript can END on one, so a reader that took the last
+    # turn unconditionally reports a busy agent as empty.
+    synthetic = costs_mod.Fold()
+    costs_mod._fold_record(
+        {"type": "assistant", "timestamp": "2026-07-31T10:00:00.000Z",
+         "message": {"id": "msg_s", "model": "<synthetic>",
+                     "usage": {"input_tokens": 0, "output_tokens": 1,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0}}}, synthetic)
+    summary = costs_mod.summarize(synthetic)
+    check(summary["contextPeak"] is None and summary["contextFinal"] is None
+          and summary["contextFinalTs"] is None,
+          f"a fold whose only turn is `<synthetic>` reports None, never 0 "
+          f"(got peak={summary['contextPeak']!r}, "
+          f"final={summary['contextFinal']!r})")
+    check(summary["contextByOwner"] == {},
+          f"and the owner is ABSENT from contextByOwner rather than present "
+          f"with a zero (got {summary['contextByOwner']!r})")
+    check(summary["agents"] == 1 and summary["turns"] == 1,
+          f"while still being counted as an agent that took a turn — the "
+          f"absence is about the LEVEL, not about the agent "
+          f"(got {summary['agents']} agents, {summary['turns']} turns)")
+    # A mixed fold: the agent with a real turn is present, the synthetic-only
+    # one is not, and neither answer is a zero.
+    mixed = costs_mod.Fold()
+    costs_mod._fold_record(
+        dict(_assistant("msg_real", 2000, stamp="2026-07-31T10:00:00.000Z"),
+             agentId="busy"), mixed)
+    costs_mod._fold_record(
+        {"type": "assistant", "timestamp": "2026-07-31T10:00:00.000Z",
+         "agentId": "quiet",
+         "message": {"id": "msg_s2", "model": "<synthetic>",
+                     "usage": {"input_tokens": 0, "output_tokens": 1,
+                               "cache_read_input_tokens": 0,
+                               "cache_creation_input_tokens": 0}}}, mixed)
+    by_owner = costs_mod.summarize(mixed)["contextByOwner"]
+    check(sorted(by_owner) == ["busy"],
+          f"one owner measured, one owner unknown, and unknown is an absent "
+          f"key (got {sorted(by_owner)})")
+    check(by_owner["busy"] == {"peak": 2000, "final": 2000,
+                               "ts": "2026-07-31T10:00:00+00:00"},
+          f"the measured one carries its peak, its level and the instant it "
+          f"was read at (got {by_owner['busy']})")
+    # An id that is not a real `msg_…` is not a billed assistant turn, and the
+    # level rule says so in as many words. The money block still counts it.
+    aliased = costs_mod.Fold()
+    costs_mod._fold_record(_assistant("m1", 2000,
+                                      stamp="2026-07-31T10:00:00.000Z"), aliased)
+    alias_summary = costs_mod.summarize(aliased)
+    check(alias_summary["contextFinal"] is None
+          and alias_summary["contextIntegral"] == 2000,
+          f"a non-`msg_` id yields no level, while the integral still counts "
+          f"it (got final={alias_summary['contextFinal']!r}, "
+          f"integral={alias_summary['contextIntegral']})")
+    # The human rendering says nothing rather than something wrong: a
+    # fixed-width row has no spelling of "unknown" a reader will not quote back
+    # as a number.
+    blank = costs_mod.render({"corpus": "present", "runId": "wf_x",
+                              "agentsSummary": summary, "driver": None})
+    check("context final" not in blank,
+          f"and `render` prints no level line at all when none was measured "
+          f"(got {blank!r})")
+
+
+def test_the_level_refuses_what_the_money_reading_floors():
+    print("test_the_level_refuses_what_the_money_reading_floors")
+    # The level is a SECOND reading of the same bytes, and it has to be: the
+    # money reader coerces a `null` component to 0, which is the right floor
+    # for a sum and a fabricated measurement for an instant. A row that says
+    # nothing must produce no level — while still being counted as a turn and
+    # still contributing its (floored) tokens to the integral, because the
+    # money block's job is unchanged.
+    stamp = "2026-07-31T10:00:00.000Z"
+
+    def _fold_usage(usage):
+        one = costs_mod.Fold()
+        costs_mod._fold_record(
+            {"type": "assistant", "timestamp": stamp,
+             "message": {"id": "msg_n", "model": "claude-opus-5",
+                         "usage": usage}}, one)
+        return costs_mod.summarize(one)
+
+    nulled = _fold_usage({"input_tokens": 24502, "output_tokens": 9,
+                          "cache_creation_input_tokens": 0,
+                          "cache_read_input_tokens": None})
+    check(nulled["contextFinal"] is None and nulled["contextPeak"] is None
+          and nulled["contextFinalTs"] is None
+          and nulled["contextByOwner"] == {},
+          f"a `null` component yields NO level — 24,502 tok of it is a number "
+          f"nobody measured, and publishing one is the whole defect this "
+          f"reading exists to refuse (got final={nulled['contextFinal']!r}, "
+          f"peak={nulled['contextPeak']!r})")
+    check(nulled["turns"] == 1 and nulled["contextIntegral"] == 24502,
+          f"while the money block reads it exactly as it always did: one turn, "
+          f"the null floored to 0 (got {nulled['turns']} turns, integral "
+          f"{nulled['contextIntegral']})")
+    # A `bool` is an `int` SUBCLASS, so `isinstance` would read `true` as 1 —
+    # and a float is not a token count at all. Both refuse the row outright for
+    # money too, so the level's absence here is belt-and-braces; it is pinned
+    # because the two readers must not drift apart on it.
+    for bad in ({"input_tokens": 100, "output_tokens": 9,
+                 "cache_creation_input_tokens": True,
+                 "cache_read_input_tokens": 0},
+                {"input_tokens": 12.5, "output_tokens": 9,
+                 "cache_creation_input_tokens": 0,
+                 "cache_read_input_tokens": 0}):
+        got = _fold_usage(bad)
+        check(got["contextFinal"] is None and got["contextPeak"] is None,
+              f"a bool and a float are not token counts and yield no level "
+              f"(usage {bad}, got {got['contextFinal']!r})")
+    # And a component that simply is not there: three keys are the arithmetic,
+    # so two of them is not a reading of it.
+    partial = _fold_usage({"input_tokens": 5000, "output_tokens": 9,
+                           "cache_read_input_tokens": 1000})
+    check(partial["contextFinal"] is None,
+          f"a `usage` missing a component says nothing about the whole prompt "
+          f"(got {partial['contextFinal']!r})")
+
+
+def test_the_level_reads_one_api_call_out_of_a_multi_iteration_usage():
+    print("test_the_level_reads_one_api_call_out_of_a_multi_iteration_usage")
+    # GD-LC-2's last clause, and the one place money and the level are SUPPOSED
+    # to disagree. When `usage.iterations` holds more than one entry the top
+    # level aggregates several API calls: every one of them was billed, so the
+    # sum is the right bill — and it is a prompt that never existed, so it is
+    # the wrong level. The level reads `iterations[-1]`, which is unambiguously
+    # one call's prompt whichever way the top level was computed.
+    fold = costs_mod.Fold()
+    costs_mod._fold_record(
+        {"type": "assistant", "timestamp": "2026-07-31T10:00:00.000Z",
+         "message": {"id": "msg_it", "model": "claude-opus-5",
+                     "usage": {"input_tokens": 300, "output_tokens": 40,
+                               "cache_creation_input_tokens": 1200,
+                               "cache_read_input_tokens": 4500,
+                               "iterations": [
+                                   {"input_tokens": 100,
+                                    "cache_creation_input_tokens": 1000,
+                                    "cache_read_input_tokens": 1000},
+                                   {"input_tokens": 100,
+                                    "cache_creation_input_tokens": 100,
+                                    "cache_read_input_tokens": 1500},
+                                   {"input_tokens": 100,
+                                    "cache_creation_input_tokens": 100,
+                                    "cache_read_input_tokens": 2000}]}}}, fold)
+    summary = costs_mod.summarize(fold)
+    check(summary["contextFinal"] == 2200 and summary["contextPeak"] == 2200,
+          f"the level is the LAST iteration's prompt (100 + 100 + 2000), not "
+          f"the 6,000-token aggregate of three calls — 2.73× high here, and "
+          f"in the overstating direction (got {summary['contextFinal']})")
+    check(summary["contextIntegral"] == 6000,
+          f"while the integral keeps the top-level sum, because every one of "
+          f"those iterations was billed and the money arithmetic is unchanged "
+          f"(got {summary['contextIntegral']})")
+    # A `len == 1` list, and no list at all, both read the top level — which is
+    # how every sampled row on this machine behaves.
+    for iterations in ([{"input_tokens": 1, "cache_creation_input_tokens": 1,
+                         "cache_read_input_tokens": 1}], None):
+        usage = {"input_tokens": 500, "output_tokens": 5,
+                 "cache_creation_input_tokens": 0,
+                 "cache_read_input_tokens": 1500}
+        if iterations is not None:
+            usage["iterations"] = iterations
+        single = costs_mod.Fold()
+        costs_mod._fold_record(
+            {"type": "assistant", "timestamp": "2026-07-31T10:00:00.000Z",
+             "message": {"id": "msg_one", "model": "claude-opus-5",
+                         "usage": usage}}, single)
+        got = costs_mod.summarize(single)["contextFinal"]
+        check(got == 2000,
+              f"a single-entry `iterations` (and an absent one) reads the TOP "
+              f"level (wanted 2000, got {got})")
+    # A malformed `iterations` is refused rather than fallen back on: falling
+    # back to the aggregate would be answering the question with the number the
+    # clause exists to reject.
+    junk = costs_mod.Fold()
+    costs_mod._fold_record(
+        {"type": "assistant", "timestamp": "2026-07-31T10:00:00.000Z",
+         "message": {"id": "msg_junk", "model": "claude-opus-5",
+                     "usage": {"input_tokens": 500, "output_tokens": 5,
+                               "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 1500,
+                               "iterations": ["nonsense", "more"]}}}, junk)
+    check(costs_mod.summarize(junk)["contextFinal"] is None,
+          "an `iterations` list this reader cannot parse yields no level, "
+          "rather than silently falling back to the aggregate it rejects")
+
+
+def test_the_level_keys_are_additive_and_the_money_block_is_untouched():
+    print("test_the_level_keys_are_additive_and_the_money_block_is_untouched")
+    # The regression arm. Every figure the money era pinned by hand is asserted
+    # again, unchanged, beside the four new keys — because "levels were added"
+    # and "the cost reader still reports the same cost" are two claims and the
+    # second is the one a release gate leans on.
+    summary = analyze_corpus()["agentsSummary"]
+    check(set(summary) == MONEY_ERA_KEYS | LEVEL_KEYS,
+          f"the summary gained exactly four keys and renamed none "
+          f"(unexpected: {sorted(set(summary) ^ (MONEY_ERA_KEYS | LEVEL_KEYS))})")
+    check(not (LEVEL_KEYS & set(summary["dollars"])),
+          f"and not one of them landed inside the money block, whose "
+          f"documented invariant — every figure is a floor — is a claim about "
+          f"a SUM and says nothing about an instant "
+          f"(got {sorted(summary['dollars'])})")
+    check(summary["contextIntegral"] == EXPECTED["contextIntegral"],
+          f"the context-integral is byte-identical to its hand-computed value "
+          f"({EXPECTED['contextIntegral']}, got {summary['contextIntegral']})")
+    close(summary["baselinePerTurn"], EXPECTED["baselinePerTurn"],
+          "so is the baseline")
+    for name, want in sorted(EXPECTED["dollars"].items()):
+        close(summary["dollars"][name], want, f"and every dollar figure ({name})")
+    for name, want in sorted(EXPECTED["tokens"].items()):
+        check(summary["tokens"][name] == want,
+              f"and every token total (tokens.{name} == {want}, got "
+              f"{summary['tokens'][name]})")
+    for name, want in sorted(EXPECTED_LEVEL.items()):
+        check(summary[name] == want,
+              f"{name} == {want!r} (got {summary[name]!r})")
+    # The two questions are different arithmetic over the same turns. Asserting
+    # `peak < integral` would be asserting arithmetic — a max over terms of a
+    # sum of positives cannot exceed it — so the claim made here is the one a
+    # reader could actually get wrong: the peak is not a TERM of the integral
+    # you would reach for (it is not the last turn's, nor the largest owner's
+    # total), and the two are not each other's sanity check.
+    check(summary["contextPeak"] != summary["contextIntegral"]
+          and summary["contextPeak"] != summary["contextFinal"]
+          and summary["contextPeak"] != sum(
+              one["final"] for one in summary["contextByOwner"].values()),
+          f"the peak is its own number: not the integral "
+          f"({summary['contextIntegral']}), not the final level "
+          f"({summary['contextFinal']}), not a sum across owners — a level is "
+          f"never an aggregate of levels (got {summary['contextPeak']})")
+    # The one `render()` line, and the rule about where it may sit: a reader
+    # scanning a money column reads every number in it as money.
+    rendered = costs_mod.render(analyze_corpus()).splitlines()
+    matches = [i for i, line in enumerate(rendered) if "context final" in line]
+    check(len(matches) == 1,
+          f"the level is rendered on exactly ONE line (got {len(matches)})")
+    if matches:
+        row = matches[0]
+        check(f"{EXPECTED_LEVEL['contextFinal']:,} tok" in rendered[row]
+              and EXPECTED_LEVEL["contextFinalTs"] in rendered[row],
+              f"which carries the number and the instant it was read at "
+              f"(got {rendered[row]!r})")
+        # …and WHOSE it is. Every other figure in that block is a run-wide
+        # fact; this one is one agent's window, and a line that did not say so
+        # would be quoted back as "the run's context".
+        check("(a00000000000000a3)" in rendered[row],
+              f"and names the agent it belongs to, because a level is never a "
+              f"run-wide aggregate (got {rendered[row]!r})")
+        neighbours = [rendered[i].strip() for i in (row - 1, row + 1)
+                      if 0 <= i < len(rendered)]
+        check(not any(one.startswith("$") for one in neighbours),
+              f"and never sits next to a dollar figure (got {neighbours})")
+
+
+def test_the_drivers_level_carries_the_scope_that_produced_it():
+    print("test_the_drivers_level_carries_the_scope_that_produced_it")
+    # A sliced final turn is not "the driver's context now". The driver fold is
+    # bounded to the run's window, so the close-out tail after the last agent
+    # record is outside it — and under `--driver-whole-session` the last turn
+    # may belong to another run altogether. Either way the number needs the
+    # label that produced it.
+    report = analyze_corpus()
+    driver = report["driver"]
+    check(driver.get("contextScope") == report["driverScope"] == "run window",
+          f"the driver's level inherits the scope beside it "
+          f"(got {driver.get('contextScope')!r} vs "
+          f"{report['driverScope']!r})")
+    check("contextFinalScope" not in driver,
+          "and the key is named for the BLOCK it scopes, not for one of the "
+          "four keys in it — all four are computed over the same sliced fold, "
+          "so a `contextFinal`-shaped name would leave a reader of "
+          "`contextPeak` looking for a label that was never written")
+    check(driver["contextFinal"] == 910 and driver["contextPeak"] == 910,
+          f"and is measured over the same slice the driver's dollars are "
+          f"(got final={driver['contextFinal']}, peak={driver['contextPeak']})")
+    whole = analyze_corpus(whole_session=True)
+    check(whole["driver"].get("contextScope") == whole["driverScope"]
+          == "whole session",
+          f"declining the slice relabels the level too, rather than leaving it "
+          f"claiming to be the run's (got "
+          f"{whole['driver'].get('contextScope')!r})")
+    # And it is never PRINTED as a bare number: the human row is one line of
+    # dollars and turns, and an unlabelled level in it would read as the run's.
+    rendered = costs_mod.render(report)
+    check(rendered.count("context final") == 1,
+          f"the rendering prints the run's level once and the driver's not at "
+          f"all — the label lives in the JSON, the number stays out of the "
+          f"money row (got {rendered.count('context final')})")
 
 
 def test_the_rendering_reports_every_degradation_it_measured():
@@ -1643,6 +2091,12 @@ def main():
         test_a_dated_model_id_resolves_to_the_model_it_names,
         test_the_two_diagnostics_are_counted_per_turn_not_per_record,
         test_a_zero_context_turn_never_drags_an_agents_baseline,
+        test_the_context_level_is_the_latest_turn_not_the_largest_or_the_last_one,
+        test_an_unmeasured_context_level_is_absent_never_zero,
+        test_the_level_refuses_what_the_money_reading_floors,
+        test_the_level_reads_one_api_call_out_of_a_multi_iteration_usage,
+        test_the_level_keys_are_additive_and_the_money_block_is_untouched,
+        test_the_drivers_level_carries_the_scope_that_produced_it,
         test_the_rendering_reports_every_degradation_it_measured,
         test_the_cache_write_ttl_split_is_priced_at_two_different_rates,
         test_a_cache_write_with_no_ttl_split_is_assumed_and_counted,

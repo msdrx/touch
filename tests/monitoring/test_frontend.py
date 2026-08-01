@@ -335,6 +335,7 @@ def main():
     perf_guards(src)
     roster_guards(src)
     editico_guards(src)
+    ctx_guards(src)
     memory_guards(src)
     memory_driven()
 
@@ -808,6 +809,263 @@ def editico_guards(src):
         "EDITICO: the strike is hidden by default (editor loops show the plain pencil)"
     assert ".card h2 .editico.readonly .strike" in src, \
         "EDITICO: the readonly variant reveals the strike"
+
+
+def ctx_guards(src):
+    """CTX (GD-LC-8/GD-LC-9): the per-agent context-occupancy meter.
+
+    The whole feature's failure mode is a number that LOOKS right, so the
+    valuable assertions here are the NEGATIVE ones — the positive path is
+    obvious in review and the fallback is not. In priority order, with the
+    R-58 line first: the denominator comes from the wire, no window constant
+    may be literal in this page, and where there is no declared window the row
+    names the MODEL that produced the reading rather than guessing a capacity.
+    """
+    # ---- 1. THE R-58 LINE: no client-side window constant, anywhere ----
+    # On this machine a fallback to 200,000 renders a healthy 522k agent as
+    # "261 % full" — a fabricated number on a card, which is worse than showing
+    # nothing at all.
+    for lit in ("200000", "200_000", "1000000", "1_000_000"):
+        assert lit not in src, (
+            f"CTX/R-58: the window constant {lit} must not be literal in monitor.html — "
+            "the denominator comes from the wire's `cap` or there is no denominator "
+            "(no model-to-window table, no >200k promotion, no fallback ever)")
+    ctx = _slice(src, "const CTX_STATES", "function isOrchCard")
+    assert not re.search(r"(?<![\d.])\d{5,}(?![\d.])", ctx), \
+        "CTX/R-58: no five-digit-or-longer literal may appear on the ctx path — " \
+        "every such number would be a guessed context window"
+    # ...and not spelled in exponent form either, which is how a window constant
+    # would most plausibly be smuggled past the digit-count guard above. The
+    # banned range is e4..e8 (10k..100M — every plausible window); ctxNum's own
+    # `1e9` sanity bound is deliberately outside it and stays legal.
+    assert not re.search(r"\d+(?:\.\d+)?e[4-8]\b", ctx), \
+        "CTX/R-58: no exponent-form window constant (2e5 / 1e6) on the ctx path — " \
+        "the digit-count guard above does not see these"
+
+    # ---- 2. no declared window: the row names the MODEL, never a capacity ----
+    # Almost no run declares `context_window`, so this is the state nearly every
+    # reader sees. It used to read `ctx 242k / ? · window unknown` — a question
+    # the page asked itself on every row and could never answer. The model id is
+    # the one capacity-adjacent fact that is MEASURED (it comes off the same
+    # transcript record as the reading), so it is what the row prints.
+    assert "window unknown" not in src, \
+        "CTX: `window unknown` is retired — a row with no declared cap names the model " \
+        "that produced the reading instead of asking after a number nothing supplies"
+    read = _slice(src, "function ctxRead(", "// Percentage is CLIENT-DERIVED")
+    assert re.search(r"model:[^\n]*c\.model[^\n]*CTX_MODEL_MAX", read), \
+        "CTX: ctxRead must carry `model` off the wire, bounded like `src` — the watcher " \
+        "has always sent it (GD-LC-4) and dropping it here is what forced the old fallback"
+    assert re.search(r"label \+=[^\n]*c\.model", ctx) and re.search(r"aria \+=[^\n]*c\.model", ctx), \
+        "CTX: the model must reach BOTH the visible label and the aria-label — a fact that " \
+        "is only in the tooltip is a fact a screen reader and a screenshot both lose"
+    # ...and it is DISPLAY TEXT, never a lookup key. The first comparison against
+    # a model string on this path IS the model-to-window table R-58 forbids, and
+    # it would arrive looking like a one-line convenience.
+    assert "claude" not in ctx.lower(), \
+        "CTX/R-58: no model string may be literal on the ctx path — a model literal here " \
+        "can only be the beginning of a model-to-window table"
+    # `typeof c.model === "string"` is a TYPE check on untrusted wire input and
+    # stays legal; so does `.slice(0, CTX_MODEL_MAX)`, which bounds it. What is
+    # banned is testing the VALUE — equality against a model, or any prefix /
+    # substring probe, which is how a table gets keyed without looking like one.
+    assert not re.search(r"(?<!typeof )c\.model\s*(?:===|!==|==|!=)", ctx), \
+        "CTX/R-58: the model is rendered verbatim and never compared (a truthiness check " \
+        "for 'was it recorded' is the only test allowed on it)"
+    assert not re.search(r"c\.model\.(?:startsWith|endsWith|includes|indexOf|match|split)", ctx), \
+        "CTX/R-58: no prefix/substring probe on the model — `claude-opus-5` vs `[1m]` is " \
+        "exactly the distinction the wire cannot make, which is why there is no table"
+    # The cap's SIZE left the row with the fallback: a declared window still
+    # gives its ratio, its bar and its words, but the number itself is tooltip
+    # material — one figure on the row, and it is the measured one.
+    assert not re.search(r"label \+?=[^\n]*fmtTok\(c\.cap\)", ctx), \
+        "CTX: the label prints the reading, not the declared window — the cap number " \
+        "belongs in the tooltip, where it can carry its own explanation"
+    assert re.search(r"pct === null\) tips\.push\(CTX_TIP_USED", ctx) \
+       and re.search(r'tips\.push\("declared window " \+ fmtTok\(c\.cap\)\)', ctx), \
+        "CTX: every reading explains what it counts — the input-only tip on a capless row " \
+        "(which is most of them) and the declared window number where there is one"
+
+    # ---- 3. the unknown state exists and is the CONSTRUCTED DEFAULT ----
+    assert "ctx —" in src and '"actx off"' in src, \
+        "CTX: a row that never gets a reading must render `ctx —` from the start — " \
+        "the default is unknown, never a 0 %-shaped mark"
+    assert 'className = "actx off"' in _slice(src, "function ctxEl(", "function ctxRender("), \
+        "CTX: ctxEl builds the off state directly (no bar child, no number)"
+
+    # ---- 4. no silent zero coercion anywhere on the ctx path ----
+    # snapNum bans `| 0` for ToInt32 reasons; here the ban is about MEANING —
+    # coercing a bad field to 0 turns "I do not know" into "it is empty".
+    # Spelled as a regex rather than two substrings: `|0` and `||0` (no space)
+    # are the very forms a reformatting or minifying edit produces, and they
+    # would have walked straight past the literal-substring version of this.
+    assert not re.search(r"\|\|?\s*0\b", ctx), \
+        "CTX: no `| 0` / `|| 0` (in any spacing) on the ctx path — 0 is the one lie " \
+        "this reading may not tell"
+    assert 'isFinite(v) && v > 0' in ctx, \
+        "CTX: validation is snapNum-shaped (finite, positive), never a coercion"
+
+    # ---- 5. the state whitelist is the only source of the class name ----
+    assert re.search(r"CTX_STATES\s*=\s*\[", src), "CTX: a CTX_STATES whitelist must exist"
+    states = _slice(src, "const CTX_STATES", "\n")
+    for st in ("off", "nowin", "ok", "near", "over", "final", "stale"):
+        assert f'"{st}"' in states, f"CTX: CTX_STATES must include {st!r}"
+    assert "CTX_STATES.includes(" in ctx, \
+        "CTX: the rendered class must be filtered through the whitelist (agent.ctx is untrusted)"
+    assert "actx ${" not in src and "actx '+" not in src, \
+        "CTX: no stream text may be interpolated into the .actx class attribute (FRONTEND-1)"
+    # not-live beats threshold, in ONE ordered chain
+    stfn = _slice(src, "function ctxState(", "function ctxEl(")
+    assert stfn.find('"stale"') < stfn.find('"near"') and stfn.find('"final"') < stfn.find('"near"'), \
+        "CTX: not-live states must be decided BEFORE the threshold states — a settled row " \
+        "must never wear a live 'near limit'"
+
+    # ---- 6. accessibility: role=img with a self-written label, never progressbar ----
+    assert "progressbar" not in src, \
+        "CTX: role=\"progressbar\" announces progress toward a goal the user is waiting for " \
+        "and may carry a completion affordance — context filling up is neither"
+    assert '"role", "img"' in ctx and '"aria-label"' in ctx, \
+        "CTX: the meter is role=img with an aria-label the renderer rewrites"
+    assert "percent" in ctx, "CTX: the aria-label spells 'percent' (the visible text uses '%')"
+
+    # ---- 7. token-only CSS: no literal hex in any .actx rule (both themes) ----
+    assert not re.search(r"\.actx[^{}]*\{[^}]*#[0-9a-fA-F]{3,8}", src), \
+        "CTX: .actx rules must use the page's colour tokens only — a literal hex breaks " \
+        "one of the two themes"
+
+    # ---- 8. --failed appears in EXACTLY ONE ctx rule, and that rule is .over ----
+    # --failed is this page's terminal-verdict colour. Painting a healthy agent
+    # with it would put a verdict colour on a non-verdict fact.
+    actx_rules = [(sel, body) for sel, body in re.findall(r"([^{}\n]*\.actx[^{}]*)\{([^}]*)\}", src)]
+    assert actx_rules, "CTX: the .actx CSS rules must exist"
+    reds = [sel for sel, body in actx_rules if "--failed" in body]
+    assert len(reds) == 1 and ".over" in reds[0], \
+        "CTX: --failed must appear in exactly one ctx rule and its selector must be .over " \
+        f"(found {reds!r}) — a later 'make it red at 95%' edit must fail the build"
+
+    # ---- 9. a hydrated row restores the meter (or v2 disagrees with ?snap=0) ----
+    hyd = _slice(src, "function hydratePlan(", "// ---- ?snap=verify")
+    assert "a.ctx" in hyd and "ctxRender(row)" in hyd, \
+        "CTX/GD-LC-9: snapshot hydration must restore the reading through the SAME renderer " \
+        "the live path uses — otherwise a default connect shows no meters where a full " \
+        "replay of the same bytes shows them"
+
+    # ---- 10. ?snap=verify covers the new field ----
+    shadow = _slice(src, "function shadowApply(", "function ctxDigest(")
+    assert "ctx" in shadow, \
+        "CTX/GD-LC-9: the shadow fold must carry ctx, or verify reports ✓ over a snapshot " \
+        "that dropped every reading"
+    vd = _slice(src, "function ctxDigest(", "function verifyReport")
+    assert "join(" in vd and "+" not in vd.split("return")[1].split("\n")[0], \
+        "CTX: the digest term is the ordered VALUES joined, never a sum (a sum collides)"
+    assert "ctxDigest(" in _slice(src, "function verifyReport", "// Refresh rate:"), \
+        "CTX: both digest rows must carry the per-plan ctx term"
+
+    # ---- 11. a settled card cannot keep a live meter (the FRONTEND-2 twin) ----
+    freeze = _slice(src, "function freezePlan", "// Card time span")
+    assert "ctxRender(row)" in freeze, \
+        "CTX: freezePlan must re-render the meters it stales, or a settled card keeps a " \
+        "live amber gauge until the tab is reloaded"
+
+    # ---- 12. the threshold discloses that it is Touch's arithmetic ----
+    assert "near limit" in src and "not a harness limit" in src, \
+        "CTX: the 90 % threshold is a fact about the displayed ratio and the tooltip must " \
+        "say so — Touch does not know where compaction happens"
+    assert "% of window, input-only" in src, \
+        "CTX: the figure is labelled '% of window, input-only' (Claude Code's own two " \
+        "displays disagree; Touch reproduces the DOCUMENTED formula)"
+
+    # ---- 13. under 640 px the bar is dropped and the number kept ----
+    narrow = _slice(src, "@media (max-width: 640px)", "@media (prefers-reduced-motion")
+    assert ".agents .actx .bar { display:none" in narrow, \
+        "CTX: the 640 px block must drop the bar (never shrink it — a 20 px meter cannot " \
+        "resolve 46 % from 54 %) and keep the number"
+
+    # ---- 14. a row-STATE transition must mark the meter dirty ----
+    # ctxState reads row.state, so the state is an INPUT to the render that must
+    # also be able to TRIGGER it. Without this, `final` is unreachable on the
+    # live path: a terminal done/failed event carrying no ctx block (the watcher
+    # emits several) leaves the row wearing its last live class and the words
+    # "· near limit" on a card that has finished — the exact rule GD-LC-8 puts
+    # in bold, unenforced. No behavioural test can see it; every page assertion
+    # here is source text.
+    ups = _slice(src, "function upsertAgent(", "// events.jsonl is a multi-writer")
+    st_arm = ups.split("if (a.state)")[1].split("if (a.tokens)")[0]
+    assert "ctxDirty" in st_arm, \
+        "CTX/GD-LC-8: a row-STATE transition must mark the meter dirty — otherwise " \
+        "`final` is unreachable and a settled row keeps a live 'near limit'"
+
+    # ---- 15. the peak tile may not print a ratio over its own declared window ----
+    # ctxPeak is a HISTORICAL high; ctxPeakCap is that row's CURRENT cap, and
+    # GD-LC-6 #3 makes them diverge (cap is omitted only on the tick where
+    # used > cap). Dividing them silently prints "125% of 200k" while the row
+    # itself renders `ok` — the page contradicting itself in two places at once.
+    peak = _slice(src, 'setStat("ctxPeak"', "setStat(\"plansDone\"")
+    assert "ctxPeak > ctxPeakCap" in peak and "over declared window" in peak, \
+        "CTX/GD-LC-6: the peak tile must say 'over declared window' rather than print a " \
+        ">100 % ratio — the peak and the cap are not co-temporal"
+
+    # ---- 16. GD-LC-7 on the tile is enforced by POSITION; pin the position ----
+    # The watcher emits an abandoned UNCLASSIFIED agent under plan="orchestrator"
+    # WITH a ctx block, so a peak scan that ran above the orchestrator `continue`
+    # would name, in the one tile, a number belonging to the one card that
+    # renders no meter at all.
+    stats = _slice(src, "function statsRender()", 'setStat("ctxPeak"')
+    assert stats.index('id === "orchestrator") continue') < stats.index("row.ctx"), \
+        "CTX/GD-LC-7: the peak-context scan must sit BELOW the orchestrator `continue` — " \
+        "the driver card feeds no aggregate, and its rows can carry a ctx block"
+
+    # ---- 17. the longest label on the row controls its own wrapping ----
+    assert re.search(r"\.agents \.actx \{[^}]*white-space:nowrap", src), \
+        "CTX: .actx needs white-space:nowrap like .alabel and .atok — its label is the " \
+        "longest string on the row and an inline-flex breaks it between bar and number"
+
+    # ---- 18. staleness is an AGE that advances, never a frozen clock ----
+    # GD-LC-12 renders a live row as `ctx N · as-of age`. An hour+minute clock
+    # reads as *today* whatever day it was; an age that renders once and then
+    # freezes is worse still, because it keeps asserting a freshness that is
+    # expiring. So: the age is in the unchanged-guard key, and the live tick
+    # re-renders every row that has a reading, not only the staled ones.
+    assert "fmtClock" not in ctx, \
+        "CTX/GD-LC-12: the ctx path reports an AGE, not a wall clock — fmtClock is " \
+        "hour+minute only and a three-day-old reading would read as today"
+    assert re.search(r"const key = .*ageTxt", ctx), \
+        "CTX: the age must join the unchanged-guard key, or it renders once and freezes"
+    tick = _slice(src, "const LIVE_TICK_MS", "// Freeze a closing plan card")
+    assert "if (row.ctx && row.ctxEl) ctxRender(row);" in tick, \
+        "CTX/GD-LC-12: the live tick must age EVERY row that holds a reading — the row " \
+        "that needs it most is a live one whose transcript went unreadable, where the " \
+        "reading correctly stands and only its own `at` says how old it is"
+
+    # ---- 19. an over-window ratio is never printed WITHOUT its word ----
+    # `over declared window` is a data-integrity statement about the
+    # DECLARATION, not a threshold word, so the not-live-beats-threshold rule
+    # governs only its COLOUR (a settled row stays muted, never the terminal
+    # verdict red). It must not also buy silence: a settled row whose reading
+    # exceeded its declared window would otherwise print a bare `· 125%` — the
+    # same unexplained over-100 % ratio guard 15 keeps off the peak tile. The
+    # disclosure therefore follows the FACT (`used > cap`), not the state name.
+    rend = _slice(src, "function ctxRender(", "// The orchestrator card is the DRIVER")
+    assert rend.count("c.used > c.cap") >= 2, \
+        "CTX: the over-declared-window disclosure must key on `used > cap` (label AND " \
+        "tooltip), not on the state name — a settled or staled row is still over its window"
+    assert 'st === "over") tips.push' not in rend, \
+        "CTX: the over-window tooltip must not be gated behind the `over` STATE — " \
+        "not-live wins the colour, never the silence"
+
+    # ---- the rest of the UI contract: where the meter is NOT ----
+    assert "ctxRender(row)" in _slice(src, "function flushDirty", "// The timeplan strip"), \
+        "CTX: the meter renders on the coalesced flushDirty path, never per event"
+    row = _slice(src, "function agentRow(", "// Source-impact icon")
+    assert "isOrchCard(p) ? null : ctxEl()" in row, \
+        "CTX/GD-LC-7: the driver/orchestrator card renders NO occupancy — not even a dash"
+    assert '{ id: "ctxPeak", label: "peak context" }' in src, \
+        "CTX: the one sanctioned aggregate is the peak-context stats tile"
+    assert "no context readings in this stream" in src, \
+        "CTX: the peak tile says so honestly when the stream carried no reading"
+    flowsl = _slice(src, "function renderFlow", "// FRONTEND-RENDER-9")
+    assert "ctx" not in flowsl, \
+        "CTX/GD-LC-8: nothing context-shaped may reach the flow strip — a role node folds " \
+        "several attempts into one chip"
 
 
 # ---- memory manager ----------------------------------------------------------

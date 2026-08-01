@@ -11,6 +11,64 @@ development record of what existed before it; no marketplace ever served it and
 no one could install it, so there is no upgrade path from it to document and
 nothing to migrate. If you installed Touch at all, you installed 0.2.0 or later.
 
+## 0.2.3
+
+Still no session verb, and the memory editor's save side still ships disabled
+until you start the dashboard with `--allow-memory-write`. This release adds the
+number that belongs beside the spend: **how full each subagent's context window
+is**. It is a read, not a verb — derived from transcripts Touch already tails,
+carried on the event stream it already writes, starting and stopping nothing.
+
+**Added**
+
+- **Per-agent context occupancy (`agent.ctx`)** on the run dashboard's agent
+  rows and in the session view — the prompt the model re-read on its most recent
+  request (`input + cache_creation + cache_read` of the last qualifying
+  assistant record, output excluded: the arithmetic Claude Code's own status
+  line documents, so a card and your status line agree digit-for-digit). It is a
+  **level at an instant**, not a total, and it is deliberately unlike the token
+  counters beside it: nothing sums it, deltas it, maxes it across agents or
+  clamps it, because a compaction legitimately moves it *down*. A missing
+  reading is spelled by rendering nothing — never a `0`, which would claim an
+  empty window no live agent has. Scope is Workflow subagents; the orchestrator
+  card shows none, because a session-scoped figure would be a false statement
+  about the run.
+- **`context_window`** in a run's `orch-config.json` under
+  `.touch/local-orchestrators/<task>/` (an int, or a `{model: int}` map; pinned
+  by `ORCH_CONTEXT_WINDOW`) — the ONLY source of the meter's denominator. There
+  is no built-in model→window table and no fallback, so an undeclared window is
+  a normal state: the reading then renders as an absolute figure with no bar and
+  no percentage, and nothing invents one.
+- **`/health.context`** on the aggregator — a rung name (`events` | `absent`)
+  and four counts, so "no number on the card" has a cause an operator can act
+  on. Counts and one enum only: no agent ids, no paths, no task names. The
+  server measures none of it; `decision_watcher.py` is the sole producer.
+- **Context peak and final in the cost reader** — `contextPeak`,
+  `contextFinal`, `contextFinalTs` and `contextByOwner`, outside the money block
+  and never mixed into it.
+
+**Changed**
+
+- **The snapshot fold generation is now 3.** Agent rows fold `agent.ctx`
+  last-wins, whole-object replace, no merge — never the neighbouring token
+  line's monotonic treatment, and never a per-key merge that could keep a stale
+  `cap` alive across a model switch. A page holding generation 2 discards its
+  snapshot and replays.
+- **The reading rides the existing token tick** — same poll, same
+  `token_tick_secs` ceiling, zero new event kinds, zero new event lines, no
+  heartbeat. `--no-tokens` suppresses it along with the tokens, because it is a
+  by-product of exactly the transcript read that flag turns off.
+- **No Mongo field, no migration.** Occupancy is a read-time projection over the
+  `usage` collection that is already mirrored (`sort ts desc, limit 1`), so
+  history gains the reading retroactively and no collection gains a key nobody
+  wrote.
+- **`hooks/agent_lifecycle.py` documents the launch race honestly** — the
+  `PostToolUse` `Workflow` event and the first `SubagentStart` land within
+  ~±35 ms **in either order** (measured against CLI 2.1.220; the earlier "3 ms
+  before" was one sample). When the config write loses, that agent gets no
+  lifecycle line rather than a guessed one, and the watcher derives the same
+  card from the journal a beat later.
+
 ## 0.2.2
 
 Still no session verb, and the memory editor's save side still ships disabled

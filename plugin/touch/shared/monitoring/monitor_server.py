@@ -189,12 +189,21 @@ DEFAULT_TASK = os.path.basename(STATE_DIR.rstrip(os.sep)) or "default"
 # files whenever a fold rule changes; a client that sees a foldGen it does not
 # recognise discards the snapshot and asks for `?snap=0` (full replay) instead
 # of silently rendering a state built by different rules (DATA-MODEL-9).
+#
+# 3 (GD-LC-9): agent rows carry `ctx`, the per-subagent context-occupancy
+# reading. The serialised row shape changed, so an old page against a new
+# server — or the reverse — must discard and ask for a full replay rather than
+# render half a contract. Bumped in monitor.html as ONE change with this one.
 # --------------------------------------------------------------------------
-FOLD_GEN = 2
+FOLD_GEN = 3
 
-# Timeplan thresholds. Mirrored literals of monitor.html:962/964 — the server
-# derives the same segments the page would derive, so they MUST agree; they are
-# part of the fold and therefore covered by FOLD_GEN.
+# Timeplan thresholds. Mirrored literals of monitor.html's TP_IDLE_MS and
+# TP_STALL_MS: the server derives the same segments the page would derive, so
+# they MUST agree; they are part of the fold and therefore covered by FOLD_GEN.
+# The twin is named rather than line-numbered on purpose — monitor.html gains
+# and loses lines constantly, and a rotted number sends the next reader to the
+# wrong function, which is worse than no pointer at all given that
+# DATA-MODEL-9's cross-file pin depends on the twin being findable.
 TP_IDLE_MS = 120000     # no-run gap worth hatching as idle
 TP_STALL_MS = 240000    # run open and the stream silent this long = a stall
 
@@ -601,7 +610,8 @@ class Fold:
 
     @staticmethod
     def _freeze(p) -> None:
-        """monitor.html:570-577 — a closing card freezes its still-running rows."""
+        """monitor.html `function freezePlan` — a closing card freezes its
+        still-running rows."""
         for row in p["agents"].values():
             if row["state"] == "running":
                 row["state"] = "stale"
@@ -614,9 +624,13 @@ class Fold:
         aid = a.get("id")
         row = p["agents"].get(aid)
         if row is None:
+            # `ctx: None`, never `{}`: an empty dict is truthy-shaped downstream
+            # and invites a `{"used": 0}` reconstruction, and 0 is the one lie
+            # this reading may never tell (GD-LC-4: unknown is the key being
+            # ABSENT on the wire; `None` is its fold-internal spelling).
             row = {"label": a.get("label") or aid, "started": a.get("started") or ts,
                    "state": "running", "runtime": None, "finishedMs": None,
-                   "tokens": None}
+                   "tokens": None, "ctx": None}
             p["agents"][aid] = row
         if a.get("started"):
             row["started"] = a["started"]
@@ -627,9 +641,20 @@ class Fold:
                 row["finishedMs"] = ts_ms      # first terminal event stamps it
         if a.get("tokens"):
             row["tokens"] = a["tokens"]        # ABSOLUTE, last-wins (GD-C)
+        if a.get("ctx"):
+            # Last-wins, WHOLE-OBJECT REPLACE, no merge (GD-LC-9). Do not read
+            # symmetry into the line above: `tokens` is cumulative SPEND and
+            # deliberately monotonic, while `ctx` is a LEVEL at an instant and
+            # NON-monotonic — a compaction legitimately lowers it, so nothing
+            # here maxes, sums or clamps it (the D7 monotone clamp must never
+            # touch it). A partial merge is the other trap: it could keep a
+            # stale `cap` alive across a model switch. No staleness logic here
+            # either — ship `used`/`at` and let the page decide, so the two
+            # folds have exactly one new assignment to agree on.
+            row["ctx"] = a["ctx"]
         if a.get("runtime"):
             row["runtime"] = a["runtime"]
-        # monitor.html:518-519, key for key: the ROLE falls back to the id when
+        # monitor.html `function upsertAgent`, key for key: the ROLE falls back to the id when
         # there is no label, the ATTEMPT never does (`parseInt((a.label ||
         # "").split(" #")[1]) || 1`). An id carrying a `#` would otherwise be
         # read as an attempt number here and not on the page.
@@ -753,7 +778,8 @@ class Fold:
                 if stage == "complete":
                     # FRONTEND-3 / GD-F run-complete sweep: a run-level close
                     # settles every still-open sub-plan card. The server lacked
-                    # this; the page has always done it (monitor.html:632-640).
+                    # this; the page has always done it (monitor.html, the
+                    # FRONTEND-3 arm guarded by `if (ev.stage === "complete")`).
                     for other_id, other in self.plans.items():
                         if other_id == "orchestrator" or other is p:
                             continue

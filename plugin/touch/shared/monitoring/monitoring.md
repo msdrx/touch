@@ -23,7 +23,7 @@ Zero third-party dependencies: bash + Python 3 stdlib + a browser.
 | `memory.html` | The memory editor — a separate full page at `/memory` (not an overlay on the dashboard), listing `<project>/.touch/memory/*.md` with size/age, a per-file state machine (`idle → loading → clean → dirty → saving → saved(sha) \| conflict \| error`), one dirty gate over navigation and `beforeunload`, a slow list poll that never overwrites a dirty buffer or fills the wrong editor, and a `409` offering reload / show-both / overwrite rather than a bare retry. Header states the resolved memory root, whether the CLI agrees with it (`aligned`), the caps, and the posture sentence — these files are loaded into every future session in this project. Non-writable rows render disabled **with the reason**; with the write plane off, that is every row |
 | `monitor.html` | Live dashboard — one card per plan, event-driven, no rebuild for updates; header dropdown switches between running tasks live; a header zoom selector (100% default, up to 200%, persisted like the refresh rate) scales the whole task/stats view uniformly via CSS `zoom` (real layout reflow — cards, dials and log text all grow in the same proportion; home never zooms); task page shows a session timeplan strip with time dials (wall-clock bar of agents-working / idle / stall segments derived from event-stream gaps, a 24-hour clock ruler under it, horizontal sliding for multi-day sessions; hovering it draws a time-point cursor line and previews the agents mid-run at that instant) and an artifacts card (pins the final HTML report + the plan document with size/age; every other file sits behind an "all files" popup grouped plan → reports → notes, `.md` opens an in-page preview; each loop card's header carries a "files" pill opening the same popup filtered to that loop's output); the Orchestrator card's fold arrow reveals, above the decision log, a sub-plans bullet list (state dot + name + state, click jumps to that loop's card); a statistics page (`?task=<name>&view=stats`, linked from the timeplan card) shows large-figure run stats — an entire-flow status tile (running/done/failed with a matching state dot, same fold as the home-grid tile: any running plan or agent wins — a failed loop that was resumed never overrides running loops — while idle a failed plan is the verdict, e.g. a loop awaiting the user after its last attempt failed, and all-green folds to done; while running the sub-line reads as progress — settled/all plans, where settled counts green and red both and "all" is `max(cards seen, declared plans_total)` so unstarted plans count — and the green/red breakdown appears only once the run settled), tokens/cache-hit/burn-rate, plans green/red, agents, attempts and retries, agent durations, dead air and stalls |
 | `decision_watcher.py` | Tails a Workflow run's `journal.jsonl`; emits orchestrator decision events + per-agent token accounting into `events.jsonl` |
-| `orch-config.json` | Optional config: `wf_dir` (workflow transcript dir), `port`, attempt caps `max_plan_attempts` (default 4) / `max_gate_attempts` (default 3) / `max_e2e_attempts` (default 3) / `max_finalgate_attempts` (default 2) that the decision watcher quotes in its retry/exhausted narration, the live token-tick cadence cap `token_tick_secs` (seconds; **default 15**, `0` = no ceiling, i.e. the pre-cadence behavior: a delta line on every poll tick that has a non-zero delta — the env var `ORCH_TOKEN_TICK_SECS` pins the value and WINS over this key, so an operator debugging a live run is never overridden by a config the orchestrator script republishes; a negative value reads as `0`), and `strategy` (`parallel` \| `sequential` \| legacy `serial`, which is the only value that re-enables the retired sequenced plan-close heuristic — **no reference template publishes it**, so that branch is reachable only from a hand-written legacy config; do not "fix" a template to emit `serial`, it resurrects the fabricated `plan failed` badge). The watcher **re-reads this file whenever its mtime moves**, so an orchestrator script that publishes its own caps after the daemons started is still honored (it logs `config reloaded: …`). The **first `orch-config.json` that exists** wins outright — task dir, then the module dir — and if it does not parse the watcher keeps the documented defaults, warns on stderr, and re-reads that same file when it is repaired |
+| `orch-config.json` | Optional config: `wf_dir` (workflow transcript dir), `port`, attempt caps `max_plan_attempts` (default 4) / `max_gate_attempts` (default 3) / `max_e2e_attempts` (default 3) / `max_finalgate_attempts` (default 2) that the decision watcher quotes in its retry/exhausted narration, the live token-tick cadence cap `token_tick_secs` (seconds; **default 15**, `0` = no ceiling, i.e. the pre-cadence behavior: a delta line on every poll tick that has a non-zero delta — the env var `ORCH_TOKEN_TICK_SECS` pins the value and WINS over this key, so an operator debugging a live run is never overridden by a config the orchestrator script republishes; a negative value reads as `0`), the DECLARED context window `context_window` (an int for every model, or a `{model-string: int}` map; accepted only inside **1,000…10,000,000** — a value outside that is warned about on stderr and left undeclared, never clamped, and one bad entry of a map drops only itself; the env var `ORCH_CONTEXT_WINDOW` PINS it and wins over this key exactly as `ORCH_TOKEN_TICK_SECS` does, carrying the same grammar, and a set-but-unparseable value still pins rather than letting the config win back what an operator was overriding). That key is the ONLY source of the context meter's denominator — there is deliberately **no built-in model→window table, no ">200k means 1M" promotion, and no fallback to 200,000 ever**, because observing a 522k prompt proves the window is *bigger than* 200k, not that it is 1M, and the bare model string cannot tell the variants apart. An **undeclared window is a normal state**, not a degraded one — and the common one, since no reference template publishes the key: the reading renders as an absolute figure with no bar and no percentage, labelled with the `model` id off the same record, which is the only capacity-adjacent fact that is measured rather than declared. The reader never says a window is unknown, because it never had a denominator to go looking for. Finally `strategy` (`parallel` \| `sequential` \| legacy `serial`, which is the only value that re-enables the retired sequenced plan-close heuristic — **no reference template publishes it**, so that branch is reachable only from a hand-written legacy config; do not "fix" a template to emit `serial`, it resurrects the fabricated `plan failed` badge). The watcher **re-reads this file whenever its mtime moves**, so an orchestrator script that publishes its own caps after the daemons started is still honored (it logs `config reloaded: …`, and that line names the resolved context window too — `undeclared` when there is none). The **first `orch-config.json` that exists** wins outright — task dir, then the module dir — and if it does not parse the watcher keeps the documented defaults, warns on stderr, and re-reads that same file when it is repaired |
 | `.watcher-state.json` | Watcher checkpoint (journal offset, agent classifications, token baselines, and the owning daemon's `pid`) — restart-safe, never duplicates events |
 
 ## Event schema
@@ -39,7 +39,7 @@ its events; it drives the live per-agent rows and the impl→test→critique flo
 strip on the plan card:
 
 ```json
-{"agent": {"id": "<full 17-hex agentId>", "shortId": "<first 8 hex>", "label": "<short label>", "state": "running|done|failed|stale", "tokens": {"in": 0, "out": 0, "cached": 0, "cache_write": 0}, "started": "<ISO-8601>", "runtime": "<seconds or human string>", "identity": {"name": "", "parent": "", "root": "", "ledger": ""}, "flags": ["marker-misplaced"], "unconventional": true}}
+{"agent": {"id": "<full 17-hex agentId>", "shortId": "<first 8 hex>", "label": "<short label>", "state": "running|done|failed|stale", "tokens": {"in": 0, "out": 0, "cached": 0, "cache_write": 0}, "ctx": {"used": 145640, "at": "<ISO-8601>", "model": "<model id>", "peak": 145640, "cap": 1000000, "src": "compact"}, "started": "<ISO-8601>", "runtime": "<seconds or human string>", "identity": {"name": "", "parent": "", "root": "", "ledger": ""}, "flags": ["marker-misplaced"], "unconventional": true}}
 ```
 
 - `plan` — one card per unique id, first-seen order. **Reserved id `orchestrator`**: rendered as a wide card pinned last; the decision watcher writes there.
@@ -52,6 +52,8 @@ strip on the plan card:
 - `tokens` — **delta** (not absolute) added to the card's counter; grand total is derived by the page. `in` is TOTAL input (fresh + cache writes + cache reads); optional `cached` is the cache-read (`r:`) portion and optional `cache_write` is the cache-write (`w:`) portion, letting the page display the fresh input plus an `r:`/`w:` cache breakdown (an agent loop re-reads its whole prefix every turn, so cache reads dominate `in`). Events without `cached`/`cache_write` render as plain `in`. The per-agent `agent.tokens` block is the **opposite** kind of number — see the `agent` bullet.
 - `agent` — optional per-subagent sub-object (watcher-emitted; see the block above) with the agent's `id`/`label`, its own `state` (`running|done|failed|stale`), a nested `tokens` breakdown, and `started`/`runtime`.
   **`agent.tokens` is that agent's ABSOLUTE running total, last-event-wins** — unlike the top-level `tokens`, which is a delta. The asymmetry is deliberate and load-bearing, so readers must not treat the two alike: summing `agent.tokens` inflates a per-agent figure by the number of ticks it was reported on, while last-winsing the top-level `tokens` collapses a plan's total to its final delta. It is also what makes a lossy replay recoverable — a fold that drops quiet ticks (any snapshot/prelude design) rebuilds totals from `agent.tokens` last-wins per `(plan, agent.id)` on ANY event (terminal events carry a higher cumulative than the last tick did), excluding agent-less deltas, and NEVER by summing the surviving deltas. Deltas are wire-only: sum them over a gappy stream and the answer is measurably wrong. Four further keys are optional: `shortId` (the first 8 hex of `id`, **display only**), `identity` (the `[touch]` marker's `name`/`parent`/`root`/`ledger`, labels only), `flags` (e.g. `["marker-misplaced"]` when a real `[touch]` marker sits below the marker window), and `unconventional: true` for an agent whose prompt carried no usable marker — the node still exists, it just has no plan/stage label.
+  **`agent.ctx` is a THIRD kind of number: that agent's CURRENT context OCCUPANCY — a LEVEL at an instant**, absolute, last-event-wins per `(plan, agent.id)`, whole-object replace with no merge. It is the prompt the model re-read on its most recent request (`input_tokens + cache_creation_input_tokens + cache_read_input_tokens` of its last qualifying `assistant` record, `output_tokens` excluded), **not** a sum over turns. Do not confuse it with `agent.tokens.in`, which sums every turn's input and runs **38.4× larger at the median and 197.7× at the extreme** (still 9.4× at twelve turns): the two share a unit and measure different things — one is how full the window is now, the other is what the agent has spent. Keys: `used` (int > 0) and `at` are **required**, and the block is absent rather than present without them; `at` is the SOURCE record's own timestamp — the staleness stamp, never the emit moment, and a stale reading is never re-stamped; `model` is that record's model id verbatim, when recorded; `peak` is the watcher's monotone high-water mark for this agent and is the only sanctioned aggregate; `cap` is the declared context window (see `orch-config.json` above) and is present **only when it is declared and not contradicted by the reading** — `used > cap` omits it and warns once, never clamps and never draws a bar past 100%; `src: "compact"` marks the one provisional reading described under **Context math** below. **No percentage travels on the wire**: a reader derives one **only** when `cap` is present, as `used / cap`. The renderer's row is `ctx <used>` + ` · <model>` when one was recorded + ` · <pct>` when a `cap` was declared — the reading and the model are the whole line, the cap's SIZE stays in the tooltip, and `model` is display text that is never compared, parsed or used as a lookup key (that would be the model→window table this file forbids twice above).
+  **Unknown is spelled as the KEY BEING ABSENT — never `0`, never `null`.** An agent that has not answered yet, a transcript whose only rows are `<synthetic>` error rows, `--no-tokens`, a pruned or unreadable transcript, no qualifying row in any fragment: every one of them omits the block, and **absent never means zero**. A fresh window is never empty — it already holds the system prompt, tool definitions and the always-on files, measured at 21k–45k tokens before the agent's first word over 610 agents — so a rendered `0` would understate by that much and is exactly the fabricated-number defect this stream forbids. The value is also **not monotonic**: a compaction legitimately moves it DOWN, so the monotone clamp that governs `tokens` must never be applied to it, and no reader may sum it, delta it, `max` it or clamp it.
   **Identity is `id`, and `id` is the FULL 17-hex agentId.** Readers key rows on `id` and never on `shortId`: an 8-hex prefix is not unique. Lines written before this widening carry an 8-hex `id`; they are legacy (`legacy:<task>:<id8>` in the aggregator's namespace) — a stream containing BOTH widths for one agent (a task whose watcher was restarted onto the new code mid-run) therefore renders two rows in `monitor.html`, which keys on `id` alone. That is a known carried consequence for the frontend/legacy work (join the 8-hex form via `shortId`), not something the watcher hides by emitting short ids.
 - `quiet` — update counters only, no log line (live per-agent token ticks). The watcher *polls* every second but only *emits* when the agent's transcript actually grew, so the real cadence is **one line per transcript flush per agent** (measured p50 ~5 s, p90 ~22 s — model turn boundaries, not the clock), capped further to **at most one tick per agent per `ORCH_TOKEN_TICK_SECS` / `token_tick_secs` seconds (default 15)**. The cap is a **ceiling, never a floor**: no heartbeat is ever written, because a fixed-interval line would erase exactly the stream gaps the timeplan reads as stalls — liveness belongs to the WebSocket keepalive, never to `events.jsonl`. Coalescing is lossless: the delta baseline advances only when a line is really written, so a suppressed tick's tokens ride along on the next one, the first tick for a new agent is always *due* (no ceiling wait — though, like every tick, it writes nothing until the delta is non-zero), and every terminal path (result rollup, stale/abandoned close, shutdown drain, both self-exits) force-flushes **unthrottled** with the agent's cumulative total attached.
 - `w` — **writer attribution**: `"agent"` for a line appended by `status.sh` (an agent or a driver script), `"watcher"` for a line appended by `decision_watcher.py`. `events.jsonl` is a multi-writer file and attribution used to be guessable only from an event's shape, so a reader could not tell an asserted line from a derived one. The key is purely **additive**: the five-key core shape is unchanged, every reader must ignore keys it does not know, and streams written before this key exist stay readable (their lines simply have no `w` — treat that as "unknown writer", never as a default).
@@ -151,7 +153,13 @@ living in two files, bound by a `FOLD_GEN` integer literal present verbatim in
 both and stamped on every `hello`/`snapshot`. Bump it in both files whenever a
 fold rule changes: a page that sees a generation it does not recognise discards
 the snapshot and reconnects with `?snap=0` instead of rendering state built by
-other rules.
+other rules. The current generation is **3**, and the bump from 2 records one
+added rule: agent rows fold `agent.ctx` **last-wins, whole-object replace, no
+merge** — never the neighbouring `tokens` line's monotonic treatment, and never
+a per-key merge, which could keep a stale `cap` alive across a model switch. A
+snapshot agent row with no reading serialises `"ctx": null`; that is a
+fold-internal spelling of "nothing yet", and the *wire* rule stays the writer's
+(the key is simply absent).
 
 The agent-facing trace protocol below (`status.sh` calls embedded in prompts)
 is **unchanged** by any of this — framing is a reader-side concern, and both
@@ -459,7 +467,12 @@ writers append lines exactly as they always did.
    nothing — and it never parses `promptPreview`/`resultPreview`, which are
    TRUNCATED: a marker cut in half would classify an agent onto a plan card
    that does not exist. Token totals are re-derived from the transcripts, never
-   copied from the snapshot's own display figure. With no snapshot it says so
+   copied from the snapshot's own display figure — and neither is the **context
+   occupancy** beside them: it is re-derived by the same rule off the same read,
+   so a corrected row carries the reading the live tail would have emitted and a
+   run whose watcher never ran gains the key retroactively. Already-written
+   history is never rewritten to add it — a reader that ignores a missing key IS
+   the backfill story. With no snapshot it says so
    and exits 0; a snapshot is not guaranteed, so that is not an error.
    "Post-run" is enforced, not just asked for: `.watcher-state.json` has one
    writer at a time, and the daemon records its own `pid` there on every save,
@@ -473,7 +486,11 @@ writers append lines exactly as they always did.
    `--no-tokens` suppresses this watcher's token accounting entirely — no
    transcript read, no `tokens` event, and an `agent` block with **no `tokens`
    key at all** rather than a rendered `0` (zero and unmeasured must never look
-   alike). Spawns, results and decision lines are untouched. It exists so a
+   alike). It suppresses the **context reading** with it, for the same reason
+   and by the same rule: occupancy is a by-product of exactly the transcript
+   read this flag turns off, so the block then carries neither `tokens` nor
+   `ctx`. One switch, one read, no third state.
+   Spawns, results and decision lines are untouched. It exists so a
    deployment that has wired the aggregator's ingest tick can make
    `ingest.rollup` the single reachable implementation of a pure function
    Touch currently implements twice; the default is OFF, because the watcher is
@@ -626,6 +643,100 @@ path resolving outside the task folder (traversal/symlink safe).
   removes the ceiling entirely — the pre-cadence behavior, a line on every poll
   tick that has a non-zero delta (a tick with no transcript growth still writes
   nothing).
+- **Context math**: the OCCUPANCY beside the spend — how full an agent's context
+  window was at its last recorded turn, carried as `agent.ctx` (see the `agent`
+  bullet above for the wire shape and the absent-is-not-zero rule). The figure
+  is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens` of
+  that agent's **last qualifying assistant record**, read from the top-level
+  `message.usage` object with `output_tokens` excluded. That is the arithmetic
+  Claude Code's own status line documents, chosen so the card and a user's
+  status line agree digit-for-digit; do not "correct" it by adding output
+  tokens or an overhead allowance, because the row already contains the whole
+  wire prompt. Read it as *% of window, input-only*.
+  A row **qualifies** only if all of: it is an `assistant` record; its
+  `message.id` starts with `msg_`; the three-component total is above zero; its
+  `message.model` is not `<synthetic>`; and its top-level `agentId` matches the
+  one the transcript path resolves to. Rows failing any of those are dropped and
+  counted, never attributed to a neighbour. The reading is the qualifying row
+  with the **greatest `(record timestamp, fragment order, line number)`** across
+  the union of that agent's transcript copies — in practice the newest
+  fragment's last real row, which is what makes the `/clear`-split copies
+  described under **Start the daemons** a non-issue with no parent-chain
+  machinery. It is emphatically **not** `max` over turns: `max` agrees with
+  `latest` on every run that never compacts, and is silently wrong forever after
+  the first one that does. There is a **one-turn lag** by construction — the
+  number describes the prompt of the most recent API call, and the next call's
+  prompt does not exist yet.
+  **Compaction.** The harness *appends* a `compact_boundary` record (plus a
+  summary `user` line) — no truncation, no rotation — and no usage row lands
+  until the next API call, so for the whole gap a naive last-row reader
+  overstates by ~19×. Rule: when the newest boundary outranks the newest
+  qualifying row, the reading is its `compactMetadata.postTokens`, stamped with
+  the boundary record's own timestamp and labelled `src: "compact"`.
+  `preTokens` is never mixed into the arithmetic above — it is a different
+  estimator (a measured 30-token gap on real bytes) — and any `trigger` value is
+  handled. **No event is written for a compaction**: it shows up as the
+  occupancy going down, which is the whole reason nothing may clamp this number.
+  **Cadence.** The reading rides the existing token tick and nothing else — same
+  poll, same `token_tick_secs` ceiling, same non-zero-delta trigger, **zero new
+  event kinds and zero new event lines**. That is sufficient by construction: a
+  context change requires a billed turn, and a billed turn always moves the
+  token counters, so every change coincides with a tick that was going to be
+  written anyway. There is **no heartbeat** and no second cadence knob — a
+  fixed-interval line would erase exactly the stall segments the timeplan reads
+  out of silence — and `token_tick_secs` is therefore the only knob. Nothing is
+  checkpointed: a restarted watcher re-reads the transcripts and recovers both
+  the reading and its `peak`. The tick's `detail` gains a ` · ctx 144.0k` (or
+  ` · ctx 144.0k/1000.0k` when `cap` is known) suffix, omitted *entirely* when
+  there is no reading — display text only, single-line and quote-free like every
+  other detail; the number itself travels in `agent.ctx`, never in `detail`.
+  **Scope: Workflow subagents only.** The Orchestrator/driver card shows **no**
+  occupancy at all — not even a dash — because the driver's transcript is
+  session-scoped rather than run-scoped, and a true statement about the session
+  would be a false one about the run. If a driver figure is ever wanted, two
+  rules: it gets its own additive **top-level** key on an `orchestrator`-card
+  event, the way `run` does, plus its own line in the fold; and it must never be
+  modelled as an `agent` row, because the driver has no `agentId` and a
+  synthetic one would mint a phantom agent in every count, every stats tile and
+  every downstream key. Agent-tool subagents (`<session>/subagents/agent-<id>.jsonl`,
+  no `workflows/` segment) fall outside the watcher's glob and outside this
+  feature. There is likewise **no cross-agent aggregate**: separate agents hold
+  separate windows, so every such sum is a fabrication. `peak` — a max over one
+  agent's own recorded readings — is the only aggregate that exists.
+  Each retry row is its own agent with its own fresh window and its own meter,
+  so a `near limit` on `impl #1` beside a low reading on `impl #2` is an
+  **observation an operator can make**, never an inference this module renders.
+- **The hook plane is not a context source, and was measured rather than
+  assumed** (2026-07-31, CLI 2.1.220): all 30 documented hook events were
+  registered and 164 payloads captured, and **no key at any nesting depth
+  carries a token count, a usage object, a context-window size or a percentage**
+  for a Workflow subagent — the only arm in scope above. So `decision_watcher.py`
+  is the sole producer of `agent.ctx`, this feature registers no hook, and the
+  transcript is the only source. (`PreCompact`/`PostCompact` do fire, but they
+  are session-scoped and carry no token field at all — the `compact_boundary`
+  record is strictly richer, which is why the rule above reads it.) The census
+  lives in the development repository's own run history. Three consequences are
+  written down here so nobody re-derives them the hard way:
+  - **Event `ts` on a result-rollup line is the JOURNAL's timestamp, not the
+    emit moment.** Never reason about a reading's freshness from it — `ctx.at`
+    is the only freshness stamp there is. Comparing that `ts` against the last
+    transcript row produces a convincing, tick-shaped "miss rate" that is pure
+    artifact: the clock-free check — cumulative totals against the transcripts
+    themselves — finds every agent with a terminal token event complete.
+  - **`tokenCount` from a `subagentStatusLine` payload is a different
+    estimator** of the same level — measured a handful of tokens off the
+    transcript sum, and matching no exact combination of its fields. The two are
+    never mixed and never cross-checked against each other; only the transcript
+    arithmetic above ships. (The same payload's `contextWindowSize` is the one
+    place the harness states a window live, but it never fires for a Workflow
+    subagent and never fires headless, so it can inform an operator's
+    `context_window` declaration and can never be a rung.)
+  - **A compaction manufactures a phantom subagent**: its `SubagentStop` fires
+    with `agent_type: ""` and an `agent_id` belonging to no run agent. Nothing
+    is emitted for it today, because it carries no `[monitor]` marker — but any
+    future `SubagentStop`-keyed job must classify by an explicit **positive**
+    test on the agent type, never by a `!=` against one profile, which would
+    file the phantom under the other one.
 - **Completed tasks are history — never delete them.** When a run finishes
   (all plans done), leave the task folder and its `events.jsonl` in place.
   The monitor lists every surviving folder in `/tasks` and hydrates (or, on a

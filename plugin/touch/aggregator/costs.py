@@ -127,6 +127,43 @@ agent files). Summing them double-counts. This module folds **per
 `ingest.map_usage` writes with `$max`, and the reason that direction is
 load-bearing. A turn is therefore a distinct billed `message.id`, not a line.
 
+The same fold answers a second question, and the two are not each other's
+sanity check. `contextIntegral` sums what every turn re-read; `contextFinal` is
+what the last turn re-read. The first is a cost driver, the second is how full
+the window was. They are different questions and are never each other's sanity
+check — an integral only ever climbs, a level does not, and a compaction moves
+the level DOWN while the integral keeps rising. So the level is never summed, never
+delta'd and never clamped: `contextPeak`, `contextFinal`, `contextFinalTs` and
+`contextByOwner` sit OUTSIDE the money block, whose documented invariant ("every
+figure is a floor") is a claim about sums and says nothing about an instant.
+
+The level's turn is the one with the greatest `(timestamp, first-seen
+position)` — never the largest, never the last dict entry. On a corpus with no
+compaction "largest" and "latest" agree on every run, which is exactly why the
+wrong one is tempting: the day something compacts they stop agreeing, silently
+and forever. A turn qualifies only if :func:`_level_reading` could read a prompt
+off it, its model is billable and its `message.id` is a real `msg_…` — the
+harness's own `<synthetic>` records carry all-zero usage and 30 of 649
+transcripts on this machine END on one, so a reader that took the last turn
+unconditionally would report a busy agent as `0`. Nothing qualifying leaves all
+four keys `None`: a level nobody measured is not a zero, and printing one as a
+number is the whole defect this reading exists to avoid.
+
+That is also why the level does **not** reuse the money reading. `usage` is
+folded twice, from the same bytes, under two rules that disagree on purpose:
+:func:`ingest.usage_from_message` reads a `null` component as 0, which is the
+right floor for a sum and a fabricated measurement for an instant; and money
+sums a multi-iteration `usage` at the top level, which is the right bill and a
+prompt that never existed. :func:`_level_reading` refuses a non-`int` outright
+and reads `iterations[-1]` — GD-LC-2's rule, in this module's own spelling.
+
+What this reader does NOT do, stated so nobody infers it from the paragraph
+above: it takes **usage rows only**. `compact_boundary` records and their
+`compactMetadata.postTokens` (GD-LC-3) are invisible here, so a fold whose
+newest record is a boundary reports the PRE-compaction level — the last usage
+row, which the plan measures overstating 19× across that gap. The live half is
+the one that closes it; an offline boundary branch is deliberately not built.
+
 The price table, and how to re-verify it
 ----------------------------------------
 Every row was read on 2026-07-31 out of the **`claude-api` skill's own
@@ -593,14 +630,65 @@ class Turn:
     owner: str = ""            #: agentId, or the sessionId for the driver
     ordinal: int = 0           #: first-seen position, for "turn 1" per owner
     split_seen: bool = False   #: some record of this turn carried a TTL split
+    #: The greatest `timestamp` any record of this turn carried, or None when
+    #: none of them was dated. Max-folded like the tokens, and for the same
+    #: reason: a streamed turn is written several times and the last write is
+    #: when the turn actually ended. Only the LEVEL keys read it — the money
+    #: arithmetic has never needed to know when a turn happened.
+    moment: object = None
+    #: The strict prompt reading of :func:`_level_reading`, max-folded across
+    #: this turn's repeats exactly as the tokens are, or None when no record of
+    #: the turn said. NOT :attr:`context` — that one is the money reading and
+    #: floors what it cannot parse. Only the LEVEL keys read this.
+    level: object = None
     tokens: dict = field(default_factory=lambda: {
         "in": 0, "out": 0, "cached": 0, "cache_write": 0,
         "write5m": 0, "write1h": 0})
 
     @property
     def context(self) -> int:
-        """What the model actually re-read this turn (the context-integral's term)."""
+        """What the model actually re-read this turn (the context-integral's term).
+
+        The arithmetic is `input + cache_read + cache_creation` — the same
+        three components the LEVEL sums, output excluded from both — but this
+        is the MONEY reading and :attr:`level` is the level's: this one is
+        built from `ingest.usage_from_message`, which floors what it cannot
+        parse, and it aggregates a multi-iteration `usage` at the top level
+        because every iteration was billed. On the overwhelming majority of
+        rows the two are the same integer; where they differ, each is right
+        about its own question (see :func:`_level_reading`). Nothing in the
+        level block reads this property.
+        """
         return self.tokens["in"] + self.tokens["cached"] + self.tokens["cache_write"]
+
+    @property
+    def context_qualifies(self) -> bool:
+        """This turn is a usable reading of HOW FULL the window was.
+
+        Three clauses, and the first is the one that does the work: a prompt
+        :func:`_level_reading` could actually read (see there — it refuses what
+        the money reading floors); a **billable** model; and a real `msg_…` id.
+        `<synthetic>` records — the harness's own non-billable turns — carry
+        all-zero usage, and a transcript can END on one, so a reader that took
+        the last turn unconditionally would report a busy agent as `0`. Zero is
+        the lie this property exists to refuse: the money block still counts
+        such a turn (it is a turn), the level block does not know it happened.
+
+        The rule is GD-LC-2's, and it is stated here and stated AGAIN — never
+        imported — in the live half (`decision_watcher.py`'s `_note_context` /
+        `_prompt_total`) that reads the same transcripts, because each tree's
+        `in` means a different thing (GD-LC-11's deliberate duplication).
+        Nothing machine-checks the two spellings equal **for this module**:
+        `tests/test_token_crosscheck.py` pins `ingest.py` against the watcher
+        and does not mention `costs.py`. So the equality here is a claim
+        maintained by hand — if the two ever diverge, this docstring is where a
+        reader should have been told, and the divergence must be written down
+        rather than left to be discovered.
+        """
+        return (self.level is not None
+                and self.model not in NON_BILLABLE_MODELS
+                and isinstance(self.message_id, str)
+                and self.message_id.startswith("msg_"))
 
     @property
     def split_measured(self) -> bool:
@@ -758,7 +846,7 @@ class Fold:
         return sum(1 for turn in self.turns.values() if turn.split_assumed)
 
     def note_turn(self, message_id, model, owner, fields, split, *,
-                  split_seen=None):
+                  split_seen=None, moment=None, level=None):
         turn = self.turns.get(message_id)
         if turn is None:
             turn = Turn(message_id=message_id, model=model or "",
@@ -766,6 +854,21 @@ class Fold:
             self.turns[message_id] = turn
         elif model and not turn.model:
             turn.model = model
+        # The turn's own moment, max-folded exactly as its tokens are: the last
+        # record of a streamed turn is when that turn ended. A caller with no
+        # moment to give leaves it None, and an undated turn is one the LEVEL
+        # keys cannot ORDER — so it is left out of the "latest" answer rather
+        # than assumed into it, the same floor direction `note_undated` takes.
+        if moment is not None and (turn.moment is None or moment > turn.moment):
+            turn.moment = moment
+        # The strict LEVEL reading, max-folded for the same reason the tokens
+        # are: a streamed turn is written several times and only some of those
+        # records carry a complete `usage`. A record that could not be read
+        # leaves the fold as it found it — one unreadable write of a turn never
+        # unmeasures the writes that WERE readable, and never fabricates a
+        # number for the turns that had none.
+        if level is not None and (turn.level is None or level > turn.level):
+            turn.level = level
         if split_seen is None:                # a caller passing a split means it
             split_seen = bool(split.get("write5m") or split.get("write1h"))
         if split_seen:
@@ -809,6 +912,66 @@ def _cache_split(message, fields):
                 out[name] = value
                 seen = True
     return (out, seen)
+
+
+#: GD-LC-1's three components, in the transcript's own spelling. `output_tokens`
+#: is deliberately absent: the level is the documented statusline arithmetic
+#: (input + cache_creation + cache_read), and the row already carries the whole
+#: wire prompt without it.
+_LEVEL_SOURCE = ("input_tokens", "cache_creation_input_tokens",
+                 "cache_read_input_tokens")
+
+
+def _level_reading(message):
+    """This record's context LEVEL, or None when the bytes do not say.
+
+    A SECOND reading of the same `usage` block that
+    :func:`ingest.usage_from_message` folds for money, and the two disagree on
+    purpose — twice:
+
+    * **`type(v) is int`, never `isinstance` and never `or 0`.** `bool` is an
+      `int` subclass, so `isinstance` reads `cache_creation_input_tokens: true`
+      as 1; and the money reader coerces a `null` to 0 (`ingest.py`), which is
+      the right FLOOR for a sum and a fabricated measurement for an instant. A
+      component that is a float, a bool, a `null` or missing refuses the whole
+      row: a level nobody measured is not a zero, and a plausible-looking
+      number made out of bytes that say nothing is the R-58 defect class in
+      miniature. `tests/fixtures/context/ctx-agent-no-usable-turn.jsonl` is the
+      frozen specimen for exactly this arm.
+    * **`usage.iterations`.** Read the TOP level when the key is absent or the
+      list holds one entry (every sampled row behaves that way); a `len > 1`
+      list reads `iterations[-1]`, which is unambiguously ONE API call's prompt
+      whichever way the top level aggregates. Money keeps the top-level sum —
+      correct, because every iteration was billed — so the two readings
+      legitimately differ on such a row, the level being the smaller.
+      (`tests/fixtures/context/ctx-agent-iterations-multi.jsonl`: top level
+      65,690 against `iterations[-1]`'s 22,131, a 2.97× overstatement for a
+      reader that took the aggregate.)
+
+    A zero total is not an occupancy either — 30 of 649 real transcripts end on
+    an all-zero `<synthetic>` row — so it comes back None as well.
+
+    This is GD-LC-2's rule in this module's spelling; the live half states it
+    again in its own (see :attr:`Turn.context_qualifies` on why it is duplicated
+    rather than shared, and on what does *not* machine-check the two equal).
+    """
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    iterations = usage.get("iterations")
+    if isinstance(iterations, list) and len(iterations) > 1:
+        if not isinstance(iterations[-1], dict):
+            return None
+        usage = iterations[-1]
+    total = 0
+    for name in _LEVEL_SOURCE:
+        value = usage.get(name)
+        if type(value) is not int:
+            return None
+        total += value
+    return total if total > 0 else None
 
 
 def record_moment(record):
@@ -939,8 +1102,12 @@ def _fold_record(record, fold, *, owner=None, window=None):
             return
         who = record.get("agentId") or owner or record.get("sessionId") or ""
         split, measured = _cache_split(message, fields)
+        # Two readings of the same `usage`, taken here so each stays whole:
+        # `fields` is the money fold (floored), `_level_reading` is the level
+        # (refused rather than floored). Neither is derived from the other.
         fold.note_turn(message_id, message.get("model"), who, fields, split,
-                       split_seen=measured)
+                       split_seen=measured, moment=moment,
+                       level=_level_reading(message))
 
 
 def _note_reads(message, fold):
@@ -1004,6 +1171,65 @@ def _dollars(turn, prices):
     )
 
 
+@dataclass
+class _Level:
+    """The context LEVEL over one scope: its peak, and its latest reading.
+
+    Folded unlike everything else in this module, and the difference is the
+    point. A level is an instant, not a total: `peak` is a MAX over the
+    qualifying turns and `final` is the reading of the greatest-timestamp one.
+    Neither is ever summed, and `final` is emphatically not clamped up to
+    `peak` — a compaction legitimately lowers the level while the peak stands,
+    so a monotone `final` would be a fabrication in the one case the field
+    exists for.
+
+    Both stay None until a qualifying turn arrives. "Nobody measured this" and
+    "this measured zero" are different sentences and only the first is ever
+    true here, so the absence is spelled as an absence.
+    """
+
+    peak: object = None       #: int once a qualifying turn has been seen
+    final: object = None      #: int once a qualifying DATED turn has been seen
+    moment: object = None     #: that turn's own timestamp, never an emit clock
+    ordinal: int = -1         #: and its fold position, for the timestamp tie
+
+    def note(self, turn):
+        """Fold one turn in. The CALLER owns qualification (`context_qualifies`).
+
+        The winner is the greatest `(timestamp, first-seen position)`. The
+        second component is the tie-break, and it is not decoration: the fold's
+        ordinal is (path order, line number) — transcripts are read in sorted
+        path order and appended in line order — so two turns stamped to the
+        same millisecond resolve the way the bytes on disk are ordered instead
+        of the way a dict happens to iterate.
+
+        The value folded is :attr:`Turn.level` — the strict reading — never
+        :attr:`Turn.context`, which is the money one.
+        """
+        if self.peak is None or turn.level > self.peak:
+            self.peak = turn.level
+        if turn.moment is None:
+            return
+        if (self.moment is None
+                or (turn.moment, turn.ordinal) > (self.moment, self.ordinal)):
+            self.final = turn.level
+            self.moment = turn.moment
+            self.ordinal = turn.ordinal
+
+    @property
+    def ts(self):
+        """`final`'s own moment as ISO-8601, or None. Never a wall clock.
+
+        The staleness stamp is the SOURCE record's timestamp — the same
+        spelling `driverWindow` prints — so a reading that stopped moving an
+        hour ago says so instead of looking fresh because something re-read it.
+        """
+        return self.moment.isoformat() if self.moment is not None else None
+
+    def as_dict(self) -> dict:
+        return {"peak": self.peak, "final": self.final, "ts": self.ts}
+
+
 def summarize(fold, *, top=10) -> dict:
     """Every number the item names, as a plain dict (JSON-ready, no clock)."""
     turns = sorted(fold.turns.values(), key=lambda one: one.ordinal)
@@ -1014,6 +1240,8 @@ def summarize(fold, *, top=10) -> dict:
     unpriced = {}
     prices = {}
     context_integral = 0
+    level = _Level()
+    by_owner = {}
     for turn in turns:
         for name, value in turn.tokens.items():
             totals[name] += value
@@ -1024,6 +1252,17 @@ def summarize(fold, *, top=10) -> dict:
         totals["write5m"] += billed5m - turn.tokens["write5m"]
         totals["write1h"] += billed1h - turn.tokens["write1h"]
         context_integral += turn.context
+        # The LEVEL, folded beside the integral and never into it. Only
+        # qualifying turns are offered: an owner whose every turn is a
+        # zero-context `<synthetic>` record is therefore ABSENT from
+        # `contextByOwner` rather than present with a zero — it is still an
+        # agent, `agents` still counts it, and what is unknown about it is
+        # spelled as an absence.
+        if turn.context_qualifies:
+            level.note(turn)
+            if turn.owner not in by_owner:
+                by_owner[turn.owner] = _Level()
+            by_owner[turn.owner].note(turn)
         # An owner is seeded by its FIRST turn — but a zero-context turn is not
         # a baseline, it is a `<synthetic>` harness record with no usage at all,
         # and letting one land first would contribute a 0 to the median for an
@@ -1052,6 +1291,15 @@ def summarize(fold, *, top=10) -> dict:
         "agents": agents,
         "turns": turn_count,
         "contextIntegral": context_integral,
+        # The four LEVEL keys, deliberately NOT inside `dollars`: every figure
+        # in that block is a floor, which is a claim about a sum and says
+        # nothing about an instant. `None` here means no turn qualified — it is
+        # never a zero, and a consumer that renders it must render nothing.
+        "contextPeak": level.peak,
+        "contextFinal": level.final,
+        "contextFinalTs": level.ts,
+        "contextByOwner": {name: stats.as_dict()
+                           for name, stats in sorted(by_owner.items())},
         "baselinePerTurn": baseline,
         "baselineShare": (baseline * turn_count / context_integral
                           if context_integral else 0.0),
@@ -1168,7 +1416,17 @@ def analyze(*, task_dir=None, wf_dir=None, top=10, expand=True,
                 window = (earliest, window[1])
         report["driverLaunchSeen"] = bool(launches)
     driver_fold = Fold()
-    for one in driver_paths:
+    # Folded in SORTED path order, not in the anchor-first order of the list
+    # above. That list is anchor-first because `driver["transcript"]` has to
+    # name the LAUNCHING session — but fold position is the level's timestamp
+    # tie-break, and a tie-break that depended on which session directory the
+    # caller happened to name would make two readings of one run disagree about
+    # a number. Naming either directory reads the same run, down to every
+    # figure on the driver row, and that has to survive a tie: this corpus's
+    # two driver turns share a millisecond, and unsorted they answered 910 from
+    # one anchor and 705 from the other. Money is order-free, so nothing else
+    # here can notice.
+    for one in sorted(driver_paths):
         fold_transcript(one, driver_fold, window=window,
                         owner=ingest.session_id_for_path(one) or "driver")
     driver = summarize(driver_fold, top=top)
@@ -1196,6 +1454,18 @@ def analyze(*, task_dir=None, wf_dir=None, top=10, expand=True,
         report["driverScope"] = "run window"
     report["driverWindow"] = ([window[0].isoformat(), window[1].isoformat()]
                               if window is not None else None)
+    # The driver's LEVEL keys inherit the scope that produced them, because on
+    # their own they would answer a question nobody asked. `summarize` reports
+    # the greatest-timestamp turn OF THIS FOLD, and this fold is a slice: the
+    # close-out tail after the last agent record is outside the window, so the
+    # driver's last in-window turn is not "the driver's context now" — and
+    # under `--driver-whole-session` the last turn may belong to another run
+    # entirely. Labelled rather than dropped, and never rendered beside the
+    # run's own level (see `render`). ONE key scopes the WHOLE level block —
+    # `contextPeak`, `contextFinal`, `contextFinalTs` and `contextByOwner` are
+    # every one of them computed over this same sliced fold — which is exactly
+    # why it is not named after any single one of them.
+    driver["contextScope"] = report["driverScope"]
     notes = []
     if report["driverSessionsMissing"]:
         notes.append(
@@ -1305,6 +1575,33 @@ def render(report) -> str:
     lines.append(f"  agents          {summary['agents']}")
     lines.append(f"  turns           {summary['turns']}")
     lines.append(f"  context-integral{summary['contextIntegral']:>14,} tok")
+    # The LEVEL, on its own line and deliberately far from the dollar column: a
+    # reader scanning a money block reads every number in it as money, and this
+    # one is how full a window was. Printed only when a turn qualified —
+    # a fixed-width row has no way to spell "unknown" that a reader will not
+    # quote back as a number, so the honest rendering of an absent level is an
+    # absent line.
+    if summary.get("contextFinal") is not None:
+        # The stamp is unconditional on purpose: `_Level` only ever sets
+        # `final` inside the branch that also sets `moment`, so a level with no
+        # instant attached is unreachable — and printing a bare number here
+        # would be printing a level with no "as of", which is the one thing a
+        # staleness stamp exists to prevent.
+        #
+        # And it is named with its OWNER, because it belongs to one agent. Every
+        # other figure in this block is a run-wide fact; this one is "whichever
+        # agent spoke last", every cross-agent aggregate of a level being a
+        # fabrication (separate windows). `contextByOwner` already knows which
+        # — the run's winning turn is that owner's winning turn too — and when
+        # a tie leaves that ambiguous the parenthetical still refuses to let the
+        # number read as the run's.
+        owners = [name for name, one in
+                  sorted((summary.get("contextByOwner") or {}).items())
+                  if one.get("final") == summary["contextFinal"]
+                  and one.get("ts") == summary["contextFinalTs"]]
+        who = owners[0] if len(owners) == 1 else "last agent"
+        lines.append(f"  context final   {summary['contextFinal']:>14,} tok"
+                     f" @ {summary['contextFinalTs']} ({who})")
     lines.append(f"  baseline/turn   {summary['baselinePerTurn']:>14,.0f} tok")
     lines.append(f"  baseline share  {summary['baselineShare'] * 100:>13.1f} %")
     lines.append(f"  prompt tok/agent{summary['promptTokensPerAgent']:>14,.0f} tok")

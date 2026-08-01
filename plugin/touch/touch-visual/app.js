@@ -692,6 +692,57 @@ function noteTokens(stream, record) {
     }
 }
 
+/**
+ * One `ctx` occupancy block off a row — validated whole — or `null`.
+ *
+ * Deliberately NOT a member of the rollup family above, and this is the guard
+ * that keeps it out: `tokens` is cumulative SPEND, so summing the latest record
+ * per ref is the right answer; `ctx` is a LEVEL — how full one agent's context
+ * window was at one instant — and every arithmetic over two of them is a
+ * fabrication. Two agents' occupancies do not add (separate windows), and two
+ * readings of ONE agent do not either (the same window, twice). Nothing in this
+ * file sums, maxes, deltas or clamps it; each row shows its own number or none.
+ *
+ * `null` is what "no reading" looks like, and it is the whole discipline: a
+ * missing block is spelled by rendering nothing, never by a `0`. `0` would say
+ * "this agent's window is empty", which is never true of a live agent — a fresh
+ * window already holds tens of thousands of tokens of system prompt, tools and
+ * always-on files before its first word. So `snapNum`-style validation, never
+ * `| 0` or `Number(x) || 0` coercion: any invalid field invalidates the whole
+ * block, because half a reading is a made-up one.
+ *
+ * No percentage and no bar is derived here even when `cap` is present: 8932
+ * renders the absolute number only (the gauge is 8931's contract), and there is
+ * no window constant in this file to fall back to when `cap` is absent.
+ */
+function ctxOf(row) {
+    const ctx = row && row.ctx;
+    if (!ctx || typeof ctx !== "object") return null;
+    const used = Number(ctx.used);
+    if (!Number.isFinite(used) || used <= 0 || used >= 1e9) return null;
+    if (typeof ctx.at !== "string" || !ctx.at) return null;
+    const out = { used: used, at: ctx.at };
+    ["peak", "cap"].forEach((key) => {
+        const value = Number(ctx[key]);
+        if (Number.isFinite(value) && value > 0 && value < 1e9) out[key] = value;
+    });
+    if (typeof ctx.model === "string" && ctx.model) out.model = ctx.model;
+    if (typeof ctx.src === "string" && ctx.src) out.src = ctx.src;
+    return out;
+}
+
+/** The hover text for one reading: provenance and staleness, never a percentage. */
+function ctxTitle(ctx) {
+    const parts = ["context occupancy — input tokens only, the level at " + fmtTs(ctx.at)];
+    if (ctx.model) parts.push("model " + ctx.model);
+    if (ctx.peak) parts.push("peak " + fmtInt(ctx.peak));
+    // Named "declared" on purpose: it is an `orch-config.json` assertion, not
+    // something Touch measured, and it is absent whenever nobody declared it.
+    if (ctx.cap) parts.push("declared window " + fmtInt(ctx.cap));
+    if (ctx.src === "compact") parts.push("read from a compaction boundary");
+    return parts.join(" · ");
+}
+
 /** Sum of the latest absolute record per ref — "token rollups from computed sums". */
 function rollup(filter) {
     const totals = {};
@@ -1911,6 +1962,18 @@ function nodeList(rows, emptyText) {
         const sub = el("div", "cardsub");
         sub.appendChild(el("span", "dim", String(node.plan || "") + " · " + String(node.stage || "")));
         if (node.agentId) sub.appendChild(el("span", "mono", String(node.agentId)));
+        // The occupancy reading, absolute and alone: no bar, no percentage, no
+        // "of 200k" fallback — 8932 is the number-only surface (the gauge and
+        // its declared denominator are 8931's). A row with no reading renders
+        // NOTHING here rather than a zero or a dash, which is the same
+        // absent-vs-zero rule the wire itself follows: the readings that exist
+        // are visible and the ones that do not are not claimed.
+        const ctx = ctxOf(node);
+        if (ctx) {
+            const meter = el("span", "mono", "ctx " + fmtInt(ctx.used));
+            meter.setAttribute("title", ctxTitle(ctx));
+            sub.appendChild(meter);
+        }
         // Display only: `lastToolSummary` is truncated by the harness itself,
         // so nothing here or downstream may parse a marker out of it.
         if (node.detail) sub.appendChild(el("span", "dim", truncate(node.detail, DETAIL_CHARS)));

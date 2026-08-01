@@ -28,8 +28,10 @@ them assumed:
   after launch). See `MARKER_WAIT_MS`.
 * `SubagentStop` adds `agent_transcript_path` (`…/workflows/<runId>/agent-<id>.jsonl`
   for a Workflow agent), `last_assistant_message` and `background_tasks[]`.
-* `PostToolUse` matcher `Workflow` fires **at launch**, 3 ms before the first
-  `SubagentStart`, with the launch record verbatim in `tool_response`.
+* `PostToolUse` matcher `Workflow` fires **at launch**, within ~±35 ms of the
+  first `SubagentStart` **in either order** (measured 2026-07-31, CLI 2.1.220;
+  D-17's "3 ms before" was one sample of a race), with the launch record
+  verbatim in `tool_response`.
 * `agent_type` is the profile discriminator: `"workflow-subagent"` vs the
   Agent-tool agent type name.
 * `os.getppid()` inside a hook is the `claude` process, so `<pid>-<procStart>`
@@ -54,10 +56,11 @@ THE FOUR JOBS
 (b) `PostToolUse` matcher `Workflow`, `taskType == "local_workflow"` → merge
     `{wf_dir, run_id, task_id, workflow_name}` into that task's
     `orch-config.json`. This is the exact join the driver used to retype from
-    its own tool result (SUBSTRATE-5), and it lands before any agent event, so
-    it is the replacement for the racy newest-`wf_*` fallback `touch-run bind`
-    still carries. `touch-run` is not edited here — its "exact when D-18 lands"
-    branch simply reads the merged config.
+    its own tool result (SUBSTRATE-5), and it usually lands before any agent
+    event (a race, not a guarantee), so it is the replacement for the racy
+    newest-`wf_*` fallback `touch-run bind` still carries. `touch-run` is not
+    edited here — its "exact when D-18 lands" branch simply reads the merged
+    config.
 (c) `SubagentStart` → one spawn-ledger line at `<task>/state/spawn-ledger.jsonl`
     when the prompt carries a `[touch]` marker, replacing the hand-written
     mandate D-19 deletes (zero ledgers were ever written by hand). Workflow
@@ -346,8 +349,13 @@ def transcript_candidates(hook, state_dir):
     `SubagentStop` hands over `agent_transcript_path` outright. `SubagentStart`
     hands over nothing, so the two recorded layouts are rebuilt from
     `transcript_path` (the session file, whose stem is the session DIRECTORY)
-    and from the `wf_dir` job (b) published milliseconds earlier — which is the
-    whole reason (b) runs before (a) needs it.
+    and from the `wf_dir` job (b) publishes — usually milliseconds earlier,
+    but the two events race in either order (see the module docstring). When
+    the first agent's `SubagentStart` beats job (b)'s config write, this list
+    loses its `wf_dir` candidate, `await_prompt` may burn the whole
+    `MARKER_WAIT_MS` budget and still return `""`, and that agent gets no
+    lifecycle line — the honest degrade already coded: emit nothing, never
+    guess, and the watcher derives the same card from the journal a beat later.
     """
     out = []
     given = hook.get("agent_transcript_path")

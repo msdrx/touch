@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "touch",
   "displayName": "Touch",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "See what the subagents in a Claude Code session are doing: a loopback-only, token-gated dashboard over the live agent tree, plus ten skills — four deterministic research and implement orchestration skills, and six engineering-practice ones for architecture, testing, refactoring, design patterns and code review. It reads your transcripts under ~/.claude/projects/ and keeps its own state inside the project you run it in (the optional Mongo mirror in docs/mongo.md is off by default). It performs no session verb — nothing here starts or ends an agent loop — and the only files it writes on your behalf are this project's Claude Code memory notes under .touch/memory, editable from a dashboard page whose save side is DISABLED unless you start the dashboard with --allow-memory-write. It installs one PreToolUse hook that stays inert unless an orchestration run is active.",
   "author": {
     "name": "Michael Sadradze",

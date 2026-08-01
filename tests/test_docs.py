@@ -3,7 +3,12 @@
 
 Run as `python3 tests/test_docs.py`; exits non-zero on the first failure. No
 pytest, no runner. `test_shell.py` (monitoring module) is the sibling of this
-file for the *module's* docs; this one guards the repo's own.
+file for the *module's* docs; this one guards the repo's own — and, where a
+claim spans BOTH trees, guards it from here, because splitting one claim across
+two suites is how half of it stops being checked. That is why the memory-plane
+arm and the LC-13 context-occupancy arms below read `monitoring.md`: each also
+reads `mongo.md`, `control-semantics.md` or a source constant that
+`tests/monitoring/` cannot see from inside the module.
 
 These are assertions about **source text**, because prose is never executed and
 therefore never fails on its own. Each guard exists because the claim it pins
@@ -2276,6 +2281,261 @@ def test_memory_feature_docs_are_honest_about_writing():
 
 
 # ============================================================================
+# LC-13 / LC-13-H — the context-occupancy prose (`agent.ctx`)
+# ============================================================================
+
+#: `monitoring.md` is NORMATIVE for the event schema (CLAUDE.md's monitoring
+#: section says so and deliberately carries no schema of its own), so an
+#: undocumented key is an undocumented contract. These arms pin the sentences
+#: that a reader would otherwise have to guess at — and, more importantly, the
+#: ones a well-meaning future edit would soften into the exact defect the whole
+#: feature exists to avoid: a fabricated number on a card.
+MONITORING_DOC = SRC / "shared/monitoring/monitoring.md"
+WATCHER_PY = SRC / "shared/monitoring/decision_watcher.py"
+SERVER_PY = SRC / "shared/monitoring/monitor_server.py"
+
+
+def test_monitoring_doc_documents_context_occupancy():
+    """LC-13: `agent.ctx` is on the wire, so `monitoring.md` must define it.
+
+    The positives are the schema (the key, its sample, its six fields, the
+    declared-only denominator, the selection rule, the cadence, the scope).
+    The NEGATIVES are the load-bearing half, and each one is a defect this
+    repo has a name for:
+
+    * a doc that lets `absent` read as `0` re-creates R-58 one document over —
+      a fresh window already holds 21k–45k tokens, so a rendered `0`
+      understates by that much and looks exactly like a real reading;
+    * a doc that offers 200,000 as a fallback denominator renders a healthy
+      522k agent as "261 % full", which is the specific number the plan was
+      written against;
+    * a doc that describes the reading as `max` over turns teaches the one
+      implementation that agrees with the truth on every run that never
+      compacts and is silently wrong forever after the first one that does.
+
+    The last two arms are cross-checks against SOURCE constants rather than
+    prose, because `FOLD_GEN` and the window bounds are numbers this document
+    states and two programs enforce — the only kind of doc claim that can drift
+    without anybody editing the sentence.
+    """
+    print("test_monitoring_doc_documents_context_occupancy")
+    if not have_plugin(MONITORING_DOC):
+        return
+    mon = read(MONITORING_DOC)
+    flat_mon = flatten(mon)
+    # --- the schema -------------------------------------------------------
+    check("agent.ctx" in mon, "monitoring.md names the `agent.ctx` key")
+    check('"ctx": {' in mon,
+          "monitoring.md's `agent` JSON sample carries the ctx block, so the "
+          "shape is readable without opening the watcher")
+    for field in ("`used`", "`at`", "`peak`", "`cap`", '`src: "compact"`'):
+        check(field in mon, f"monitoring.md documents the ctx field {field}")
+    check("Context math" in mon,
+          "monitoring.md has the `Context math` sibling of `Token math`")
+    # --- the absent-is-not-zero discipline (the whole point) ---------------
+    check("never `0`, never `null`" in flat_mon,
+          "monitoring.md spells unknown as the KEY BEING ABSENT — never 0, "
+          "never null (the R-58 defect class)")
+    check("absent never means zero" in flat_mon,
+          "monitoring.md says outright that absent never means zero")
+    zeroed = []
+    for sentence in re.split(r"(?<=[.!?])\s+", flat_mon):
+        low = sentence.lower()
+        if "ctx" not in low:
+            continue
+        if re.search(r"(?:defaults? to|reads? as|renders? as) (?:`?0`?|zero)",
+                     low):
+            zeroed.append(sentence.strip()[:80])
+    check(not zeroed,
+          f"no sentence gives the ctx reading a zero default — zero and "
+          f"unmeasured must never look alike (bad: {zeroed})")
+    # --- it is a LEVEL, and nothing may clamp it --------------------------
+    check("not monotonic" in flat_mon,
+          "monitoring.md states that occupancy is non-monotonic (a compaction "
+          "lowers it)")
+    check("must never be applied to it" in flat_mon,
+          "monitoring.md forbids applying the `tokens` monotone clamp to it")
+    check("38.4×" in mon and "197.7×" in mon,
+          "monitoring.md quotes the MEASURED gap between occupancy and "
+          "`agent.tokens.in`, so the two are not confused for each other")
+    # --- the selection rule, and its tempting-and-wrong twin ---------------
+    check("greatest `(record timestamp, fragment order, line number)`" in flat_mon,
+          "monitoring.md states the greatest-timestamp selection rule (GD-LC-2)")
+    check("**not** `max` over turns" in flat_mon,
+          "monitoring.md denies the `max`-over-turns implementation by name — "
+          "it agrees with the truth until the first compaction and is wrong "
+          "forever after")
+    check("compact_boundary" in mon and "postTokens" in mon,
+          "monitoring.md documents the compaction branch and its source field")
+    check("preTokens" in mon, "monitoring.md names `preTokens`")
+    check("`preTokens` is never mixed into the arithmetic" in flat_mon,
+          "monitoring.md says `preTokens` — a different estimator — is never "
+          "mixed into the occupancy sum")
+    # --- the denominator: declared only, or honestly unknown ---------------
+    check("context_window" in mon and "ORCH_CONTEXT_WINDOW" in mon,
+          "monitoring.md documents the declared window and the env var that "
+          "pins it")
+    check("no fallback to 200,000 ever" in flat_mon,
+          "monitoring.md forbids the 200,000 fallback in as many words")
+    negations = ("never", "no fallback", "no built-in", "not ", "refus")
+    for block in guard_blocks(mon):
+        low = flatten(block).lower()
+        if "200,000" not in low and "200k" not in low:
+            continue
+        check(any(n in low for n in negations),
+              f"monitoring.md: every 200k mention is a prohibition, never an "
+              f"offered default ({block.strip()[:70]!r})")
+    # --- cadence, scope, and the two flags --------------------------------
+    check("zero new event kinds and zero new event lines" in flat_mon,
+          "monitoring.md states that the reading rides the existing token tick "
+          "— no new event kind, no new line")
+    check("no heartbeat" in flat_mon.lower(),
+          "monitoring.md keeps the no-heartbeat rule in the context section too")
+    check("not even a dash" in flat_mon,
+          "monitoring.md says the driver card renders NOTHING, not a dash "
+          "(GD-LC-7)")
+    check("neither `tokens` nor" in flat_mon,
+          "monitoring.md says `--no-tokens` suppresses the ctx reading with the "
+          "token accounting — one switch, one read")
+    check("re-derived by the same rule off the same read" in flat_mon,
+          "monitoring.md says `--reconcile` re-derives occupancy from the "
+          "transcripts, never from a harness display figure")
+
+
+def test_monitoring_doc_carries_the_hook_plane_closeout():
+    """LC-13-H: four sentences that stop the next reader re-running the probe.
+
+    Two of them are pinned because they guard something executable rather than
+    merely informative: the timestamp sentence stops a freshness argument built
+    on a journal-derived `ts` (which manufactures a convincing, tick-shaped
+    "miss rate" out of nothing), and the estimator sentence stops a well-meant
+    "validation" of the transcript sum against a harness-side figure that was
+    measured to differ — which is exactly the equality
+    `tests/test_token_crosscheck.py` exists to hold.
+    """
+    print("test_monitoring_doc_carries_the_hook_plane_closeout")
+    if not have_plugin(MONITORING_DOC):
+        return
+    mon = read(MONITORING_DOC)
+    flat_mon = flatten(mon)
+    # 1 — timestamp honesty.
+    check("the JOURNAL's timestamp, not the emit moment" in flat_mon,
+          "monitoring.md warns that a result-rollup `ts` is the journal's "
+          "timestamp, not the emit moment")
+    check("only freshness stamp" in flat_mon and "`ctx.at`" in mon,
+          "monitoring.md names `ctx.at` as the only freshness stamp there is")
+    # 2 — estimator separation.
+    check("tokenCount" in mon,
+          "monitoring.md names the harness-side `tokenCount` estimator")
+    check("never mixed and never cross-checked" in flat_mon,
+          "monitoring.md forbids mixing or cross-checking the two estimators "
+          "(it is what keeps the crosscheck test's equality meaningful)")
+    # 3 — the phantom subagent a compaction spawns.
+    check('`agent_type: ""`' in mon,
+          "monitoring.md records the phantom `SubagentStop` a compaction fires")
+    check("never by a `!=` against one profile" in flat_mon,
+          "monitoring.md says a future SubagentStop-keyed job must classify by "
+          "a positive test, not by a `!=` profile test")
+    # 4 — the dated close-out, with the numbers that make it re-checkable.
+    check("2.1.220" in mon,
+          "monitoring.md pins the CLI version the hook plane was measured at")
+    check("164 payloads" in mon and "30 documented hook events" in flat_mon,
+          "monitoring.md states the census size, so the claim is re-runnable "
+          "rather than an assertion")
+    check(re.search(r"20\d\d-\d\d-\d\d", flat_mon) is not None,
+          "monitoring.md dates the hook-plane measurement")
+    # The payload must not point at THIS repository's run history for it —
+    # `test_plugin_docs_carry_no_local_or_ladder_paths` guards the README and
+    # CHANGELOG the same way, and a payload doc is read from an installed copy
+    # where no such task folder exists. Only the run-identifying substring is
+    # forbidden: `plan/*-plan.md` and `findings/` are the task-folder layout
+    # this document legitimately describes under **Task-page artifacts**, so
+    # the README's wider `ladder` tuple would fire on correct prose here.
+    for token in ("local-orchestrators/touch-", "/home/", "/Users/"):
+        check(token not in mon,
+              f"monitoring.md cites no local or run-history path (`{token}`) "
+              f"for the census — the payload ships no run folders")
+
+
+def test_docs_pin_the_context_constants_to_their_source():
+    """The two numbers `monitoring.md` states and a program enforces.
+
+    Prose and a constant drift apart silently, because editing one is never a
+    syntax error in the other. `FOLD_GEN` already has a cross-FILE equality
+    test in the monitoring suite; this is the same idea one layer out, between
+    the code and the document that is normative for it.
+    """
+    print("test_docs_pin_the_context_constants_to_their_source")
+    if not (have_plugin(MONITORING_DOC) and have_plugin(SERVER_PY)
+            and have_plugin(WATCHER_PY)):
+        return
+    mon = read(MONITORING_DOC)
+    m = re.search(r"^FOLD_GEN = (\d+)", read(SERVER_PY), re.M)
+    check(m is not None, "monitor_server.py declares FOLD_GEN")
+    if m:
+        check(f"current generation is **{m.group(1)}**" in mon,
+              f"monitoring.md states the CURRENT fold generation "
+              f"({m.group(1)}), the one both folds stamp")
+    watcher = read(WATCHER_PY)
+    bounds = {}
+    for name in ("CONTEXT_WINDOW_MIN", "CONTEXT_WINDOW_MAX"):
+        b = re.search(rf"^{name} = ([\d_]+)", watcher, re.M)
+        check(b is not None, f"decision_watcher.py declares {name}")
+        if b:
+            bounds[name] = int(b.group(1).replace("_", ""))
+    if len(bounds) == 2:
+        lo, hi = bounds["CONTEXT_WINDOW_MIN"], bounds["CONTEXT_WINDOW_MAX"]
+        check(f"{lo:,}" in mon and f"{hi:,}" in mon,
+              f"monitoring.md quotes the accepted window bounds the watcher "
+              f"actually enforces ({lo:,}…{hi:,})")
+
+
+def test_mongo_doc_states_the_context_projection():
+    """LC-13: occupancy is a READ of the mirror, and mongo.md has to say so.
+
+    The negative is the one that bites: a `$max` over `usage` reads like the
+    obvious fold and is wrong for a LEVEL — it reports a high-water mark
+    forever while calling it "now", which a compaction makes visibly false.
+    """
+    print("test_mongo_doc_states_the_context_projection")
+    mongo = read(MONGO_DOC)
+    flat = flatten(mongo)
+    check("sort ts desc, limit 1" in flat,
+          "mongo.md states the projection exactly (`sort ts desc, limit 1`)")
+    check("in + cached + cache_write" in flat,
+          "mongo.md names the three fields the projection sums")
+    check("per-message only" in flat and "cross-turn" in flat,
+          "mongo.md scopes the `$max` fold to per-message and forbids a "
+          "cross-turn reduction")
+    check("no collection gains one" in flat,
+          "mongo.md says the mirror gains NO field for occupancy")
+    for module in ("ingest.py", "tick.py", "mongo_store.py"):
+        check(module in mongo,
+              f"mongo.md names {module} among the modules occupancy leaves "
+              f"untouched")
+
+
+def test_control_semantics_says_occupancy_is_not_a_verb():
+    """LC-13: one sentence, in the document that owns the read/control line.
+
+    `CONTROL_ROUTES` staying empty is a claim this file already guards for the
+    memory plane; occupancy is the second surface that has to make it, because
+    a per-agent gauge is exactly the kind of thing a reader assumes came with a
+    button.
+    """
+    print("test_control_semantics_says_occupancy_is_not_a_verb")
+    ctl = read(CONTROL_DOC)
+    flat = flatten(ctl)
+    check("occupancy is a read, not a verb" in flat.lower(),
+          "control-semantics.md states that context occupancy is a read, not "
+          "a verb")
+    check("starts nothing, stops nothing" in flat,
+          "control-semantics.md says what the read does NOT do")
+    check("adds no `CONTROL_ROUTES` entry" in flat,
+          "control-semantics.md ties it back to the empty CONTROL_ROUTES table")
+
+
+# ============================================================================
 # D-25 / D-22 — the docs tell the truth, and the always-on prefix has a ceiling
 # ============================================================================
 
@@ -2533,6 +2793,12 @@ def main():
               test_claude_md_documents_the_touch_state_tree,
               test_claude_md_memory_kind_scope_table,
               test_memory_feature_docs_are_honest_about_writing,
+              # LC-13 / LC-13-H — the context-occupancy prose
+              test_monitoring_doc_documents_context_occupancy,
+              test_monitoring_doc_carries_the_hook_plane_closeout,
+              test_docs_pin_the_context_constants_to_their_source,
+              test_mongo_doc_states_the_context_projection,
+              test_control_semantics_says_occupancy_is_not_a_verb,
               # D-25 / D-22 — the inversion told straight, and the ceiling
               test_docs_state_the_inversion_not_the_placeholder_claim,
               test_claude_md_declares_the_context_budget,

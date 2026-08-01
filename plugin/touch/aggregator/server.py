@@ -970,6 +970,12 @@ class ReadModel:
     #: Counters a caller can raise (`usage_conflicts` from an ingest pass —
     #: `ingest.py`'s recorded sp-12 handoff) so `/health` can publish them.
     counters: dict = field(default_factory=dict)
+    #: `{task: {counts}}` — the newest context-occupancy counts observed per
+    #: legacy task, filed by :meth:`note_context` when `/api/tasks` projects a
+    #: reduction. A MAP rather than running totals because the same task is
+    #: re-reduced on every poll and accumulating would multiply one run's agents
+    #: by the number of times the page asked. Task-count sized, counts only.
+    context_counts: dict = field(default_factory=dict)
     started: float = field(default_factory=time.monotonic)
 
     _cached: object = None
@@ -1193,6 +1199,72 @@ class ReadModel:
                     "errors": 1, "lastError": type(exc).__name__}
         return payload if isinstance(payload, dict) else {"state": "unknown"}
 
+    def note_context(self, task: str, stats) -> None:
+        """File one task's occupancy counts, replacing whatever it said before.
+
+        Called from `/api/tasks` — the ONE place this server projects a legacy
+        reduction — because 8932 does not measure occupancy and must not start:
+        `decision_watcher.py` is the sole producer (GD-LC-5) and everything here
+        is a consumer of `events.jsonl`. Nothing but ints crosses this boundary;
+        see :meth:`context_health` for why that is not a style preference.
+        """
+        if not isinstance(task, str) or not task:
+            return
+        stats = stats if isinstance(stats, dict) else {}
+        self.context_counts[task] = {
+            "agentsWithReading": _int_or(stats.get("context_agents")),
+            "agentsUnresolved": _int_or(stats.get("context_agents_unresolved")),
+            "readings": _int_or(stats.get("context_readings")),
+            "invalidBlocks": _int_or(stats.get("context_invalid")),
+        }
+
+    def context_health(self) -> dict:
+        """`/health.context` — which rung the occupancy reading came from.
+
+        The third block cut to `ingest_health`'s pattern, for its reason: this
+        reading has more ways to be unavailable than to be available (no billed
+        turn yet, an unreadable transcript, `--no-tokens`, a watcher that never
+        ran, a `legacy.py` that does not carry the field), and without a named
+        rung every one of them looks identical from outside — a card with no
+        number — so an operator has nothing to act on.
+
+        `source` is the honest half: **`events`** says the number was READ from
+        `events.jsonl`, never measured here; **`absent`** says no reading has
+        reached this server yet. They are different words for what would
+        otherwise be the same zeros.
+
+        `multiIterationTurns` is `null`, deliberately and permanently, until
+        something puts it on the wire. The watcher counts that branch on its own
+        stderr and it never travels, so this server cannot observe it — and `0`
+        would claim a measurement of zero, which is precisely the fabricated
+        number the whole feature refuses. Absent is spelled absent.
+
+        The redaction posture of :func:`h_health` applies unchanged and is not
+        negotiable for this key: counts and one enum, no agent ids, no paths, no
+        session ids, no task names.
+        """
+        totals = {"agentsWithReading": 0, "agentsUnresolved": 0,
+                  "readings": 0, "invalidBlocks": 0}
+        for counts in _snapshot(self.context_counts).values():
+            if not isinstance(counts, dict):
+                continue
+            for name in totals:
+                totals[name] += _int_or(counts.get(name))
+        source = "events" if totals["readings"] else "absent"
+        return {
+            "source": source,
+            "agentsWithReading": totals["agentsWithReading"],
+            "agentsUnresolved": totals["agentsUnresolved"],
+            "readings": totals["readings"],
+            "invalidBlocks": totals["invalidBlocks"],
+            "multiIterationTurns": None,
+            "note": ("context occupancy is derived by decision_watcher.py and READ "
+                     "from events.jsonl; this server measures none of it. absent "
+                     "means no reading has reached it yet. multiIterationTurns is "
+                     "null, not 0: the watcher counts that branch on its own stderr "
+                     "and it never travels on the wire"),
+        }
+
     def writers(self) -> dict:
         """Who writes each reserved `.touch/` stream — including "nobody".
 
@@ -1395,6 +1467,12 @@ def _task_payload(reduction, harness=None) -> dict:
         "ordinal": node.ordinal, "agentId": node.agent_id, "label": node.label,
         "state": node.state, "detail": node.detail, "started": node.started,
         "ended": node.ended, "tokens": node.tokens,
+        # The occupancy LEVEL, whole and unmodified, or absent. This list is an
+        # explicit field list, which is exactly why the field has to be named
+        # here: the reduction can carry a perfect reading and the browser will
+        # never see it otherwise. `None` when there is none — never `0`, never a
+        # reconstructed block (GD-LC-4).
+        "ctx": node.ctx,
         "derivedFromLegacy": bool(node.derived_from_legacy),
         "relabel": node.relabel, "unconventional": bool(node.unconventional),
         "flags": list(node.flags or ()),
@@ -1424,7 +1502,8 @@ def _task_payload(reduction, harness=None) -> dict:
         "assertedNodes": asserted,
         "tokens": [{"plan": t.plan, "stage": t.stage, "agentId": t.agent_id,
                     "label": t.label, "ts": t.ts, "tokens": t.tokens,
-                    "folded": t.folded} for t in (reduction.tokens or ())],
+                    "folded": t.folded, "ctx": t.ctx}
+                   for t in (reduction.tokens or ())],
         "stats": dict(reduction.stats or {}),
         "notes": list(reduction.notes or ()),
     }
@@ -2162,7 +2241,9 @@ def h_health(api, query, headers) -> Response:
     `requests` is that rule applied to the server's own traffic: served /
     not-found / failed as three totals, never a per-route breakdown, because a
     route name is a path and the line above is not negotiable just because the
-    path happens to be one of ours.
+    path happens to be one of ours. `context` is the same rule applied to the
+    occupancy reading: a rung name and four counts, no agent ids and no task
+    names (:meth:`ReadModel.context_health`).
     """
     model = api.model
     payload = {
@@ -2188,6 +2269,7 @@ def h_health(api, query, headers) -> Response:
         "collections": model.sizes(),
         "counters": dict(model.counters),
         "mirror": model.mirror_health(),
+        "context": model.context_health(),
     }
     return Response.json(payload)
 
@@ -2561,6 +2643,11 @@ def h_tasks(api, query, headers) -> Response:
     groups = _nodes_by_run(model)
     rows = [_task_payload(r, harness=_harness_join(model, r, groups))
             for r in reductions]
+    for reduction in reductions:
+        # The only place this server learns anything about occupancy, and it
+        # learns it from a reduction it did not measure. `/health` publishes the
+        # counts; the ids they were counted over stay here (GD-27).
+        model.note_context(reduction.task, reduction.stats)
     rows.sort(key=lambda r: r["task"])
     return Response.json({"tasks": rows, "count": len(rows), "root": model.tasks_root})
 
