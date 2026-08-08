@@ -90,6 +90,10 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True   # no .pyc droppings in the payload tree: the
+# report cross-check below IMPORTS `skills/…/cycle_reporter.py` off the payload
+# tree, and a `__pycache__` beside it reddens tests/test_package.py.
+
 REPO = Path(__file__).resolve().parents[1]
 BIN = REPO / "plugin" / "touch" / "bin"
 RUN = BIN / "touch-run"
@@ -1373,6 +1377,173 @@ def test_status_reports_and_writes_nothing(tmp):
           "and did not create it by asking")
 
 
+# --------------------------------------------------------------------------
+# the report surfaces — what a run renders, and where it goes
+# --------------------------------------------------------------------------
+def reporter_defaults():
+    """`REPORT_DEFAULTS` as the RENDERER declares it — the other half of the pair.
+
+    `bin/touch-run` carries its own copy of this table (it is what publishes
+    the effective map into `orch-config.json`) for the reason `newest_wf_dir`
+    gives for its own second spelling: importing a 2 kloc daemon module into a
+    wrapper to read six values is the larger cost. A duplicated constant needs
+    a machine keeping it honest, and this is it — the assertion below compares
+    what `start` WROTE against what the renderer will READ, so the two cannot
+    drift into a run that reports differently from what it was told to.
+    """
+    import importlib.util
+    src = (REPO / "plugin" / "touch" / "skills" / "implement" / "templates"
+           / "cycle_reporter.py")
+    spec = importlib.util.spec_from_file_location("cycle_reporter_xcheck", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.REPORT_DEFAULTS
+
+
+def test_start_publishes_the_report_config(tmp):
+    print("test_start_publishes_the_report_config")
+    # Published WHOLE — all three surfaces, defaults filled — so the effective
+    # answer is readable in ONE file instead of being the overlay of a spec, a
+    # tracked constants file and a renderer's fallbacks.
+    project, tasks, spec, res = started(tmp, "reports-default")
+    if res is None or res.returncode != 0:
+        check(False, f"the fixture run started ({res.stdout if res else None})")
+        return
+    config = json.loads((tasks / "sp05run" / "orch-config.json")
+                        .read_text(encoding="utf-8"))
+    check(config.get("reports") == reporter_defaults(),
+          f"a spec that says nothing publishes exactly the renderer's own "
+          f"defaults ({config.get('reports')})")
+    check("reports: cycle=local, research=local|public, final=local|public"
+          in res.stdout,
+          f"…and start says so in one line ({res.stdout[-600:]})")
+    # It configures TOUCH's renderer, not the run, so it must not reach a
+    # script that has no idea what a page is.
+    # Parsed, not grepped: every path in this fixture carries the word
+    # "reports", so only the KEY set answers the question.
+    args = re.search(r"args: (\{.*?\}) \}\)", res.stdout, re.S)
+    keys = sorted(json.loads(args.group(1))) if args else None
+    check(keys is not None and "reports" not in keys,
+          f"`reports` is an envelope key, never part of the Workflow args "
+          f"({keys})")
+
+    # The per-run override, in both spellings.
+    project, tasks, spec, res = started(
+        tmp, "reports-spec", spec_extra={
+            "reports": {"cycle": "off", "final": {"publish": "local"}}})
+    if res is not None and res.returncode == 0:
+        got = json.loads((tasks / "sp05run" / "orch-config.json")
+                         .read_text(encoding="utf-8"))["reports"]
+        check(got["cycle"] == {"enabled": False, "publish": "local"},
+              f"the one-word shorthand switches a surface off ({got['cycle']})")
+        check(got["final"] == {"enabled": True, "publish": "local"},
+              f"the object form sets a destination and leaves `enabled` alone "
+              f"({got['final']})")
+        check(got["research"] == reporter_defaults()["research"],
+              f"a surface nobody named keeps its shipped default "
+              f"({got['research']})")
+        check("reports: cycle=off, research=local|public, final=local" in res.stdout,
+              f"…and the summary line reads back the effective answer "
+              f"({res.stdout[-600:]})")
+
+
+def test_project_constants_carry_report_defaults(tmp):
+    print("test_project_constants_carry_report_defaults")
+    # `.touch/run.json` is where a PROJECT decides this once. The generic merge
+    # is `dict(constants); update(spec)`, which is wrong for the one nested map
+    # both files may carry: a spec naming one surface would drop the project's
+    # settings for the other two and silently get the shipped defaults. So
+    # `reports` merges per surface AND per key.
+    project, tasks, plan_file = make_project(tmp, "reports-constants")
+    (project / ".touch" / "run.json").write_text(json.dumps({
+        "reports": {"cycle": {"publish": "public|local"},
+                    "final": {"enabled": False, "publish": "local"}}}),
+        encoding="utf-8")
+    spec = make_spec(tmp, "reports-constants.json", project, plan_file=plan_file,
+                     reports={"final": {"enabled": True}, "research": "off"})
+    res = run([RUN, "start", "sp05run", "--spec", spec, "--no-daemons"],
+              cwd=project)
+    if res is None or res.returncode != 0:
+        check(False, f"the run started ({res.stdout if res else None})")
+        return
+    got = json.loads((tasks / "sp05run" / "orch-config.json")
+                     .read_text(encoding="utf-8"))["reports"]
+    # `public|local` also proves the strict side PARSES a destination rather
+    # than looking it up: the stored answer is the one canonical spelling, so
+    # the summary line and the renderer never see two words for one set.
+    check(got["cycle"] == {"enabled": True, "publish": "local|public"},
+          f"a surface only the project named survives the merge, canonically "
+          f"spelled ({got['cycle']})")
+    check(got["final"] == {"enabled": True, "publish": "local"},
+          f"the spec wins on the key it names, and only on that key "
+          f"({got['final']})")
+    check(got["research"] == {"enabled": False, "publish": "local|public"},
+          f"and a surface only the spec named applies ({got['research']})")
+
+
+def test_start_refuses_a_malformed_reports_map(tmp):
+    print("test_start_refuses_a_malformed_reports_map")
+    # A `"cycles": "off"` that means nothing is indistinguishable, at the end
+    # of a run, from one that worked: the pages are simply there, and whoever
+    # switched them off finds out by opening them. So it is refused BEFORE
+    # anything is created — the same standard as the roster and plans_total.
+    for label, bad in (
+            ("an unknown surface", {"cycles": "off"}),
+            ("an unknown destination", {"cycle": {"publish": "publik"}}),
+            # A destination names its targets; a word that only counts them is
+            # not one, and is refused with the real vocabulary in the message
+            # rather than half-honoured as `local`.
+            ("a word that only counts", {"cycle": {"publish": "both"}}),
+            ("a 0/1 switch", {"cycle": {"enabled": 1}}),
+            ("a misspelled key", {"final": {"enable": False}}),
+            ("a bare word", "off")):
+        name = "reports-bad-" + label.split()[-1]
+        project, tasks, plan_file = make_project(tmp, name)
+        spec = make_spec(tmp, name + ".json", project, plan_file=plan_file,
+                         reports=bad)
+        res = run([RUN, "start", "sp05run", "--spec", spec, "--no-daemons"],
+                  cwd=project)
+        if res is None:
+            continue
+        check(res.returncode == 1 and "FAIL  the report surfaces" in res.stdout,
+              f"{label} is refused with a named FAIL line (rc={res.returncode}, "
+              f"{res.stdout[-200:]!r})")
+        check(not (tasks / "sp05run" / "orch-config.json").exists(),
+              f"…and {label} left nothing half-created")
+
+
+def test_status_reads_back_the_report_surfaces(tmp):
+    print("test_status_reads_back_the_report_surfaces")
+    # `status` is where a driver reads the effective answer without parsing
+    # JSON — including for the cycle surface, whose daemon logs to a file
+    # nobody is watching.
+    project, tasks, spec, res = started(
+        tmp, "reports-status", spec_extra={"reports": {"cycle": "public"}})
+    if res is None or res.returncode != 0:
+        check(False, f"the fixture run started ({res.stdout if res else None})")
+        return
+    res = run([RUN, "status", "sp05run"], cwd=project)
+    if res is not None:
+        check("reports: cycle=public, research=local|public, final=local|public"
+              in res.stdout,
+              f"status reads the published map back ({res.stdout[:600]})")
+    # Hand-edited into nonsense: `status` writes nothing and must describe the
+    # folder as it actually is, so it falls back and SAYS it fell back rather
+    # than refusing to report on a live run.
+    config_path = tasks / "sp05run" / "orch-config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["reports"] = {"cycle": "sometimes"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    res = run([RUN, "status", "sp05run"], cwd=project)
+    if res is not None:
+        check(res.returncode == 0
+              and "reports: cycle=local, research=local|public, final=local|public"
+              in res.stdout
+              and "shipped defaults apply" in res.stdout,
+              f"an unreadable map degrades to the defaults, out loud "
+              f"({[ln for ln in res.stdout.splitlines() if 'reports' in ln]})")
+
+
 def test_tasks_root_override(tmp):
     print("test_tasks_root_override")
     # The ladder is the shipped one (`aggregator.paths.tasks_root`): an explicit
@@ -1430,6 +1601,10 @@ def main():
             test_start_tells_a_foreign_monitor_from_this_projects(tmp)
             test_bind_records_and_renders(tmp)
             test_status_reports_and_writes_nothing(tmp)
+            test_start_publishes_the_report_config(tmp)
+            test_project_constants_carry_report_defaults(tmp)
+            test_start_refuses_a_malformed_reports_map(tmp)
+            test_status_reads_back_the_report_surfaces(tmp)
             test_tasks_root_override(tmp)
     print()
     if skips:

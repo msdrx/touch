@@ -503,6 +503,146 @@ def test_sp_loop_close_still_works():
               "the loop still renders its cycle page")
 
 
+# -- the requirement → implemented → Δ diagram -------------------------------
+# What every page now LEADS with, and the one thing on it that no other recorded
+# value implies: the divider's `finding_ids` are the REQUIREMENT, the
+# implementer's `items` are the IMPLEMENTATION, and the two read-only verdicts'
+# `deviations` are the DIFFERENCE. Three recorded inputs, zero inference — so
+# these tests are as much about what the renderer may NOT say when an input is
+# missing as about what it says when all three are there. A diagram that
+# quietly rounds silence up to coverage would be worse than the wall of prose it
+# replaced, because it would be short AND wrong.
+
+def coverage_run(tmp, *, items, gate_devs=(), crit_devs=(),
+                 finding_ids=("R-01", "R-02", "R-03"), partition=True):
+    """One rendered cycle carrying (optionally) the coverage fields."""
+    mod, task, wf, _log = make_run(tmp)
+    if partition:
+        plant(wf, "d1",
+              "[monitor] plan=divide stage=partition role=synth attempt=1",
+              {"subplans": [{"id": "sp-a", "title": "the diagram",
+                             "files": ["a.py"],
+                             "finding_ids": list(finding_ids),
+                             "slice_file": "/t/plan/slice-a.md"}],
+               "subplans_file": "/t/plan/x-subplans.md", "summary": "one"})
+    plant(wf, "a1", "[monitor] plan=sp-a stage=implement role=impl attempt=1",
+          {"done": True, "files_changed": ["a.py"], "summary": "implemented",
+           "items": list(items)})
+    plant(wf, "a2", "[monitor] plan=sp-a stage=test role=test attempt=1",
+          {"passed": not gate_devs, "summary": "gate said so",
+           "findings_file": "", "deviations": list(gate_devs)})
+    plant(wf, "a3", "[monitor] plan=sp-a stage=critique role=critique attempt=1",
+          {"approved": not crit_devs, "summary": "critique said so",
+           "findings_file": "", "depth": "in-scope", "critical_defect": False,
+           "deviations": list(crit_devs)})
+    rep = mod.Reporter(str(task), [str(wf)], emit_status=False)
+    rep.pass_once()
+    return mod, task, wf, (task / "report" / "cycles"
+                           / "sp-a-cycle-1.html").read_text(encoding="utf-8")
+
+
+def test_the_diagram_carries_requirement_implementation_and_delta():
+    print("test_the_diagram_carries_requirement_implementation_and_delta")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        _mod, _task, _wf, page = coverage_run(
+            tmp,
+            items=[{"id": "R-01", "status": "done", "note": "built as decided"},
+                   {"id": "R-02", "status": "partial", "note": "only half"},
+                   {"id": "R-99", "status": "done", "note": "drive-by fix"}],
+            gate_devs=[{"id": "R-03", "kind": "missing",
+                        "what": "nothing in the tree implements it"}],
+            crit_devs=[{"id": "R-02", "kind": "differs",
+                        "what": "shape drifts from the decided approach"}])
+        for rid in ("R-01", "R-02", "R-03", "R-99"):
+            check(rid in page, f"the diagram carries a row for {rid}")
+        for chip in ("✓ 1/3 requirements done", "◐ 1 partial", "? 1 unreported",
+                     "+ 1 extra", "Δ 2 gate/critique deviations"):
+            check(chip in page, f"the counts chip reads {chip!r}")
+        for text in ("only half", "nothing in the tree implements it",
+                     "shape drifts from the decided approach"):
+            check(text in page, f"the Δ column carries {text!r}")
+        # Color is never the only channel: every verdict cell pairs a glyph and
+        # a word with it, so the diagram survives grayscale and a text scrape.
+        for pair in ("✓ done", "◐ partial", "? unreported", "+ extra",
+                     "✗ missing", "≠ differs"):
+            check(pair in page, f"glyph+word travel together: {pair!r}")
+        check("R-99" in page and "not among the sub-plan" not in page.split(
+            "R-99")[0], "the extra id is rendered as a row, not dropped")
+
+
+def test_silence_about_an_item_is_a_gap_never_coverage():
+    print("test_silence_about_an_item_is_a_gap_never_coverage")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        _mod, _task, _wf, page = coverage_run(
+            tmp, items=[{"id": "R-01", "status": "done", "note": "did it"}])
+        check("✓ 1/3 requirements done" in page,
+              "an item the implementer never mentioned does not count as done")
+        check("? 2 unreported" in page,
+              "…it counts as UNREPORTED, and the count says how many")
+        check("R-02" in page and "R-03" in page,
+              "…and each silent requirement still gets its own row")
+        check("never mentioned this requirement" in page,
+              "the Δ column names the silence rather than leaving the row blank")
+
+
+def test_an_unknown_requirement_list_is_stated_never_assumed():
+    print("test_an_unknown_requirement_list_is_stated_never_assumed")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        _mod, _task, _wf, page = coverage_run(
+            tmp, partition=False,
+            items=[{"id": "R-01", "status": "done", "note": "did it"},
+                   {"id": "R-77", "status": "done", "note": "did this too"}])
+        check("the ids the AGENTS named" in page,
+              "with no partition on record the page says whose ids these are")
+        check("+ 1 extra" not in page and "+ extra" not in page,
+              "…and calls nothing `extra`: membership is unknowable without "
+              "the requirement list, and a guess would accuse the implementer")
+        check("✓ 2/2 requirements done" in page,
+              "…while still reporting what WAS recorded")
+
+
+def test_a_journal_without_the_coverage_fields_says_so():
+    print("test_a_journal_without_the_coverage_fields_says_so")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        _mod, task, _wf, page = coverage_run(tmp, partition=False, items=[])
+        check("No requirement coverage recorded" in page,
+              "an older or foreign journal renders a STATED ABSENCE")
+        check("0/0" not in page and "✓ 0/" not in page,
+              "…never a zero-of-zero that reads like a met requirement")
+        check("Requirement → implemented → Δ" in page,
+              "the section is still there, so the gap is visible where the "
+              "diagram would be")
+        index = (task / "report" / "cycles" / "index.html").read_text(
+            encoding="utf-8")
+        check("not reported" in index,
+              "the overview says the same thing in its coverage column")
+
+
+def test_every_surface_reports_the_same_coverage():
+    print("test_every_surface_reports_the_same_coverage")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, page = coverage_run(
+            tmp,
+            items=[{"id": "R-01", "status": "done", "note": "done"},
+                   {"id": "R-02", "status": "skipped", "note": "out of scope"}],
+            gate_devs=[{"id": "R-03", "kind": "missing", "what": "absent"}])
+        rep = mod.Reporter(str(task), [str(wf)], emit_status=False)
+        rep.ingest()
+        final = Path(rep.render_final()).read_text(encoding="utf-8")
+        index = (task / "report" / "cycles" / "index.html").read_text(
+            encoding="utf-8")
+        # ONE fold, three renderings: the cycle page, the overview and the final
+        # report cannot disagree about a sub-plan, because they call the same
+        # method on the same records.
+        for name, text in (("cycle page", page), ("index", index),
+                           ("final report", final)):
+            check("1/3" in text, f"the {name} reports 1 of 3 requirements done")
+            check("1 skipped" in text, f"the {name} reports the skipped item")
+        check("○ skipped" in page, "the cycle page names the skipped status")
+        check("the divider's partition" in final,
+              "the final report names where its requirement column comes from")
+
+
 # -- scattered transcripts (the /clear rotation) -----------------------------
 # The harness keys the transcript dir to the ACTIVE session id; /clear rotates
 # that id mid-run while the journal stays at its launch-time path, so one run's
@@ -1356,6 +1496,115 @@ def test_final_report_names_a_research_run_for_what_it_is():
               "research verdict words are rendered from the results' own shapes")
 
 
+def plant_research_coverage(wf, coverage, findings=None):
+    """A board whose findings carry ids + a synthesizer that accounts for them.
+
+    `findings` is {perspective: [(id, severity, title)]}; every researcher is
+    spawned, and one is deliberately left silent by the caller when the test is
+    about an incomplete board.
+    """
+    for i, key in enumerate(RESEARCH_KEYS):
+        aid = f"c{i}"
+        marker = f"[monitor] plan=research stage={key} role=research attempt=1"
+        spawn(wf, aid, marker)
+        rows = (findings or {}).get(key)
+        if rows is None:
+            continue
+        plant(wf, aid, marker,
+              {"findings": [{"id": fid, "file": "x.py", "severity": sev,
+                             "title": title} for fid, sev, title in rows],
+               "findings_file": f"/t/findings/research-{key}-attempt-1.md",
+               "summary": "s"})
+    marker = "[monitor] plan=synthesis stage=synthesize role=synth attempt=1"
+    spawn(wf, "sc", marker)
+    result = {"plan_file": "/t/plan/x-plan.md", "item_count": 2, "summary": "s"}
+    if coverage is not None:
+        result["coverage"] = coverage
+    plant(wf, "sc", marker, result)
+
+
+def test_the_research_report_draws_the_board_and_the_plan():
+    print("test_the_research_report_draws_the_board_and_the_plan")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_run(tmp)
+        plant_research_coverage(
+            wf,
+            findings={"prior-art": [("PA-1", "blocker", "the real defect"),
+                                    ("PA-2", "minor", "a nit")],
+                      "data-model": [("DM-1", "major", "shape drift")]},
+            # 'economics' is spawned and never returns: an incomplete board.
+            coverage=[{"id": "PA-1", "status": "accepted", "note": "item R-01"},
+                      {"id": "PA-2", "status": "dropped",
+                       "note": "cosmetic, no behavior change"},
+                      {"id": "DM-1", "status": "merged", "note": "into R-01"}])
+        text = render_final(mod, task, wf).read_text(encoding="utf-8")
+        # Diagram 1 — was every angle actually covered?
+        check("✓ 2/3 perspectives reported" in text,
+              "the board diagram counts the perspectives that reported")
+        check("? 1 never returned" in text and "never returned" in text,
+              "…and names the one that was spawned and never came back")
+        check("absent from the plan" in text,
+              "…as a Δ, because a silent angle is a hole in the plan")
+        # Diagram 2 — did every finding reach the plan, or get a reason not to?
+        for probe in ("✓ 1/3 findings accepted", "⊕ 1 merged", "○ 1 dropped"):
+            check(probe in text, f"the board→plan diagram reads {probe!r}")
+        check("cosmetic, no behavior change" in text,
+              "a dropped finding carries its justification as the Δ")
+        check("blocker" in text and "PA-1" in text,
+              "each finding row carries its id and severity")
+        check("the researchers' own" in text,
+              "the sources table says the research board needs no partition")
+
+
+def test_a_synthesis_that_says_nothing_is_never_full_coverage():
+    print("test_a_synthesis_that_says_nothing_is_never_full_coverage")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_run(tmp)
+        plant_research_coverage(
+            wf, coverage=None,
+            findings={"prior-art": [("PA-1", "blocker", "t")],
+                      "data-model": [("DM-1", "major", "t")],
+                      "economics": [("EC-1", "minor", "t")]})
+        text = render_final(mod, task, wf).read_text(encoding="utf-8")
+        check("✓ 0/3 findings accepted" in text,
+              "a synthesizer that returned no coverage accepted nothing")
+        check("? 3 unaccounted" in text,
+              "…the three findings read as UNACCOUNTED, the one real gap")
+        check("never said what became of this finding" in text,
+              "…and the Δ column says whose silence it is")
+        check("✓ 3/3 perspectives reported" in text,
+              "the board itself is still reported as complete — the two "
+              "diagrams answer different questions")
+
+
+def test_the_run_shape_diagram_reads_the_stream_not_a_computed_close():
+    print("test_the_run_shape_diagram_reads_the_stream_not_a_computed_close")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        text = render_final(mod, task, wf).read_text(encoding="utf-8")
+        check("The run, end to end" in text,
+              "the final report opens with the run-shape diagram")
+        check("1 SUB-PLANS" in text and "GREEN" in text,
+              "…drawn in the same node vocabulary as the cycle pages")
+        # `--final` never evaluates a close, so a shape read from self.closed
+        # would print every loop open on a finished run. FINAL_STREAM carries
+        # sp-a's `done` badge; the diagram has to use it.
+        check("0 RED" in text,
+              "the loop node counts red loops from the STREAM's badges")
+        check("<details><summary>Every agent's verdict" in text,
+              "the attempt-by-attempt long form is demoted behind a fold, so "
+              "the page leads with diagrams")
+
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_run(tmp)
+        plant_research_board(wf)
+        text = render_final(mod, task, wf).read_text(encoding="utf-8")
+        check("3/3 REPORTED" in text and "PLAN" in text,
+              "a research run gets the research shape, not the loops' one")
+        check("SUB-PLANS" not in text,
+              "…and never a divide node it never had")
+
+
 def test_narrative_is_the_only_authored_region():
     print("test_narrative_is_the_only_authored_region")
     with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
@@ -1417,6 +1666,228 @@ def test_narrative_is_the_only_authored_region():
         check("cap" in err.getvalue(),
               f"…loudly, like every other refusal here "
               f"({err.getvalue().strip()[:80]!r})")
+
+
+# -- the report surfaces ------------------------------------------------------
+# Three switches, one per page family (`cycle`, `research`, `final`), read live
+# out of orch-config.json where `touch-run start` publishes them. Two rules are
+# worth a test each, because both are the kind that decay into a lie rather
+# than into an error:
+#
+#   the SPLIT — a surface that is off stops PAGES and nothing else. The loop
+#       closes, protocol closes and roster are the monitoring protocol, so a
+#       run whose reports are switched off must still settle every card. The
+#       failure this guards is R-58 with a config file in front of it: a
+#       dashboard stuck on "running" because somebody turned off some HTML.
+#   the DESTINATION is reported, never acted on. This renderer cannot publish
+#       and always writes the local copy — the enum is an instruction to the
+#       driver, so it must reach the driver (stderr) without disturbing the
+#       one thing the driver captures (stdout: the path).
+
+def set_reports(task, reports):
+    """Merge a `reports` map into the fixture's orch-config.json."""
+    path = Path(task) / "orch-config.json"
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    cfg["reports"] = reports
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+
+
+def render_final_maybe(mod, task, wf, **kw):
+    """`render_final`, allowed to answer None; returns (path|None, stderr)."""
+    rep = mod.Reporter(str(task), [str(wf)], emit_status=False)
+    rep.ingest()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        out = rep.render_final(**kw)
+    return (Path(out) if out else None), err.getvalue()
+
+
+def test_the_shipped_report_defaults_are_the_documented_ones():
+    print("test_the_shipped_report_defaults_are_the_documented_ones")
+    # Pinned as VALUES, not as prose: these six are what a run reports when
+    # nobody configured anything, they are quoted in both skills, and
+    # `bin/touch-run` carries the same table (cross-checked in
+    # tests/test_touch_run.py against what `start` actually publishes).
+    mod = load_module(REPORTER_SRC, "cycle_reporter_defaults")
+    check(mod.REPORT_DEFAULTS == {
+        "cycle": {"enabled": True, "publish": "local"},
+        "research": {"enabled": True, "publish": "local|public"},
+        "final": {"enabled": True, "publish": "local|public"}},
+        f"cycle renders and stays local; research and final render and "
+        f"publish ({mod.REPORT_DEFAULTS})")
+    # A destination NAMES its targets rather than counting them: the value that
+    # used to be the opaque word `both` is spelled `local|public`, so the
+    # vocabulary is readable off any one value and a new destination is an
+    # entry in REPORT_DESTINATIONS instead of a new word to look up.
+    check(mod.REPORT_DESTINATIONS == ("local", "public"),
+          f"the destinations are the vocabulary ({mod.REPORT_DESTINATIONS})")
+    check(mod.REPORT_PUBLISH == ("local", "public", "local|public"),
+          f"…and the accepted values are every selection of them, canonically "
+          f"ordered ({mod.REPORT_PUBLISH})")
+    # Derived, not typed out — so the pair cannot drift into a value with no
+    # directive, which would be a KeyError at the one moment a run has a page
+    # to hand over.
+    check(sorted(mod.PUBLISH_DIRECTIVE) == sorted(mod.REPORT_PUBLISH),
+          f"every value has the words the driver acts on "
+          f"({sorted(mod.PUBLISH_DIRECTIVE)})")
+    # Parsed, so order and repetition are the writer's business and what gets
+    # stored is the one canonical spelling.
+    for spelling in ("public|local", "PUBLIC | Local", "local|local|public"):
+        check(mod.normalize_publish(spelling) == "local|public",
+              f"{spelling!r} canonicalizes ({mod.normalize_publish(spelling)!r})")
+    for bad in ("", "both", "local|publik", "local|", None, ["local"]):
+        check(mod.normalize_publish(bad) is None,
+              f"{bad!r} names no destination ({mod.normalize_publish(bad)!r})")
+    # An off surface has no second spelling to drift from: `"off"` normalizes
+    # to the same `enabled: False` the object form produces.
+    for spelling in ("off", {"enabled": False}):
+        got, problems = mod.normalize_reports({"cycle": spelling})
+        check(not problems and got["cycle"]["enabled"] is False,
+              f"{spelling!r} switches the cycle surface off ({got['cycle']})")
+    got, problems = mod.normalize_reports({"cycle": "public"})
+    check(not problems and got["cycle"] == {"enabled": True, "publish": "public"},
+          f"the bare-string shorthand is a whole surface ({got['cycle']})")
+    got, problems = mod.normalize_reports({"cycle": {"publish": "public|local"}})
+    check(not problems and got["cycle"]["publish"] == "local|public",
+          f"…and a destination is stored canonically, however it was written "
+          f"({got['cycle']})")
+
+
+def test_switching_the_cycle_surface_off_stops_pages_not_events():
+    print("test_switching_the_cycle_surface_off_stops_pages_not_events")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, log = make_run(tmp)
+        set_reports(task, {"cycle": {"enabled": False}})
+        plant(wf, "a1", "[monitor] plan=sp-x stage=implement role=impl attempt=1",
+              {"done": True, "files_changed": ["a.py"], "summary": "s",
+               "items": [{"id": "R-1", "status": "done", "note": "built"}]})
+        plant(wf, "a2", "[monitor] plan=sp-x stage=test role=test attempt=1",
+              {"passed": True, "summary": "ok", "findings_file": "f",
+               "deviations": []})
+        plant(wf, "a3", "[monitor] plan=sp-x stage=critique role=critique attempt=1",
+              {"approved": True, "summary": "ok", "findings_file": "f",
+               "depth": "in-scope", "critical_defect": False, "deviations": []})
+        mod.Reporter(str(task), [str(wf)]).pass_once()
+        check(calls(log) == ["sp-x|plan|done|green on attempt 1/4|"],
+              f"the loop still closes — the switch owns pages, not the "
+              f"protocol ({calls(log)})")
+        check(not (task / "report" / "cycles").exists(),
+              "and no page, and no empty report/cycles/ to be read as a run "
+              "that rendered nothing")
+        # Flipped back mid-run: the daemon re-reads its config every pass, so
+        # the pages appear without a restart and the close is NOT re-emitted.
+        set_reports(task, {"cycle": {"enabled": True}})
+        rep = mod.Reporter(str(task), [str(wf)])
+        rep.pass_once()
+        check((task / "report" / "cycles" / "sp-x-cycle-1.html").is_file(),
+              "switching it back on renders the page the run already has")
+        check(calls(log) == ["sp-x|plan|done|green on attempt 1/4|"],
+              f"…and emits nothing a second time ({calls(log)})")
+
+
+def test_a_disabled_final_report_renders_nothing_and_force_overrides():
+    print("test_a_disabled_final_report_renders_nothing_and_force_overrides")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        set_reports(task, {"final": "off"})
+        out, err = render_final_maybe(mod, task, wf)
+        page = task / "report" / "final-report.html"
+        check(out is None and not page.exists(),
+              f"an off surface renders NO page and writes nothing ({out})")
+        check("reports.final is off" in err,
+              f"…and says which switch did it ({err.strip()[:90]!r})")
+        # The empty stdout IS the protocol: a driver's `path=$(… --final)` gets
+        # the empty string and publishes nothing, without parsing a reason.
+        script = Path(mod.__file__)
+        res = subprocess.run(
+            [sys.executable, "-B", str(script), str(wf), "--final"],
+            env={**os.environ, "ORCH_STATE_DIR": str(task)},
+            capture_output=True, text=True)
+        check(res.returncode == 0 and res.stdout.strip() == "",
+              f"exit 0 with an empty stdout — a configured 'no report' is an "
+              f"answer, not a failure (rc={res.returncode}, {res.stdout!r})")
+        check(not page.exists(), "still nothing on disk after the CLI run")
+        # …and the human override, for the one who switched it off themselves.
+        out, _ = render_final_maybe(mod, task, wf, force=True)
+        check(out is not None and page.is_file(),
+              f"--force renders it anyway ({out})")
+
+
+def test_each_run_kind_reads_its_own_surface():
+    print("test_each_run_kind_reads_its_own_surface")
+    # Which switch applies is derived from the plan ids that actually ran — the
+    # same fold that picks the filename — so `final` can never gate a research
+    # run's page, or the two switches would be one switch with two names.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_run(tmp)
+        plant_research_board(wf)
+        set_reports(task, {"final": "off"})
+        out, _ = render_final_maybe(mod, task, wf)
+        check(out is not None and out.name == "research-report.html",
+              f"a research run ignores `final` ({out})")
+        set_reports(task, {"research": "off", "final": {"enabled": True}})
+        out, err = render_final_maybe(mod, task, wf)
+        check(out is None and "reports.research is off" in err,
+              f"…and obeys `research` ({out}, {err.strip()[:70]!r})")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        set_reports(task, {"research": "off"})
+        out, _ = render_final_maybe(mod, task, wf)
+        check(out is not None and out.name == "final-report.html",
+              f"an implement run ignores `research` ({out})")
+
+
+def test_the_publish_destination_is_printed_never_acted_on():
+    print("test_the_publish_destination_is_printed_never_acted_on")
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_final_run(tmp)
+        script = Path(mod.__file__)
+        page = task / "report" / "final-report.html"
+        for value, needle in (("local", "publish nothing"),
+                              ("public", "hand back the URL"),
+                              ("local|public", "beside the URL")):
+            set_reports(task, {"final": value})
+            res = subprocess.run(
+                [sys.executable, "-B", str(script), str(wf), "--final"],
+                env={**os.environ, "ORCH_STATE_DIR": str(task)},
+                capture_output=True, text=True)
+            check(res.stdout.strip() == str(page),
+                  f"stdout stays exactly the path for publish={value} "
+                  f"({res.stdout.strip()[-40:]!r})")
+            check(f"publish: {value}" in res.stderr and needle in res.stderr,
+                  f"…and stderr carries the instruction the driver acts on "
+                  f"({res.stderr.strip()[:90]!r})")
+            # The local copy is written for EVERY value: the storage rule is
+            # satisfied by construction, so `public` is not a way to skip it.
+            check(page.is_file(),
+                  f"the task-folder copy exists for publish={value}")
+            page.unlink()
+
+
+def test_a_malformed_report_config_falls_back_loudly_and_once():
+    print("test_a_malformed_report_config_falls_back_loudly_and_once")
+    # `touch-run` refuses a malformed spec before a run exists; by the time
+    # THIS reader sees one it is a live daemon tailing a journal, so a bad
+    # value falls back to the shipped default — reported, so nobody reads an
+    # ignored `"publlish"` as an honoured one, and once, so a 2-second poll
+    # loop does not print it for the length of the run.
+    with tempfile.TemporaryDirectory(prefix="cycle-reporter-") as tmp:
+        mod, task, wf, _ = make_run(tmp)
+        set_reports(task, {"cycle": {"publlish": "public"}, "finl": "off"})
+        rep = mod.Reporter(str(task), [str(wf)], emit_status=False)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            first = rep.reports()
+            rep.reports()
+            rep.reports()
+        check(first == mod.REPORT_DEFAULTS,
+              f"every unusable value falls back to the shipped default ({first})")
+        lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+        check(len(lines) == 2 and all("orch-config.json" in ln for ln in lines),
+              f"each distinct problem is reported exactly once ({lines})")
+        check(any("publlish" in ln for ln in lines)
+              and any("finl" in ln for ln in lines),
+              f"…naming the key that was not understood ({lines})")
 
 
 def test_value_flags_take_both_spellings():
@@ -1482,6 +1953,11 @@ def main():
                   test_divide_closes_failed_like_the_template,
                   test_finalgate_closes,
                   test_sp_loop_close_still_works,
+                  test_the_diagram_carries_requirement_implementation_and_delta,
+                  test_silence_about_an_item_is_a_gap_never_coverage,
+                  test_an_unknown_requirement_list_is_stated_never_assumed,
+                  test_a_journal_without_the_coverage_fields_says_so,
+                  test_every_surface_reports_the_same_coverage,
                   test_scattered_transcripts_still_resolve,
                   test_marker_miss_is_retried_not_cached,
                   test_research_plans_close_done_with_two,
@@ -1503,7 +1979,16 @@ def main():
                   test_no_status_leaves_the_checkpoint_untouched,
                   test_final_report_is_deterministic_and_sourced,
                   test_final_report_names_a_research_run_for_what_it_is,
+                  test_the_research_report_draws_the_board_and_the_plan,
+                  test_a_synthesis_that_says_nothing_is_never_full_coverage,
+                  test_the_run_shape_diagram_reads_the_stream_not_a_computed_close,
                   test_narrative_is_the_only_authored_region,
+                  test_the_shipped_report_defaults_are_the_documented_ones,
+                  test_switching_the_cycle_surface_off_stops_pages_not_events,
+                  test_a_disabled_final_report_renders_nothing_and_force_overrides,
+                  test_each_run_kind_reads_its_own_surface,
+                  test_the_publish_destination_is_printed_never_acted_on,
+                  test_a_malformed_report_config_falls_back_loudly_and_once,
                   test_value_flags_take_both_spellings):
             t()
     finally:

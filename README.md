@@ -10,7 +10,7 @@ decided, and what it all costs in tokens.
 
 It is read-only for now. Future releases will "touch" the agent.
 
-> **Alpha — v0.2.3.** Touch is early software: incomplete, moving, and rough in
+> **Alpha — v0.2.4.** Touch is early software: incomplete, moving, and rough in
 > places. Interfaces, layout and command behaviour can change between releases
 > without a migration path.
 

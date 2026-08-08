@@ -11,6 +11,73 @@ development record of what existed before it; no marketplace ever served it and
 no one could install it, so there is no upgrade path from it to document and
 nothing to migrate. If you installed Touch at all, you installed 0.2.0 or later.
 
+## 0.2.4
+
+Still no session verb, and the memory editor's save side still ships disabled
+until you start the dashboard with `--allow-memory-write`. This release is about
+what a run HANDS OVER. A monitored run already showed you every stage as it
+happened; when it ended you got a dashboard full of green cards and no answer to
+the only question that outlives the run — **was the thing that was asked for
+actually built, and where does what shipped differ from what was decided?** So
+every report now leads with that comparison, derived from recorded results
+only, and the run's end-of-run page is rendered by a program rather than
+narrated by an agent.
+
+**Added**
+
+- **The requirement → implemented → Δ diagram**, on every cycle page and on the
+  final report. For an implement run the requirement is the divider's
+  `finding_ids` and the delivery is each implementer's per-item `items`; for a
+  research run it is the researchers' finding board against the synthesizer's
+  `coverage`. One row per item: what was required, what was built, and where the
+  two read-only verdicts say the tree differs (`missing` | `differs` | `extra`).
+  A plan item nobody reported renders **unreported**, and work beyond the
+  requirement renders **extra** — silence about an item is the one thing a
+  coverage diagram may not render as coverage. Every cell is glyph + word +
+  colour, so it survives a colourblind reader, a greyscale print and a
+  plain-text scrape.
+- **`touch-cycle-reporter --final`** — the run's end-of-run page, written into
+  the run folder under `.touch/local-orchestrators/<task>/report/`
+  (`final-report.html`, or `research-report.html` for a research run) and
+  diagram-first: the run shape, the coverage diagram(s), the timeline, the
+  attempt-by-attempt cards behind a fold, then links to the plan and every
+  findings file. Every number has ONE named source, the page carries no render
+  timestamp, and rendering the same inputs twice is byte-identical. Exactly one
+  slot is authored rather than derived — the narrative section, injected from a
+  file with `--narrative`.
+- **Per-surface report config (`reports`)** — three surfaces, `cycle`,
+  `research` and `final`, each `{enabled, publish}`, set in the run spec or once
+  per project in `.touch/run.json` (merged surface by surface AND key by key, so
+  naming one never silently resets the others). `touch-run start` refuses a
+  malformed map before anything is created, publishes the effective one whole
+  into `orch-config.json` and prints it; the reporter re-reads it live, so a
+  mid-run edit needs no restart, and `touch-run status` reads it back.
+  **`enabled: false` stops PAGES and nothing else** — every loop close, protocol
+  close and roster event still fires, so no card is left "running" because
+  reporting was turned off.
+- **New structured fields the diagram is derived from**: `items` on the
+  implementer verdict, `deviations` on both read-only verdicts, and `coverage`
+  on the research synthesizer — each an id, a status and one ≤120-char line. The
+  argument and the evidence stay in the findings file; these are the diagram's
+  labels, and they are schema-enforced by the templates rather than asked for in
+  prose.
+
+**Changed**
+
+- **A publish destination NAMES its targets**: `local`, `public` or
+  `local|public`, `|`-joined, replacing the opaque `both`. The vocabulary is
+  readable off any single value, order and repetition are canonicalized
+  (`public|local` is stored as `local|public`), and a future destination is one
+  entry in the table rather than a new word to look up. The task-folder copy is
+  written for **every** destination — `publish` chooses whether the Artifact
+  step happens, never whether the durable copy exists.
+- **The report step in both orchestration skills is render → narrate →
+  publish**: the renderer writes the page under the task folder first, the agent
+  writes only the narrative fragment, and publishing is the last step and a
+  mirror. With the surface off, the render prints nothing, writes nothing and
+  exits 0, so a driver's `path=$(… --final)` publishes nothing without needing
+  to know why.
+
 ## 0.2.3
 
 Still no session verb, and the memory editor's save side still ships disabled

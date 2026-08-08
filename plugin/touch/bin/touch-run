@@ -180,7 +180,42 @@ TEMPLATES = {
 #: GD-D9's byte-identity pin self-referential — the copy would be compared
 #: against the very file the spec chose, so a per-run, LLM-authored script (the
 #: SKILLS-3 failure that pin exists to end) would preflight green.
-ENVELOPE_KEYS = ("kind", "title", "roster", "plans_total", "script")
+#:
+#: `reports` is in here for the plainer reason: it configures TOUCH's renderer,
+#: not the run, so it is published into `orch-config.json` for the reporter to
+#: re-read and never handed to a script that has no idea what a page is.
+ENVELOPE_KEYS = ("kind", "title", "roster", "plans_total", "script", "reports")
+
+#: The three report surfaces, the publish destinations and the shipped defaults —
+#: the SAME table `skills/implement/templates/cycle_reporter.py` carries, which
+#: is the file that renders them and the authority on what each one means. It
+#: is duplicated rather than imported for the reason `newest_wf_dir` gives for
+#: its own second spelling: pulling a 2 kloc daemon module into this wrapper to
+#: read six values is the larger cost. What keeps the two honest is not this
+#: comment — `tests/test_touch_run.py` runs `start` with a spec that declares
+#: nothing and asserts the map it publishes EQUALS the renderer's own table.
+#:
+#: Why the defaults are these: cycle pages are working notes a run produces by
+#: the dozen (rendered, kept local), while the two end-of-run pages are what a
+#: run is handed over with (rendered, published). `enabled: false` switches off
+#: PAGES and never events — an unreported run still settles every card.
+#:
+#: A destination NAMES what happens to the rendered file, `|`-joined, so the
+#: vocabulary is visible in the value itself: `local` keeps the task-folder
+#: copy and publishes nothing, `public` publishes it, `local|public` does both
+#: and cites the path beside the URL. Adding a destination is an entry in
+#: `REPORT_DESTINATIONS` on both sides — never a new opaque word.
+REPORT_SURFACES = ("cycle", "research", "final")
+REPORT_DESTINATIONS = ("local", "public")
+REPORT_PUBLISH = tuple(
+    "|".join(dest for bit, dest in enumerate(REPORT_DESTINATIONS)
+             if mask >> bit & 1)
+    for mask in range(1, 1 << len(REPORT_DESTINATIONS)))
+REPORT_DEFAULTS = {
+    "cycle": {"enabled": True, "publish": "local"},
+    "research": {"enabled": True, "publish": "local|public"},
+    "final": {"enabled": True, "publish": "local|public"},
+}
 
 #: The per-project constants file (D-12/SKILLS-7): tracked, configured once,
 #: merged UNDER the run spec so a per-run value always wins.
@@ -364,7 +399,110 @@ def merge_spec(spec, constants):
     """The constants UNDER the spec — a per-run value always wins (GD-D9)."""
     merged = dict(constants)
     merged.update(spec)
+    # `reports` is the one NESTED map both files may carry, so the shallow
+    # update above is wrong for it in a way that is silent: a spec naming one
+    # surface ("this run's cycle pages are off") would drop the project's
+    # settings for the other two and get the shipped defaults instead. Merged
+    # per surface and per key, so a per-run value still wins over exactly what
+    # it names and nothing else.
+    over, under = spec.get("reports"), constants.get("reports")
+    if isinstance(over, dict) and isinstance(under, dict):
+        merged["reports"] = combined = dict(under)
+        for surface, value in over.items():
+            base = combined.get(surface)
+            # Object over object merges key by key; a one-word shorthand on
+            # either side replaces whole, because "off" and `{"publish": …}`
+            # are answers to different questions and half-applying one would
+            # invent a state neither file asked for.
+            combined[surface] = ({**base, **value}
+                                 if isinstance(base, dict) and isinstance(value, dict)
+                                 else value)
     return merged
+
+
+def normalize_publish(value):
+    """`"public|local"` -> `"local|public"`; None when it names anything else.
+
+    The renderer carries this function verbatim, for the reason the constants
+    above are duplicated: a destination is PARSED, not looked up, so order and
+    repetition are the writer's business and what comes back is the one
+    canonical spelling of the set. The two files must agree on what a value
+    means; they differ only in what they do when it is unusable.
+    """
+    if not isinstance(value, str):
+        return None
+    picked = {token.strip().lower() for token in value.split("|")}
+    if not picked <= set(REPORT_DESTINATIONS):
+        return None
+    return "|".join(dest for dest in REPORT_DESTINATIONS if dest in picked)
+
+
+def normalize_reports(raw, where="the spec's `reports`"):
+    """`{surface: {enabled, publish}}` with the shipped defaults under `raw`.
+
+    REFUSES anything it does not understand, which is the opposite of the
+    renderer's tolerance over the same data and deliberately so: here nothing
+    has been created yet, so a typo is a refusal with an empty tasks root
+    behind it; there, the config reaches a daemon already tailing a live run,
+    where exiting would turn one typo into a run with no pages at all.
+
+    Accepted per surface: `{"enabled": bool, "publish": <destination>}` where a
+    destination is `local`, `public` or `local|public`; or the bare-string
+    shorthand `"off"` / `"local"` / `"public"` / `"local|public"`.
+    """
+    out = {surface: dict(value) for surface, value in REPORT_DEFAULTS.items()}
+    if raw is None:
+        return out
+    if not isinstance(raw, dict):
+        raise Refused("%s is %s, not an object" % (where, type(raw).__name__))
+    words = ("off",) + REPORT_PUBLISH
+    for surface, value in raw.items():
+        if surface not in out:
+            raise Refused("%s names an unknown surface %r (known: %s)"
+                          % (where, oneline(surface, 40),
+                             ", ".join(REPORT_SURFACES)))
+        if isinstance(value, str):
+            word = value.strip().lower()
+            picked = normalize_publish(word)
+            if word != "off" and not picked:
+                raise Refused("%s.%s is %r (expected %s)"
+                              % (where, surface, oneline(value, 40),
+                                 ", ".join(words)))
+            out[surface] = ({"enabled": False, "publish": out[surface]["publish"]}
+                            if word == "off"
+                            else {"enabled": True, "publish": picked})
+            continue
+        if not isinstance(value, dict):
+            raise Refused("%s.%s is %s, not an object or one of %s"
+                          % (where, surface, type(value).__name__, ", ".join(words)))
+        for key, sub in value.items():
+            if key == "enabled":
+                # `isinstance(1, bool)` is False, and that is the point: 0/1 is
+                # a spelling this file does not accept, so it is refused now
+                # rather than half-honoured by a reader later.
+                if not isinstance(sub, bool):
+                    raise Refused("%s.%s.enabled is %s, not true or false"
+                                  % (where, surface, oneline(repr(sub), 40)))
+                out[surface]["enabled"] = sub
+            elif key == "publish":
+                picked = normalize_publish(sub)
+                if not picked:
+                    raise Refused("%s.%s.publish is %s (expected %s)"
+                                  % (where, surface, oneline(repr(sub), 40),
+                                     ", ".join(REPORT_PUBLISH)))
+                out[surface]["publish"] = picked
+            else:
+                raise Refused("%s.%s has an unknown key %r (expected enabled, "
+                              "publish)" % (where, surface, oneline(key, 40)))
+    return out
+
+
+def reports_summary(reports):
+    """`cycle=local, research=local|public, final=off` — one line, fixed order."""
+    return ", ".join(
+        "%s=%s" % (surface, reports[surface]["publish"]
+                   if reports[surface]["enabled"] else "off")
+        for surface in REPORT_SURFACES)
 
 
 def spec_kind(spec):
@@ -521,6 +659,18 @@ def preflight(spec, script, task=None, shipped=None):
     else:
         report(True, "the run envelope is well formed (roster: %d entries, "
                      "plans_total declared %d)" % (len(entries), declared))
+
+    # The report surfaces, judged here for the same reason as the envelope: a
+    # `"cycles": "off"` that means nothing is indistinguishable, at the end of
+    # a run, from one that worked — the pages are simply there, and whoever
+    # switched them off finds out by opening them.
+    try:
+        surfaces = normalize_reports(spec.get("reports"))
+    except Refused as exc:
+        report(False, "the report surfaces are well formed (%s)" % oneline(exc, 160))
+    else:
+        report(True, "the report surfaces are well formed (%s)"
+                     % reports_summary(surfaces))
 
     if not os.path.isfile(script):
         report(False, "the run script %s exists" % script)
@@ -1273,9 +1423,17 @@ def verb_start(paths, argv):
         config["max_plan_attempts"] = spec["max_attempts"]
     if spec.get("finalgate_attempts"):
         config["max_finalgate_attempts"] = spec["finalgate_attempts"]
+    # Published WHOLE — all three surfaces, defaults filled — so the effective
+    # answer is readable in one file instead of being the overlay of a spec, a
+    # tracked constants file and a renderer's fallbacks. The preflight above
+    # already refused anything malformed, so this call cannot raise here.
+    config["reports"] = reports = normalize_reports(spec.get("reports"))
     write_json(os.path.join(task_dir, "orch-config.json"), config)
     say("orch-config.json: caps and strategy published by touch-run, never by "
         "the script (INVENTORY-2)")
+    say("reports: %s — an `off` surface renders no page and changes no event; "
+        "`local` keeps the task-folder copy and publishes nothing"
+        % reports_summary(reports))
 
     # ---- the roster file (GD-D11). `ORCH_ROSTER` is a FILE PATH env var and
     # never env-inlined JSON, so a roster cannot be as long as an argv allows
@@ -1603,6 +1761,19 @@ def verb_status(paths, argv):
     config = load_config(task_dir)
     say("wf_dir: %s" % (config.get("wf_dir") or "(unbound — run touch-run bind)"))
     say("run id: %s" % (config.get("resume_from_run_id") or "(unbound)"))
+
+    # What this run reports, and where — the one place a driver can read the
+    # effective answer without parsing JSON. Tolerant here, unlike the
+    # preflight: `status` writes nothing and must describe a task folder in
+    # whatever state it is actually in, including hand-edited.
+    try:
+        reports = normalize_reports(config.get("reports"),
+                                    where="orch-config.json's `reports`")
+        note = ""
+    except Refused as exc:
+        reports = normalize_reports(None)
+        note = "   (%s — the shipped defaults apply)" % oneline(exc, 100)
+    say("reports: %s%s" % (reports_summary(reports), note))
 
     listed = active_list(tasks_root)
     say("run scope: ACTIVE %s this task (listed: %s)"

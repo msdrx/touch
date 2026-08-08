@@ -9,7 +9,7 @@ one out; the daemons write into it; nothing ever deletes one.
 | entry | written by | what it is |
 |---|---|---|
 | `events.jsonl` | `status.sh` only (GD-D5) | the append-only event stream: one JSON line per plan/stage/state transition. Replayed in full on every dashboard connect |
-| `orch-config.json` | `touch-run start` / `bind` | the run's constants: `wf_dir`, port, caps, strategy, `resume_from_run_id` |
+| `orch-config.json` | `touch-run start` / `bind` | the run's constants: `wf_dir`, port, caps, strategy, `resume_from_run_id`, and `reports` — the three report surfaces (`cycle`, `research`, `final`), each `{enabled, publish}`, published whole from the run spec and `.touch/run.json` and re-read live by the reporter |
 | `.watcher-state.json` | `decision_watcher.py` | the watcher's checkpoint — restart-safe, never double-counts |
 | `orch-scripts/` | the driver | the byte-for-byte copy of the workflow template this run executed |
 | `plan/` | the synthesizer / divider | the plan, its sub-plan partition, and `RESUME.md` |

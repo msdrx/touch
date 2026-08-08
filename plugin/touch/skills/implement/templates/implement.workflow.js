@@ -157,17 +157,42 @@ const agentR = async (prompt, opts) => {
   return r
 }
 
+// Per-requirement coverage: ONE row of the report's requirement -> implemented
+// -> delta diagram, and the one thing that diagram cannot derive from anything
+// already recorded. `files_changed` says which files moved and `summary` says
+// it in prose; neither answers "was plan item R-12 built as decided", which is
+// the question a reader of the report actually has. `id` must be one of the
+// sub-plan's finding_ids — an id outside that set is not rejected, it renders
+// as `extra` (implementation beyond the requirement), which is a difference
+// worth seeing rather than an error worth losing.
+const COVERAGE_ITEM = {
+  type: 'object', required: ['id', 'status', 'note'],
+  properties: { id: { type: 'string' },
+                status: { type: 'string', enum: ['done', 'partial', 'skipped'] },
+                note: { type: 'string' } },
+}
+// The other half of the same diagram, from the two READ-ONLY verdicts: where
+// the TREE differs from the slice. Kept to (id, kind, one line) on purpose —
+// the argument and the evidence stay in the findings file; this is the label.
+const DEVIATION = {
+  type: 'object', required: ['id', 'kind', 'what'],
+  properties: { id: { type: 'string' },
+                kind: { type: 'string', enum: ['missing', 'differs', 'extra'] },
+                what: { type: 'string' } },
+}
 const IMPL_SCHEMA = {
-  type: 'object', required: ['done', 'files_changed', 'summary'],
+  type: 'object', required: ['done', 'files_changed', 'summary', 'items'],
   properties: { done: { type: 'boolean' },
                 files_changed: { type: 'array', items: { type: 'string' } },
-                summary: { type: 'string' } },
+                summary: { type: 'string' },
+                items: { type: 'array', items: COVERAGE_ITEM } },
 }
 // Gates return the verdict + a SHORT summary only; full findings go to the file.
 const GATE_SCHEMA = {
-  type: 'object', required: ['passed', 'summary', 'findings_file'],
+  type: 'object', required: ['passed', 'summary', 'findings_file', 'deviations'],
   properties: { passed: { type: 'boolean' }, summary: { type: 'string' },
-                findings_file: { type: 'string' } },
+                findings_file: { type: 'string' },
+                deviations: { type: 'array', items: DEVIATION } },
 }
 // The critique also CLASSIFIES a rejection, because the loop-failure policy
 // branches on it at the final attempt:
@@ -181,12 +206,14 @@ const GATE_SCHEMA = {
 //                             user: a serial run stops HERE (before the next
 //                             loop) and the driver notifies the user.
 const CRIT_SCHEMA = {
-  type: 'object', required: ['approved', 'summary', 'findings_file', 'depth', 'critical_defect'],
+  type: 'object', required: ['approved', 'summary', 'findings_file', 'depth',
+                             'critical_defect', 'deviations'],
   properties: { approved: { type: 'boolean' }, summary: { type: 'string' },
                 findings_file: { type: 'string' },
                 depth: { type: 'string', enum: ['in-scope', 'needs-own-flow'] },
                 critical_defect: { type: 'boolean' },
-                next_steps: { type: 'string' } },
+                next_steps: { type: 'string' },
+                deviations: { type: 'array', items: DEVIATION } },
 }
 
 // D-24 / ECONOMICS-6: one line, not a policy. Measured over this project's own
@@ -244,6 +271,12 @@ ${notes.map(n => '- ' + n).join('\n')}` : ''}` : ''}
 Then implement the items matching existing repo style, and write/extend tests.
 Sanity-check ONLY your own work (run just the tests you touched; syntax-check the
 files you changed).
+Return \`items\`: ONE entry per owned plan item (${sp.finding_ids.join(', ')}) —
+\`id\` exactly as written there, \`status\` done|partial|skipped, and \`note\` in
+≤120 chars: what you built for it, or for partial/skipped what is missing and
+why. This is a report row, not a report: the prose stays in \`summary\`. Omitting
+an item does not hide it — it renders as UNREPORTED, which reads worse than a
+truthful \`skipped\`.
 `
 
 const gateFindingsFile = (sp, attempt) => `${FINDINGS}/${sp.id}-test-attempt-${attempt}.md`
@@ -264,6 +297,11 @@ Implementer changed: ${JSON.stringify(impl.files_changed)}.
 4. Write FULL findings to ${file} (mkdir -p ${FINDINGS} first): every failure with
    test id, traceback essence, why it is attributable to the change, and a concrete
    fix suggestion. On pass, write the green evidence summary there too.
+5. Return \`deviations\`: one entry per place the TREE differs from the slice —
+   \`id\` the plan item id it belongs to (or the file path for an edit no item
+   asked for), \`kind\` missing|differs|extra, \`what\` in ≤120 chars. An empty
+   array is the right answer when the tree matches the slice; it is a diagram
+   label, so the reasoning stays in ${file}.
 ${TEST_HINTS ? `Test hints for this run (apply them): ${TEST_HINTS}\n` : ''}`
 
 const critPrompt = (sp, attempt, impl, gate, file) => `
@@ -287,6 +325,11 @@ Classify your verdict too (structured fields):
 - critical_defect: true ONLY for a defect so fundamental that implementing the
   REMAINING sub-plans before a human decides would waste or corrupt work; then
   next_steps MUST name the decision the user has to make (one short sentence).
+- deviations: one entry per place the DIFF differs from the slice — \`id\` the
+  plan item id (or the file for an unasked-for change), \`kind\`
+  missing|differs|extra, \`what\` in ≤120 chars. Report the gap even when you
+  approve: an approved review with a real \`differs\` is exactly what the
+  report's delta column exists to show. Empty array when the diff matches.
 `
 
 // ---- Per-cycle visual report: ONE artifact after EVERY impl->test->critique cycle ----
@@ -296,9 +339,11 @@ Classify your verdict too (structured fields):
 // or Node API access, so the script CANNOT write pages itself, and an LLM scribe
 // would be non-deterministic. The daemon tails the run journal, correlates every
 // structured result to (plan, stage, attempt) via the [monitor] markers — zero
-// LLM cooperation — renders report/cycles/<sp>-cycle-<N>.html + index.html with
-// the WHY (verdict summaries + findings files embedded as evidence, on failure
-// AND success), and emits the loop-terminal `plan done|failed` status event when
+// LLM cooperation — renders report/cycles/<sp>-cycle-<N>.html + index.html
+// leading with the requirement -> implemented -> Δ diagram (the divider's
+// finding_ids against this cycle's `items` and `deviations`) and then the WHY
+// (verdict summaries + findings files embedded as evidence, on failure AND
+// success), and emits the loop-terminal `plan done|failed` status event when
 // it sees a loop close (a REAL verdict at the published cap — not the retired
 // GD-10 phase-advance inference). The script carries only the CLASSIFICATION
 // contract, which the daemon and the driver both read:
@@ -506,6 +551,9 @@ Every sub-plan loop closed green; merged changed files: ${JSON.stringify(allFile
 3. Scope audit: git status — no edits outside the planned files.
 4. Write FULL findings to ${file}: each failure with command, output essence, fix
    suggestion, and the OWNING sub-plan id; on pass, the green evidence.
+5. Return \`deviations\` (same shape as a per-loop gate): \`id\` the OWNING
+   sub-plan id here, since a merged sweep sees integration, not items;
+   \`kind\` missing|differs|extra, \`what\` in ≤120 chars. Empty when green.
 ${TEST_HINTS ? `Test hints for this run (apply them): ${TEST_HINTS}\n` : ''}`
 // The final-gate fixer is a fresh IMPLEMENTER scoped to the whole change-set
 // (role=impl) — the impl->test loop, not a standalone gate->fixer. It stays on
@@ -522,6 +570,8 @@ READ FIRST: ${findingsFile} (the sweep's findings), then ${PLAN_FILE} global
 decisions. Fix every finding, editing only files within the planned change-set
 (so far: ${JSON.stringify(allFiles)}). Keep every sub-plan's intended items
 intact — reconcile, don't revert. Rerun the failing commands until green.
+Return \`items\`: one entry per sweep finding you addressed — \`id\` the OWNING
+sub-plan id, \`status\` done|partial|skipped, \`note\` in ≤120 chars.
 `
 
 if (PARALLEL_MODE) {

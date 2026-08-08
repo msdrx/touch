@@ -14,18 +14,41 @@ decision_watcher.py:
 
 Outputs, all under $ORCH_STATE_DIR (the task folder):
   report/cycles/<plan>-cycle-<N>.html   one page per cycle: UML-style flow
-      (implement -> test gate -> critique -> verdict), a "why it failed /
+      (implement -> test gate -> critique -> verdict), the requirement ->
+      implemented -> Δ diagram (bar, chips and one row per plan item: what was
+      required, what was built, where they differ), a "why it failed /
       succeeded" section from the structured verdict summaries, and the full
-      gate/critique findings files embedded as evidence.
-  report/cycles/index.html              run overview, execution order.
+      gate/critique findings files embedded as evidence. The page reads
+      top-down from diagram to evidence on purpose — the diagram answers the
+      question, the embedded findings prove the answer, and the reader chooses
+      how far down to go.
+  report/cycles/index.html              run overview, execution order, with
+      each loop's LAST-attempt coverage beside its status.
   report/final-report.html              the run's FINAL report (--final), or
-      report/research-report.html for a research run: a deterministic skeleton
-      (run header, timeline, per-plan cards with verdicts/attempts/tokens/
-      durations, links to the plan and every findings file) with exactly ONE
-      slot an LLM fills — the narrative section, injected from a file with
+      report/research-report.html for a research run: a deterministic skeleton,
+      diagram-first — the run-shape flow, then the protocol's coverage
+      diagram(s), then the timeline, then the attempt-by-attempt cards behind a
+      fold, then links to the plan and every findings file — with exactly ONE
+      slot an LLM fills: the narrative section, injected from a file with
       --narrative. Every number on it has ONE named source (journal, stream, or
       run snapshot), the page carries no render timestamp, and rendering the
       same inputs twice is byte-identical (D-15).
+
+One rule, two protocols' nouns — what was ASKED FOR, what was DELIVERED, where
+they differ, from recorded results only:
+
+  implement  requirement = the divider's finding_ids
+             delivered   = the implementer's `items`
+             Δ           = both read-only verdicts' `deviations`
+  research   requirement = the researchers' own findings[].id (the board needs
+                           no partition) and the perspectives that were spawned
+             delivered   = the synthesizer's `coverage` and the reports that
+                           actually returned
+             Δ           = accepted/merged/dropped notes, plus the perspectives
+                           that never came back
+
+A journal carrying none of those fields renders a STATED ABSENCE, never a green
+zero, and silence about one item renders as the gap it is — never as coverage.
   events.jsonl (via status.sh)          the loop-terminal `plan done|failed`
       event when a loop closes — a REAL verdict at the published cap (never the
       retired phase-advance inference) — PLUS the terminal closes of the
@@ -45,9 +68,20 @@ per-plan extra_attempts map ({"sp-x": N} raises only that loop's cap), and
 max_finalgate_attempts (default 2) for the sweep close — re-read every poll,
 like decision_watcher re-reads its caps.
 
+WHICH of those pages a run wants is configured, per surface, under `reports` in
+orch-config.json (published there by `touch-run start` from the run spec and
+`.touch/run.json`; re-read live, like the caps). Three surfaces — `cycle`,
+`research`, `final` — each `{enabled, publish}`, defaulting to cycle pages on
+and local, the two end-of-run pages on and published. `enabled: false`
+switches PAGES off and nothing else: the loop closes, protocol closes and
+roster below are the monitoring protocol, and a run that renders nothing still
+settles every card. `publish` is never acted on here — this program has no
+network and always writes the local copy — it is printed for the driver that
+owns the Artifact step. See REPORT_DEFAULTS.
+
 Usage:
   ORCH_STATE_DIR=<task-dir> python3 cycle_reporter.py <wf_dir> [<wf_dir>...]
-      [--once] [--settle] [--final [--narrative FILE]] [--no-status]
+      [--once] [--settle] [--final [--narrative FILE] [--force]] [--no-status]
       [--interval SECONDS]
 
   Both value flags take `--flag=VALUE` and `--flag VALUE`; a value flag with no
@@ -71,8 +105,12 @@ Usage:
                verdict: a loop that ended mid-attempt with no decisive result
                is left open for the watcher's own run-end pass (R-58).
   --final      one-shot: render the run's final report and exit. Implies
-               render-only — it emits no event.
+               render-only — it emits no event. Prints the path it wrote on
+               stdout and the run's `publish:` destination on stderr; prints
+               NOTHING and still exits 0 when that surface is switched off.
   --narrative=FILE  HTML fragment to inject into --final's narrative slot.
+  --force      render --final even when its surface is off (a human overriding
+               their own switch; no daemon passes it)
   --no-status  never emit status.sh events (render-only)
 
 Checkpointed in $ORCH_STATE_DIR/.cycle-reporter-state.json (restart-safe; a
@@ -112,6 +150,126 @@ RESEARCH_PROOF = {"research": ("findings", "findings_file"),
 #: monitoring.md's plans_total bullet says the same for the reference template).
 RESEARCH_PLANS_TOTAL = "2"
 FINDINGS_EMBED_CAP = 60_000
+#: The three report SURFACES this renderer owns, and the shipped default for
+#: each. A surface is one page family plus one destination:
+#:
+#:   cycle     report/cycles/<plan>-cycle-<N>.html and their index — rendered
+#:             by the live daemon after every implement->test->critique cycle
+#:   research  report/research-report.html — a research run's `--final` page
+#:   final     report/final-report.html — an implement run's `--final` page
+#:
+#: `enabled: false` switches the PAGES off and nothing else. The loop closes,
+#: protocol closes and roster this daemon emits are the monitoring PROTOCOL,
+#: not a report: a run whose pages are off must still settle its cards, or a
+#: rendering preference would silently become a dashboard that lies. That split
+#: is the one rule here that does not bend.
+#:
+#: `publish` is a destination the DRIVER acts on. This program never publishes
+#: anything (no network, no Artifact tool) and never withholds the local file
+#: either — the task-folder copy is written for every value, because the
+#: storage rule (every generated deliverable lives in the repo, not only in the
+#: claude.ai artifact store) is satisfied by construction and is not a knob. So
+#: the value says what happens to the file this program just rendered — and it
+#: says it by NAMING its destinations, `|`-joined, rather than by a word like
+#: `both` that only counts them:
+#:
+#:   local         keep it in the task folder; publish nothing
+#:   public        publish it and hand the URL back as the deliverable
+#:   local|public  publish it and cite the task-folder path beside the URL
+#:
+#: That spelling is the vocabulary: a reader sees which destinations exist
+#: without a table, and a NEW one is an entry in `REPORT_DESTINATIONS` plus its
+#: lines in `PUBLISH_DIRECTIVE`, while every existing value keeps meaning
+#: exactly what it already said.
+#:
+#: Defaults answer "what does a run report if nobody configured it": the cycle
+#: pages are working notes (local), and the two end-of-run pages are what a run
+#: is handed over with (local|public). `bin/touch-run` carries the same table —
+#: it is what PUBLISHES the effective map into `orch-config.json` for this
+#: reader — and `tests/test_touch_run.py` cross-checks the two against each
+#: other rather than trusting the comment you are reading.
+REPORT_DESTINATIONS = ("local", "public")
+#: Every selection of them, in canonical order — what a value may say, what an
+#: error message lists, and what `PUBLISH_DIRECTIVE` is keyed by. Derived from
+#: the destinations rather than typed out, so the three cannot come to disagree
+#: about which combinations exist.
+REPORT_PUBLISH = tuple(
+    "|".join(dest for bit, dest in enumerate(REPORT_DESTINATIONS)
+             if mask >> bit & 1)
+    for mask in range(1, 1 << len(REPORT_DESTINATIONS)))
+REPORT_DEFAULTS = {
+    "cycle": {"enabled": True, "publish": "local"},
+    "research": {"enabled": True, "publish": "local|public"},
+    "final": {"enabled": True, "publish": "local|public"},
+}
+#: What `--final` prints on stderr beside the destination — the instruction the
+#: DRIVER acts on, in words, because this program's stdout is the path and its
+#: reader is an agent deciding whether a publish step happens at all.
+#: One line per value of REPORT_PUBLISH — a missing key would be a KeyError at
+#: the one moment a run has a page to hand over, so the pair is pinned in
+#: `tests/test_cycle_reporter.py`.
+PUBLISH_DIRECTIVE = {
+    "local": "the task-folder copy is the whole deliverable; publish nothing",
+    "public": "publish this file with the Artifact tool and hand back the URL "
+              "(the task-folder copy stays where it is)",
+    "local|public": "publish this file with the Artifact tool and cite the "
+                    "task-folder path beside the URL",
+}
+#: The vocabulary of the requirement -> implemented -> Δ diagram, which is what
+#: every page LEADS with. Color is never the only channel here (same rule the
+#: flow nodes follow): each cell renders glyph + word + color, so the diagram
+#: survives a colorblind reader, a grayscale print and a plain-text scrape.
+COVERAGE_STATUS = {
+    "done":    ("✓", "done", "var(--good)"),
+    "partial": ("◐", "partial", "var(--warn)"),
+    "skipped": ("○", "skipped", "var(--bad)"),
+}
+#: An owned requirement the implementer's `items` never mentioned. Not a status
+#: any agent can return — it is what the ABSENCE of one renders as, and it is a
+#: difference from the requirement exactly like a reported `skipped`. Silence
+#: about an item is the one thing a coverage diagram may not render as coverage.
+COVERAGE_UNREPORTED = ("?", "unreported", "var(--bad)")
+#: An id the agents reported that the divider's finding_ids do not carry:
+#: implementation BEYOND the requirement. Also a difference, so also a row.
+COVERAGE_EXTRA = ("+", "extra", "var(--warn)")
+#: Δ vocabulary, shared by both read-only verdicts. `missing` and `differs` are
+#: the requirement's two failure modes; `extra` is the tree's.
+DEVIATION_KIND = {"missing": ("✗", "missing", "var(--bad)"),
+                  "differs": ("≠", "differs", "var(--warn)"),
+                  "extra": ("+", "extra", "var(--warn)")}
+#: Notes and deviations are diagram LABELS, not prose: the agents are asked for
+#: ≤120 chars and this is the renderer's own guard on top, because a page that
+#: is concise only when the agent cooperates is not a concise page. The argument
+#: and the evidence live in the findings file, still embedded whole below.
+COVERAGE_TEXT_CAP = 160
+#: Rows per diagram. A sub-plan with more items than this has a partition
+#: problem, not a rendering problem; the page says how many it dropped rather
+#: than silently becoming the wall of text this diagram replaced.
+COVERAGE_ROW_CAP = 60
+#: The RESEARCH protocol's vocabulary for the same three-column diagram. Same
+#: rule, different nouns: a research run's requirement is the BOARD (every
+#: finding the researchers returned) and its delivery is the PLAN. `dropped` is
+#: warn rather than bad on purpose — a discard WITH a justification is a
+#: decision the plan is entitled to make, and only silence is a hole.
+RESEARCH_STATUS = {
+    "accepted": ("✓", "accepted", "var(--good)"),
+    "merged": ("⊕", "merged", "var(--good)"),
+    "dropped": ("○", "dropped", "var(--warn)"),
+}
+RESEARCH_UNACCOUNTED = ("?", "unaccounted", "var(--bad)")
+#: The BOARD diagram's own words. It reuses the loops' counts keys (so one bar
+#: and one chip renderer serve both) but never their nouns: a perspective is not
+#: "done", it REPORTED — and the table cell and the chip above it must say the
+#: same word or the diagram is two diagrams.
+BOARD_REPORTED = ("✓", "reported", "var(--good)")
+BOARD_EMPTY = ("◐", "returned empty", "var(--warn)")
+BOARD_SILENT = ("?", "never returned", "var(--bad)")
+#: The bar's segments, per protocol: (counts key, color), drawn in this order.
+COVERAGE_SEGMENTS = (("done", "var(--good)"), ("partial", "var(--warn)"),
+                     ("skipped", "var(--bad)"), ("unreported", "var(--muted)"))
+RESEARCH_SEGMENTS = (("accepted", "var(--good)"), ("merged", "var(--good)"),
+                     ("dropped", "var(--warn)"),
+                     ("unaccounted", "var(--bad)"))
 #: The narrative fragment `--final` injects: the slot is ONE section, not a
 #: second page. Unlike FINDINGS_EMBED_CAP above — which truncates text inside a
 #: `<pre>`, where a cut can only lose bytes — an over-cap fragment is refused
@@ -180,6 +338,15 @@ CYCLE_CSS = """
   .why.pass { border-left-color: var(--good); } .why.fail { border-left-color: var(--bad); }
   .chip { display: inline-block; border-radius: 1rem; padding: 0 .6rem; font-size: .8rem;
           font-weight: 700; border: 1px solid var(--line); text-decoration: none; }
+  .chips { margin: .35rem 0 .6rem; line-height: 1.9; }
+  .bar { display: flex; height: .5rem; border-radius: .25rem; overflow: hidden;
+         background: var(--line); margin: .35rem 0; min-width: 6rem; }
+  .bar .seg { display: block; height: 100%; }
+  .cov td { vertical-align: top; }
+  .cov .req { font-family: ui-monospace, monospace; white-space: nowrap; }
+  .cov .st { font-weight: 700; white-space: nowrap; }
+  .cov .d { display: block; }
+  .cov .d + .d { margin-top: .2rem; }
   details { margin: .6rem 0; } summary { cursor: pointer; }
   pre { background: var(--card); padding: .8rem; border-radius: .5rem; overflow-x: auto;
         white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
@@ -215,6 +382,12 @@ def esc(s):
 
 def utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def clip(s, cap=COVERAGE_TEXT_CAP):
+    """One diagram label: single-line, bounded, and honest about the cut."""
+    text = " ".join(str("" if s is None else s).split())
+    return text if len(text) <= cap else text[:cap - 1] + "…"
 
 
 def as_int(v):
@@ -303,6 +476,89 @@ def verdict_of(res):
     return "RETURNED", summary
 
 
+def normalize_publish(value):
+    """`"public|local"` -> `"local|public"`; None when it names anything else.
+
+    A destination is a `|`-joined SELECTION, so it is PARSED and not looked up:
+    order and repetition are the writer's business, and what comes back is the
+    one canonical spelling of the set — the form that gets stored, printed and
+    keyed into `PUBLISH_DIRECTIVE`. Both this file's tolerant reader and
+    `bin/touch-run`'s strict one route through the same two lines, so they
+    cannot disagree about what a value means, only about what to do when it is
+    unusable.
+    """
+    if not isinstance(value, str):
+        return None
+    picked = {token.strip().lower() for token in value.split("|")}
+    if not picked <= set(REPORT_DESTINATIONS):
+        return None
+    return "|".join(dest for dest in REPORT_DESTINATIONS if dest in picked)
+
+
+def normalize_reports(raw):
+    """`({surface: {enabled, publish}}, [problem, ...])` — defaults under `raw`.
+
+    Deliberately TOLERANT, and the opposite of `touch-run`'s arm over the same
+    data: a malformed run spec is refused before a run exists, but a malformed
+    `orch-config.json` reaches a daemon that is already tailing a live journal,
+    and a renderer that exited on it would turn one typo into a run with no
+    pages at all. So every unusable value falls back to the shipped default and
+    is REPORTED — the caller prints each distinct problem once — because a
+    silently ignored `"publlish"` reads exactly like an honoured one.
+
+    Accepted per surface: the object `{"enabled": bool, "publish": str}`, or
+    the bare-string shorthand `"off"` / `"local"` / `"public"` /
+    `"local|public"`, a destination standing for the whole surface.
+    """
+    out = {surface: dict(value) for surface, value in REPORT_DEFAULTS.items()}
+    if raw is None:
+        return out, []
+    if not isinstance(raw, dict):
+        return out, ["reports is %s, not an object — the shipped defaults apply"
+                     % type(raw).__name__]
+    problems = []
+    expected = "expected off, " + ", ".join(REPORT_PUBLISH)
+    for surface, value in raw.items():
+        if surface not in out:
+            problems.append("unknown report surface %r (known: %s)"
+                            % (surface, ", ".join(sorted(out))))
+            continue
+        if isinstance(value, str):
+            word = value.strip().lower()
+            picked = normalize_publish(word)
+            if word == "off":
+                out[surface]["enabled"] = False
+            elif picked:
+                out[surface] = {"enabled": True, "publish": picked}
+            else:
+                problems.append("reports.%s is %r (%s)" % (surface, value, expected))
+            continue
+        if not isinstance(value, dict):
+            problems.append("reports.%s is %s, not an object or one of %s"
+                            % (surface, type(value).__name__, expected[9:]))
+            continue
+        for key, sub in value.items():
+            if key == "enabled":
+                # `isinstance(1, bool)` is False, which is the point: a 0/1
+                # switch is a spelling this file does not accept, so it is
+                # reported rather than half-honoured.
+                if isinstance(sub, bool):
+                    out[surface]["enabled"] = sub
+                else:
+                    problems.append("reports.%s.enabled is %r, not true or false"
+                                    % (surface, sub))
+            elif key == "publish":
+                picked = normalize_publish(sub)
+                if picked:
+                    out[surface]["publish"] = picked
+                else:
+                    problems.append("reports.%s.publish is %r (expected %s)"
+                                    % (surface, sub, ", ".join(REPORT_PUBLISH)))
+            else:
+                problems.append("unknown key reports.%s.%s" % (surface, key))
+    return out, problems
+
+
 class Reporter:
     def __init__(self, task_dir, wf_dirs, emit_status=True):
         self.task = task_dir
@@ -353,6 +609,10 @@ class Reporter:
         # that wrote nothing, so this is what keeps self-healing from turning
         # into doubling. In memory only; a restart re-derives it from the stream.
         self.write_failed = set()
+        # Config problems already printed. `reports()` is re-read every poll,
+        # like the caps, so without this one typo in `orch-config.json` prints
+        # every 2 s for the length of the run.
+        self.config_warned = set()
         self._load_state()
 
     def _find_status_sh(self):
@@ -429,6 +689,32 @@ class Reporter:
         except (OSError, ValueError):
             pass
         return lambda plan: base + int(extra.get(plan, 0) or 0)
+
+    def reports(self):
+        """The report surfaces, re-read live — same rule as `caps()`.
+
+        Live because this daemon is started once, at `touch-run bind`, and
+        outlives every later edit to `orch-config.json`: a switch that needed a
+        restart to take effect is a switch nobody flips. `touch-run start`
+        publishes the effective map; a run it never touched (a `--once`
+        backfill, a foreign journal) falls through to REPORT_DEFAULTS, which is
+        why the table is here and not only in the wrapper.
+        """
+        raw = None
+        try:
+            with open(os.path.join(self.task, "orch-config.json"),
+                      encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                raw = cfg.get("reports")
+        except (OSError, ValueError):
+            pass
+        surfaces, problems = normalize_reports(raw)
+        for problem in problems:
+            if problem not in self.config_warned:
+                self.config_warned.add(problem)
+                print("orch-config.json: %s" % problem, file=sys.stderr)
+        return surfaces
 
     # -- journal ingestion --------------------------------------------------
     def _run_dirs(self):
@@ -934,6 +1220,503 @@ class Reporter:
         return (f"<details><summary>{esc(label)} — {esc(name)}</summary>"
                 f"<pre>{esc(body)}</pre></details>")
 
+    # -- requirement vs implementation --------------------------------------
+    def subplan_spec(self, plan):
+        """``(title, [requirement id])`` for a sub-plan, from the divide result.
+
+        The REQUIREMENT side of every coverage diagram, read from the one place
+        it is recorded — the divider's partition, already folded into
+        ``self.protocol`` by the same single correlation every other consumer
+        reads (GD-D10), so this buys no second fold and no file read.
+
+        Empty for a run whose divide result this daemon never saw: a backfill
+        of a foreign stream, a truncated journal, a run from before the
+        partition carried ids. The diagram then falls back to the ids the
+        agents themselves named and SAYS SO on the page — an unknown
+        requirement list must never render as a met one.
+        """
+        for attempt in sorted(self.protocol.get("divide", {}), reverse=True):
+            part = self.protocol["divide"][attempt].get("partition")
+            if not isinstance(part, dict):
+                continue
+            for sp in part.get("subplans") or []:
+                if isinstance(sp, dict) and str(sp.get("id") or "") == plan:
+                    ids = [clip(i, 80) for i in (sp.get("finding_ids") or [])
+                           if clip(i, 80)]
+                    return clip(sp.get("title"), 120), ids
+        return "", []
+
+    def coverage(self, plan, cy):
+        """The requirement -> implemented -> Δ matrix of ONE cycle.
+
+        Returns ``(rows, counts, known, total)``:
+
+        * ``rows``   one dict per requirement id — the divider's order first,
+                     then any id only the agents named;
+        * ``counts`` the tallies the bar and the chips draw;
+        * ``known``  whether the requirement list itself came from the divider
+                     (False = the fallback above);
+        * ``total``  the denominator: requirement rows, NOT ``len(rows)``, so an
+                     `extra` row can never dilute or inflate coverage.
+
+        Three recorded inputs, no inference: the divider's ``finding_ids``, the
+        implementer's ``items``, and the two read-only verdicts' ``deviations``.
+        A cycle whose agents returned none of them yields no rows, and the
+        caller renders a note instead of an empty diagram claiming zero.
+        """
+        _title, req_ids = self.subplan_spec(plan)
+        known = bool(req_ids)
+        order = list(req_ids)
+        items = {}
+        for it in (cy.get("impl") or {}).get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            rid = clip(it.get("id"), 80)
+            if not rid:
+                continue
+            items[rid] = it
+            if rid not in order:
+                order.append(rid)
+        devs = {}
+        for src, res in (("test gate", cy.get("gate")),
+                         ("critique", cy.get("crit"))):
+            for d in (res or {}).get("deviations") or []:
+                if not isinstance(d, dict):
+                    continue
+                rid = clip(d.get("id"), 80) or "(unattributed)"
+                devs.setdefault(rid, []).append((src, d))
+                if rid not in order:
+                    order.append(rid)
+
+        rows = []
+        counts = dict.fromkeys(
+            ("done", "partial", "skipped", "unreported", "extra", "deviations",
+             "dropped"), 0)
+        counts["dropped"] = max(0, len(order) - COVERAGE_ROW_CAP)
+        for rid in order[:COVERAGE_ROW_CAP]:
+            it = items.get(rid)
+            # With no divider record every id is taken at face value; with one,
+            # membership decides, and a non-member is `extra` whatever it says
+            # about itself.
+            in_plan = (rid in req_ids) if known else True
+            deltas = []
+            if not in_plan:
+                glyph, word, color = COVERAGE_EXTRA
+                counts["extra"] += 1
+                deltas.append(("extra", clip((it or {}).get("note"))
+                               or "not among the sub-plan's plan items"))
+            elif it is None:
+                glyph, word, color = COVERAGE_UNREPORTED
+                counts["unreported"] += 1
+                deltas.append(("missing",
+                               "the implementer's items never mentioned this "
+                               "requirement"))
+            else:
+                st = clip(it.get("status"), 20).lower()
+                glyph, word, color = COVERAGE_STATUS.get(st, COVERAGE_UNREPORTED)
+                counts[st if st in COVERAGE_STATUS else "unreported"] += 1
+                if st == "partial":
+                    deltas.append(("differs", clip(it.get("note"))
+                                   or "reported partial, no note"))
+                elif st == "skipped":
+                    deltas.append(("missing", clip(it.get("note"))
+                                   or "reported skipped, no note"))
+                elif st not in COVERAGE_STATUS:
+                    deltas.append(("differs", "status "
+                                   + (repr(st) if st else "missing")
+                                   + " is not one of done/partial/skipped"))
+            for src, d in devs.get(rid, []):
+                kind = clip(d.get("kind"), 20).lower()
+                counts["deviations"] += 1
+                deltas.append((kind if kind in DEVIATION_KIND else "differs",
+                               src + ": " + (clip(d.get("what"))
+                                             or "(no detail given)")))
+            rows.append({"id": rid, "in_plan": in_plan, "glyph": glyph,
+                         "word": word, "color": color,
+                         "note": clip((it or {}).get("note")),
+                         "deltas": deltas})
+        return rows, counts, known, sum(
+            counts[k] for k in ("done", "partial", "skipped", "unreported"))
+
+    def _cov_bar(self, counts, total, segments=COVERAGE_SEGMENTS, noun="requirement"):
+        """The one-glance diagram, for either protocol's segment table.
+
+        Integer percentages of the requirement rows only, so the same counts
+        always draw the same bar. A remainder from the floor division stays as
+        the track color — under-drawing a segment is the safe direction. The
+        aria-label carries the same numbers, because a bar nobody can read is
+        decoration.
+        """
+        if not total:
+            return ""
+        segs = "".join(
+            f'<span class="seg" style="width:{counts[k] * 100 // total}%;'
+            f'background:{c}"></span>'
+            for k, c in segments if counts.get(k))
+        label = " ".join(f"{counts[k]} {k}" for k, _c in segments
+                         if counts.get(k))
+        return (f'<div class="bar" role="img" aria-label="{esc(noun)} coverage: '
+                f'{esc(label)} of {total}">{segs}</div>')
+
+    def _cov_chips(self, counts, total, lead=("done", COVERAGE_STATUS["done"]),
+                   rest=None, extras=None, noun="requirement"):
+        """Counts as glyph+word chips — the bar's text equivalent, always.
+
+        `lead` is the headline count rendered as `k/total`; `rest` are the other
+        status keys; `extras` are the (key, glyph, word-singular) tallies that
+        sit OUTSIDE the denominator (an `extra` row, a deviation).
+        """
+        key, (glyph, _word, color) = lead
+        out = [f'<span class="chip" style="color:{color};border-color:{color}">'
+               f'{glyph} {counts[key]}/{total} {esc(noun)}'
+               f'{"" if total == 1 else "s"} {esc(_word)}</span>']
+        for k, (g, word, c) in (rest or ()):
+            if counts.get(k):
+                out.append(f'<span class="chip" style="color:{c};'
+                           f'border-color:{c}">{g} {counts[k]} '
+                           f"{esc(word)}</span>")
+        for k, g, word, c in (extras or ()):
+            if counts.get(k):
+                out.append(f'<span class="chip" style="color:{c};'
+                           f'border-color:{c}">{g} {counts[k]} {esc(word)}'
+                           f'{"" if counts[k] == 1 else "s"}</span>')
+        return '<p class="chips">' + " ".join(out) + "</p>"
+
+    def _cov_table(self, head, body_rows):
+        """The shared three-column shape: X → what happened → Δ."""
+        return (f'<table class="cov"><tr><th>{head[0]}</th><th>→ {head[1]}</th>'
+                f"<th>→ Δ {head[2]}</th></tr>"
+                + os.linesep.join(body_rows) + "</table>")
+
+    def _delta_cell(self, deltas):
+        """The Δ column: glyph + word + one line each, or an honest dash."""
+        return "".join(
+            f'<span class="d" style="color:{DEVIATION_KIND[k][2]}">'
+            f"{DEVIATION_KIND[k][0]} {esc(DEVIATION_KIND[k][1])} — "
+            f"{esc(text)}</span>"
+            for k, text in deltas if k in DEVIATION_KIND) or \
+            '<span class="sum">—</span>'
+
+    # -- the research protocol's two diagrams --------------------------------
+    # Same rule as the loops', different nouns. A research run has no
+    # implement->test->critique cycle to draw, so its report answers the same
+    # three questions with the two hand-offs it DOES have:
+    #   perspective -> report   (was every angle actually covered?)
+    #   finding     -> plan     (did every finding reach the plan, or get a
+    #                            stated reason not to?)
+    # Both fold `self.records`, the one correlation (GD-D10): for a research run
+    # the plan id is `research` and the STAGE is the perspective key, so the
+    # board is recorded fact, not a re-read of the run spec.
+
+    def research_board(self):
+        """``[(perspective, result | None)]`` in first-seen order.
+
+        A perspective with a `started` record and no result is an agent that
+        went out and never came back — the one thing a "complete board" claim
+        has to be able to contradict.
+        """
+        order, seen = [], {}
+        for rec in self.records:
+            if rec["plan"] != "research":
+                continue
+            key = rec["stage"]
+            if key not in seen:
+                seen[key] = None
+                order.append(key)
+            if rec["kind"] == "result" and isinstance(rec["result"], dict):
+                seen[key] = rec["result"]
+        return [(k, seen[k]) for k in order]
+
+    def board_block(self):
+        """perspective → reported → Δ: the board's own coverage diagram."""
+        board = self.research_board()
+        if not board:
+            return ('<p class="sum">No research agent is recorded on this '
+                    "journal, so there is no board to draw.</p>")
+        counts = dict.fromkeys(("done", "partial", "skipped", "unreported",
+                                "extra", "deviations"), 0)
+        body = []
+        for key, res in board[:COVERAGE_ROW_CAP]:
+            findings = (res or {}).get("findings")
+            n = len(findings) if isinstance(findings, list) else 0
+            deltas = []
+            if res is None:
+                glyph, word, color = BOARD_SILENT
+                counts["unreported"] += 1
+                deltas.append(("missing", "spawned and never returned — this "
+                                          "angle is absent from the plan"))
+            elif not n:
+                glyph, word, color = BOARD_EMPTY
+                counts["partial"] += 1
+                deltas.append(("differs", clip(res.get("summary"))
+                               or "returned with zero findings"))
+            else:
+                glyph, word, color = BOARD_REPORTED
+                counts["done"] += 1
+            if res is not None and not res.get("findings_file"):
+                deltas.append(("missing", "no findings file path returned — "
+                                          "the evidence is not on disk"))
+            sev = {}
+            for f in (findings if isinstance(findings, list) else []):
+                if isinstance(f, dict):
+                    sev[str(f.get("severity") or "?")] = \
+                        sev.get(str(f.get("severity") or "?"), 0) + 1
+            mix = ", ".join(f"{v} {k}" for k, v in sorted(sev.items()))
+            # An agent that never returned has no finding count to report —
+            # printing "0 findings" beside it reads as a researcher who found
+            # nothing, which is a different (and much better) outcome.
+            sub = ("" if res is None else
+                   f'<div class="sum">{n} finding{"" if n == 1 else "s"}'
+                   f'{(" — " + esc(mix)) if mix else ""}</div>')
+            body.append(
+                f'<tr><td class="req">{esc(key)}</td>'
+                f'<td class="st" style="color:{color}">{glyph} {esc(word)}'
+                f"{sub}</td>"
+                f"<td>{self._delta_cell(deltas)}</td></tr>")
+        total = counts["done"] + counts["partial"] + counts["unreported"]
+        return (self._cov_bar(counts, total, noun="perspective")
+                + self._cov_chips(
+                    counts, total, lead=("done", BOARD_REPORTED),
+                    rest=(("partial", BOARD_EMPTY),
+                          ("unreported", BOARD_SILENT)),
+                    noun="perspective")
+                + self._cov_table(
+                    ("perspective", "reported", "vs the board"), body))
+
+    def research_coverage(self):
+        """finding id → plan status → Δ, from the board and the synthesizer.
+
+        The requirement side needs no partition here: the researchers' own
+        ``findings[].id`` values ARE the board, so a research run can draw this
+        diagram from its two recorded results and nothing else.
+        """
+        order, label = [], {}
+        for key, res in self.research_board():
+            for f in ((res or {}).get("findings") or []):
+                if not isinstance(f, dict):
+                    continue
+                fid = clip(f.get("id"), 80)
+                if not fid or fid in label:
+                    continue
+                order.append(fid)
+                label[fid] = (key, clip(f.get("severity"), 20),
+                              clip(f.get("title"), 120))
+        cov = {}
+        for res in (self.research.get("synthesis") or {}).get("returned", []):
+            for c in (res.get("coverage") or []):
+                if isinstance(c, dict) and clip(c.get("id"), 80):
+                    cov[clip(c.get("id"), 80)] = c
+        for fid in cov:
+            if fid not in label:
+                order.append(fid)
+                label[fid] = ("", "", "")
+        counts = dict.fromkeys(
+            ("accepted", "merged", "dropped", "unaccounted", "extra"), 0)
+        counts["dropped_rows"] = 0
+        rows = []
+        for fid in order[:COVERAGE_ROW_CAP]:
+            src, sev, title = label[fid]
+            c = cov.get(fid)
+            on_board = bool(src)
+            deltas = []
+            if not on_board:
+                glyph, word, color = COVERAGE_EXTRA
+                counts["extra"] += 1
+                deltas.append(("extra", clip((c or {}).get("note"))
+                               or "the synthesizer accounted for an id no "
+                                  "report returned"))
+            elif c is None:
+                glyph, word, color = RESEARCH_UNACCOUNTED
+                counts["unaccounted"] += 1
+                deltas.append(("missing", "the synthesizer never said what "
+                                          "became of this finding"))
+            else:
+                st = clip(c.get("status"), 20).lower()
+                glyph, word, color = RESEARCH_STATUS.get(st, RESEARCH_UNACCOUNTED)
+                counts[st if st in RESEARCH_STATUS else "unaccounted"] += 1
+                if st == "dropped":
+                    deltas.append(("missing", clip(c.get("note"))
+                                   or "dropped with no justification given"))
+                elif st == "merged":
+                    deltas.append(("differs", clip(c.get("note"))
+                                   or "folded into another item, target not named"))
+                elif st not in RESEARCH_STATUS:
+                    deltas.append(("differs", "status "
+                                   + (repr(st) if st else "missing")
+                                   + " is not accepted/merged/dropped"))
+            rows.append({"id": fid, "src": src, "sev": sev, "title": title,
+                         "glyph": glyph, "word": word, "color": color,
+                         "note": clip((c or {}).get("note")), "deltas": deltas})
+        counts["dropped_rows"] = max(0, len(order) - COVERAGE_ROW_CAP)
+        total = sum(counts[k] for k in
+                    ("accepted", "merged", "dropped", "unaccounted"))
+        return rows, counts, total
+
+    def findings_block(self):
+        """finding → plan → Δ: did the board actually reach the plan?"""
+        rows, counts, total = self.research_coverage()
+        if not rows:
+            return ('<p class="sum">No finding reached this report: the '
+                    "researchers returned none, or an older journal carries no "
+                    "<code>findings</code> to fold. Nothing here is a claim "
+                    "that the plan covered everything.</p>")
+        body = []
+        for r in rows:
+            sub = " · ".join(x for x in (r["src"], r["sev"], r["title"]) if x)
+            sub_html = f'<div class="sum">{esc(sub)}</div>' if sub else ""
+            note = (f'<div class="sum">{esc(r["note"])}</div>'
+                    if r["note"] and r["word"] == "accepted" else "")
+            body.append(
+                f'<tr><td class="req">{esc(r["id"])}{sub_html}</td>'
+                f'<td class="st" style="color:{r["color"]}">{r["glyph"]} '
+                f'{esc(r["word"])}{note}</td>'
+                f'<td>{self._delta_cell(r["deltas"])}</td></tr>')
+        notes = []
+        if counts["dropped_rows"]:
+            notes.append(f"Showing the first {COVERAGE_ROW_CAP} findings; "
+                         f"{counts['dropped_rows']} more are in the research "
+                         "files linked below.")
+        return (self._cov_bar(counts, total, RESEARCH_SEGMENTS, "finding")
+                + self._cov_chips(
+                    counts, total, lead=("accepted", RESEARCH_STATUS["accepted"]),
+                    rest=(("merged", RESEARCH_STATUS["merged"]),
+                          ("dropped", RESEARCH_STATUS["dropped"]),
+                          ("unaccounted", RESEARCH_UNACCOUNTED)),
+                    extras=(("extra", COVERAGE_EXTRA[0], COVERAGE_EXTRA[1],
+                             COVERAGE_EXTRA[2]),),
+                    noun="finding")
+                + self._cov_table(("finding", "in the plan", "vs the board"),
+                                  body)
+                + "".join(f'<p class="sum">{esc(n)}</p>' for n in notes))
+
+    # -- the run's shape, in four nodes --------------------------------------
+    def run_shape(self, kind, fold):
+        """The whole run as one flow diagram — the same node vocabulary the
+        cycle pages use, so the two pages read as one system.
+
+        Badges come from the STREAM (`fold`), never from ``self.closed``:
+        ``--final`` renders without evaluating a single close, and a page that
+        showed every loop "open" because the renderer had not computed a verdict
+        it does not use would be a lie about a finished run.
+        """
+        def badge(pid):
+            return (fold["plans"].get(pid) or {}).get("badge") or ""
+
+        if kind == "research":
+            board = self.research_board()
+            back = [k for k, r in board if r is not None]
+            _rows, counts, total = self.research_coverage()
+            synth = (self.research.get("synthesis") or {}).get("returned", [])
+            items = next((s.get("item_count") for s in synth
+                          if isinstance(s.get("item_count"), int)), None)
+            nodes = [
+                ("board", (len(back) == len(board)) if board else None,
+                 f"{len(back)}/{len(board)} REPORTED",
+                 "one read-only researcher per perspective"),
+                ("findings", None if not total else True, f"{total} FOUND",
+                 "the board the plan had to answer for"),
+                ("plan", None if items is None else True,
+                 "NOT WRITTEN" if items is None else f"{items} ITEMS",
+                 "one ordered implementation plan"),
+                ("unaccounted",
+                 None if not total else counts["unaccounted"] == 0,
+                 f"{counts['unaccounted']} LEFT OUT",
+                 "findings the synthesizer never placed"),
+            ]
+        else:
+            subs = [p for p in self.plan_order if p.startswith("sp-")]
+            green = [p for p in subs if badge(p) == "done"]
+            red = [p for p in subs if badge(p) == "failed"]
+            fg = badge("finalgate")
+            nodes = [
+                ("divide", None if not subs else True, f"{len(subs)} SUB-PLANS",
+                 "one file, exactly one owner"),
+                ("gated loops", (not red) if subs else None,
+                 f"{len(green)} GREEN / {len(red)} RED",
+                 "implement → test → critique, per sub-plan"),
+                ("final gate", {"done": True, "failed": False}.get(fg),
+                 {"done": "PASS", "failed": "FAIL"}.get(fg, "NOT RUN"),
+                 "aggregate sweep over the merged change-set"),
+                ("run", None if not subs else (not red and fg != "failed"),
+                 "GREEN" if subs and not red and fg != "failed"
+                 else "OPEN" if not subs else "RED",
+                 f"{len(self.plan_order)} card(s) on this journal"),
+            ]
+        return ('<div class="flow">'
+                + '<div class="arrow">→</div>'.join(
+                    self._node(*n) for n in nodes) + "</div>")
+
+    def coverage_cell(self, plan, cy):
+        """One table cell: the bar plus its text equivalent, for the overviews.
+
+        The same three recorded inputs as the full block, folded to what fits a
+        row — so the index, the final report and the cycle page can never
+        disagree about a sub-plan's coverage.
+        """
+        rows, counts, known, total = self.coverage(plan, cy)
+        if not rows:
+            return '<span class="sum">not reported</span>'
+        parts = [f"✓ {counts['done']}/{total}" if total else "✓ 0/0"]
+        for key, (glyph, word, _c) in (
+                ("partial", COVERAGE_STATUS["partial"]),
+                ("skipped", COVERAGE_STATUS["skipped"]),
+                ("unreported", COVERAGE_UNREPORTED),
+                ("extra", COVERAGE_EXTRA)):
+            if counts[key]:
+                parts.append(f"{glyph} {counts[key]} {word}")
+        if counts["deviations"]:
+            parts.append(f"Δ {counts['deviations']}")
+        if not known:
+            parts.append("(ids from the agents — no partition on record)")
+        return (self._cov_bar(counts, total)
+                + f'<span class="sum">{esc(" · ".join(parts))}</span>')
+
+    def coverage_block(self, plan, cy):
+        """The whole requirement -> implemented -> Δ section for one cycle."""
+        rows, counts, known, total = self.coverage(plan, cy)
+        if not rows:
+            return ('<p class="sum">No requirement coverage recorded for this '
+                    "cycle: the implementer returned no <code>items</code> and "
+                    "neither read-only verdict reported a deviation. A run of "
+                    "the current template always carries them — an older or "
+                    "foreign journal does not, and this page will not invent "
+                    "coverage it was not told about.</p>")
+        body = []
+        for r in rows:
+            # The note sits under the status ONLY when nothing else carries it:
+            # a partial/skipped/extra row's note IS its Δ, and printing it in
+            # both columns is the verbosity this diagram replaced.
+            note = (f'<div class="sum">{esc(r["note"])}</div>'
+                    if r["note"] and r["word"] == "done" and r["in_plan"] else "")
+            body.append(
+                f'<tr><td class="req">{esc(r["id"])}</td>'
+                f'<td class="st" style="color:{r["color"]}">{r["glyph"]} '
+                f'{esc(r["word"])}{note}</td>'
+                f'<td>{self._delta_cell(r["deltas"])}</td></tr>')
+        notes = []
+        if not known:
+            notes.append("The divider's partition is not in this journal, so "
+                         "the requirement column is the ids the AGENTS named — "
+                         "an item nobody mentioned cannot appear as a gap.")
+        if counts["dropped"]:
+            notes.append(f"Showing the first {COVERAGE_ROW_CAP} rows; "
+                         f"{counts['dropped']} more are in the findings files "
+                         "below. A sub-plan this wide is a partition problem, "
+                         "not a rendering one.")
+        return (self._cov_bar(counts, total)
+                + self._cov_chips(
+                    counts, total,
+                    rest=(("partial", COVERAGE_STATUS["partial"]),
+                          ("skipped", COVERAGE_STATUS["skipped"]),
+                          ("unreported", COVERAGE_UNREPORTED)),
+                    extras=(("extra", COVERAGE_EXTRA[0], COVERAGE_EXTRA[1],
+                             COVERAGE_EXTRA[2]),
+                            ("deviations", "Δ", "gate/critique deviation",
+                             "var(--warn)")))
+                + self._cov_table(
+                    ("requirement", "implemented", "vs requirement"), body)
+                + "".join(f'<p class="sum">{esc(n)}</p>' for n in notes))
+
     def render_page(self, plan, attempt, cap):
         per = self.cycles[plan]
         cy = per[attempt]
@@ -999,6 +1782,8 @@ class Reporter:
 {self._node('cycle verdict', verdict_ok, verdict_word, verdict_sum)}
 </div>
 {('<p>' + ' '.join(chips) + '</p>') if chips else ''}
+<h2>Requirement → implemented → Δ</h2>
+{self.coverage_block(plan, cy)}
 <h2>Why this cycle {'succeeded' if success else 'failed' if not latest_open or crit is not None else 'stands'}</h2>
 <div class="why {'pass' if success else 'fail'}"><ul>{''.join(f'<li>{esc(w)}</li>' for w in why)}</ul>
 {next_steps}</div>
@@ -1031,11 +1816,15 @@ class Reporter:
                 f'{"✓" if (c.get("gate", {}) or {}).get("passed") and (c.get("crit", {}) or {}).get("approved") else "✗"} a{a}</a>'
                 for a, c in sorted(per.items()))
             rows.append(f"<tr><td>{esc(plan)}</td><td>{chips}</td>"
+                        f"<td>{self.coverage_cell(plan, per[max(per)])}</td>"
                         f'<td style="color:{color[st]};font-weight:700">{word[st]}</td></tr>')
         html = f"""<title>implement run — cycle overview</title><style>{CYCLE_CSS}</style>
 <h1>Gated loops — every implement→test→critique cycle</h1>
-<p class="sum">One page per cycle; chips link to them. Execution order, top to bottom.</p>
-<table><tr><th>sub-plan</th><th>cycles</th><th>loop status</th></tr>
+<p class="sum">One page per cycle; chips link to them. Execution order, top to
+bottom. Coverage is the LAST attempt's — the state the loop actually left
+behind, not a sum over attempts that superseded each other.</p>
+<table><tr><th>sub-plan</th><th>cycles</th><th>requirement coverage</th>
+<th>loop status</th></tr>
 {os.linesep.join(rows)}</table>
 <p class="foot">rendered deterministically by cycle_reporter.py at {utcnow()}</p>
 """
@@ -1253,13 +2042,38 @@ class Reporter:
             return empty
         return body.strip() or empty
 
-    def render_final(self, narrative_path=None):
-        """Render the run's final report; returns the path written."""
+    def render_final(self, narrative_path=None, force=False):
+        """Render the run's final report; returns the path written, or None.
+
+        None — nothing rendered, nothing created — when the surface this run's
+        KIND belongs to is switched off (`reports.research` for a research run,
+        `reports.final` for an implement one). That is a configured answer and
+        not an error: the caller exits 0 with an empty stdout, so a driver's
+        `path=$(… --final)` publishes nothing without needing to know why.
+        `force=True` (`--force`) renders anyway — for the human overriding
+        their own switch once; no daemon passes it.
+
+        The chosen DESTINATION is printed to stderr rather than acted on. This
+        program cannot publish (no network, no Artifact tool) and never
+        withholds the local copy, so `publish:` is one line addressed to the
+        driver that just called it.
+        """
+        kind = self.report_kind()
+        # Which surface a `--final` render belongs to is a property of the RUN,
+        # derived from the plan ids that actually ran — the same fold that
+        # picks the filename below. So the two switches cannot be applied to
+        # the wrong page, and neither one needs the caller to say which it is.
+        surface = "research" if kind == "research" else "final"
+        cfg = self.reports()[surface]
+        if not cfg["enabled"] and not force:
+            print("reports.%s is off in orch-config.json — no page rendered "
+                  "and nothing written (pass --force to render it anyway)"
+                  % surface, file=sys.stderr)
+            return None
         events = self.stream_events()
         fold = self.fold_stream(events)
         snap_path, snap = self.find_snapshot()
         rolls = self.rollup()
-        kind = self.report_kind()
         out_dir = os.path.join(self.task, "report")
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(
@@ -1314,6 +2128,46 @@ class Reporter:
             for label, path in self.artifacts()) or \
             '<li class="sum">no plan or findings file was reported</li>'
 
+        # The run-level answer to "what was asked for, what was built, where do
+        # they differ" — above the per-attempt detail, because that is the
+        # question a reader opens this page with. Loops only: `divide` and
+        # `finalgate` have no requirement list of their own, and the research
+        # protocol has no sub-plans at all, so its report simply omits this.
+        if kind == "research":
+            # The research protocol's two hand-offs, in the same three-column
+            # shape: was every angle covered, and did every finding reach the
+            # plan or get a stated reason not to.
+            coverage = (
+                "<h3>Perspective → reported → Δ</h3>" + self.board_block()
+                + "<h3>Finding → in the plan → Δ</h3>" + self.findings_block())
+        else:
+            cov_rows = []
+            for pid in self.plan_order:
+                per = self.cycles.get(pid) or {}
+                if not per:
+                    continue
+                last = max(per)
+                # The STREAM's badge, like every other status on this page:
+                # `--final` never evaluates a close, so `self.closed` is empty
+                # here and reading it would print "open" for a finished run.
+                st = (fold["plans"].get(pid) or {}).get("badge") or "open"
+                cov_rows.append(
+                    f"<tr><td>{esc(pid)}</td>"
+                    f'<td><span class="sum">{esc(self.subplan_spec(pid)[0])}'
+                    "</span></td>"
+                    f"<td>{self.coverage_cell(pid, per[last])}</td>"
+                    f'<td style="color:{badge_color(st)};font-weight:700">'
+                    f"{esc(st)}</td>"
+                    f'<td class="sum">attempt {last}</td></tr>')
+            coverage = (
+                "<table><tr><th>sub-plan</th><th>title</th>"
+                "<th>requirement coverage — last attempt</th><th>loop</th>"
+                f"<th>from</th></tr>{os.linesep.join(cov_rows)}</table>"
+                if cov_rows else
+                '<p class="sum">No gated loop reported requirement coverage — '
+                "an older or foreign journal carries no <code>items</code> to "
+                "fold, and this page will not invent them.</p>")
+
         cross = '<p class="sum">No run snapshot on disk — normal while a run ' \
                 'is live, and never an error (SUBSTRATE-11).</p>'
         if snap:
@@ -1341,15 +2195,23 @@ section is the only authored text on this page.</p>
 {tile('tokens out', f"{fold['totals']['out']:,}")}
 {tile('span', span(fold['first'], fold['last']))}
 </div>
+<h2>The run, end to end</h2>
+{self.run_shape(kind, fold)}
 <!-- {NARRATIVE_SLOT}:start -->
 {self.narrative_block(narrative_path)}
 <!-- {NARRATIVE_SLOT}:end -->
+<h2>{'Board → plan → Δ' if kind == 'research'
+     else 'Requirement → implemented → Δ, per sub-plan'}</h2>
+{coverage}
 <h2>Timeline — every card, in first-seen order</h2>
 <table><tr><th>plan</th><th>title</th><th>badge</th><th>attempts</th>
 <th>span</th><th>tokens</th></tr>
 {os.linesep.join(rows) if rows else '<tr><td colspan="6">no cards</td></tr>'}</table>
 <h2>Per-plan detail — verdicts, attempt by attempt</h2>
+<details><summary>Every agent's verdict and summary, {len(order)} card(s) — the
+long form behind the diagrams above</summary>
 {os.linesep.join(cards) if cards else '<p class="sum">no plan produced a result</p>'}
+</details>
 <h2>The plan and every findings file</h2>
 <ul>{links}</ul>
 <h2>Harness cross-check</h2>
@@ -1358,6 +2220,17 @@ section is the only authored text on this page.</p>
 <table><tr><th>on this page</th><th>source</th></tr>
 <tr><td>plans, attempts, verdicts, artifact paths</td><td>journal.jsonl results,
 classified by the [monitor] marker in each agent transcript</td></tr>
+<tr><td>the run-shape diagram</td><td>the plan ids on this journal plus the
+STREAM's badge for each — never a verdict this renderer computed for the
+page</td></tr>
+<tr><td>the requirement column</td><td>implement: the divider's partition
+(<code>finding_ids</code> per sub-plan; absent, the page says so and falls back
+to the ids the agents named). research: the researchers' own
+<code>findings[].id</code> — the board needs no partition</td></tr>
+<tr><td>the delivered and Δ columns</td><td>implement: the implementer's
+<code>items</code> and the two read-only verdicts' <code>deviations</code>.
+research: the synthesizer's <code>coverage</code>. Both from the same journal
+results — never inferred from files changed or item counts</td></tr>
 <tr><td>badges, spans, token counters</td><td>events.jsonl — agent.tokens
 last-wins per (plan, agent), never a sum of the wire deltas</td></tr>
 <tr><td>the cross-check table</td><td>the run snapshot, read-only</td></tr>
@@ -1368,6 +2241,12 @@ render timestamp: the same inputs render the same bytes.</p>
 """
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(html)
+        # stderr, so stdout stays exactly the path a driver captures. Said in
+        # words rather than as a bare enum value because the reader is the
+        # agent that has to act on it, and "local" alone has been read as "the
+        # local copy is optional" before.
+        print("publish: %s — %s" % (cfg["publish"], PUBLISH_DIRECTIVE[cfg["publish"]]),
+              file=sys.stderr)
         return out_path
 
     # -- main pass ----------------------------------------------------------
@@ -1384,12 +2263,20 @@ render timestamp: the same inputs render the same bytes.</p>
         self.evaluate_closes(cap_of)
         self.evaluate_protocol_closes()
         self.evaluate_research_closes()
-        os.makedirs(self.report_dir, exist_ok=True)
-        for plan in self.plan_order:
-            cap = cap_of(plan)
-            for attempt in sorted(self.cycles[plan]):
-                self.render_page(plan, attempt, cap)
-        self.render_index(cap_of)
+        # The pages are a SURFACE; everything below them is the PROTOCOL. A run
+        # with `reports.cycle` switched off renders nothing here and still
+        # evaluates and emits every close, because a rendering preference that
+        # quietly stopped the dashboard settling would be the R-58 defect class
+        # with a config file in front of it. Nothing is created either — an off
+        # surface leaves no empty `report/cycles/` behind to be read as a run
+        # that rendered zero pages.
+        if self.reports()["cycle"]["enabled"]:
+            os.makedirs(self.report_dir, exist_ok=True)
+            for plan in self.plan_order:
+                cap = cap_of(plan)
+                for attempt in sorted(self.cycles[plan]):
+                    self.render_page(plan, attempt, cap)
+            self.render_index(cap_of)
         for plan in list(self.closed):
             if self._due(plan):
                 self.emit_close(plan)
@@ -1522,9 +2409,9 @@ def main(argv):
         return 2
     if not args:
         print("usage: ORCH_STATE_DIR=<task> cycle_reporter.py <wf_dir> [...] "
-              "[--once] [--settle] [--final [--narrative FILE]] [--no-status] "
-              "[--interval N]   (value flags also take --flag=VALUE)",
-              file=sys.stderr)
+              "[--once] [--settle] [--final [--narrative FILE] [--force]] "
+              "[--no-status] [--interval N]   (value flags also take "
+              "--flag=VALUE)", file=sys.stderr)
         return 2
     final = "--final" in flags or "--run-report" in flags
     rep = Reporter(task, [os.path.abspath(a) for a in args],
@@ -1570,7 +2457,12 @@ def main(argv):
         # is read off the STREAM, so evaluating closes here would compute a
         # verdict the page does not use and cannot write.
         rep.ingest()
-        print(rep.render_final(narrative))
+        out = rep.render_final(narrative, force="--force" in flags)
+        # Nothing on stdout when the surface is off, so a driver's
+        # `path=$(… --final)` yields the empty string and publishes nothing.
+        # Exit stays 0: a configured "no report" is an answer, not a failure.
+        if out:
+            print(out)
         return 0
 
     rep.pass_once()

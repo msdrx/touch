@@ -75,6 +75,26 @@ others.
   per-run value always wins. Create it once per project; while it is absent the
   spec supplies every value, and `touch-run start` names the constants file in
   its output only when it actually found one.
+- **What the run reports, and where, is configured per surface** — `reports`,
+  in the spec or in that same `.touch/run.json` (merged surface by surface and
+  key by key). This protocol renders ONE page, so it reads one surface:
+
+  | surface | page | default |
+  |---|---|---|
+  | `research` | `report/research-report.html`, this run's end-of-run page | on, `local\|public` |
+
+  Spelled `{"enabled": bool, "publish": <dest>}`, or as the bare-string
+  shorthand `"off"` / `"local"` / `"public"` / `"local|public"`; omit it and
+  the default applies. A destination NAMES where the page goes, `|`-joined, so
+  `local|public` is the task-folder copy AND the artifact. `"reports": {"research": "off"}` renders no page and
+  changes nothing else — card closes are the monitoring protocol, not a
+  report — and `"local"` keeps the task-folder copy without publishing it. The
+  copy under `report/` is written for every destination; `publish` chooses only
+  whether the Artifact step happens. `touch-run start` publishes the effective
+  map into `orch-config.json`, prints it, and refuses a malformed one before
+  anything is created; the other two surfaces (`cycle`, `final`) belong to
+  `implement` and are documented there — a spec may carry all three when a run
+  auto-chains.
 
 Then `touch-run start <task> --spec <file>` and launch the `Workflow({…})` line
 it prints. The protocol's invariants, which the template already enforces:
@@ -149,7 +169,24 @@ line armed.
 Present the plan's item summary and the plan-file path, then render and publish
 the report. The page is DETERMINISTIC — the numbers come from the journal, the
 stream and the run snapshot, and the only part you write is one narrative
-section (D-15):
+section (D-15).
+
+**It leads with three concise diagrams**, the same rule the implement reports
+follow — what was asked for, what was delivered, where they differ — with the
+research protocol's nouns:
+
+| diagram | asked | delivered | Δ |
+|---|---|---|---|
+| the run, end to end | — | board → findings → plan → unaccounted, four nodes | — |
+| perspective → reported | every perspective spawned | the ones that returned findings | spawned and never returned; returned empty; no findings file |
+| finding → in the plan | every `findings[].id` on the board | the synthesizer's `coverage[]` — `accepted` \| `merged` \| `dropped` + a ≤120-char note | a `dropped` justification, a `merged` target, and `? unaccounted` for a finding the synthesizer never placed |
+
+The board needs no partition to be the requirement: the researchers' own finding
+ids **are** it. `coverage` is REQUIRED by `SYNTH_SCHEMA` — a finding left out of
+it renders `? unaccounted`, which is the one real gap of the three, because a
+stated `dropped` is a decision the plan is entitled to make and silence is a
+hole in it. The attempt-by-attempt long form sits behind a fold below the
+diagrams; nothing is deleted, it is demoted.
 
 ```bash
 # 1. load the `artifact-design` skill (the Artifact tool's own precondition for
@@ -160,9 +197,16 @@ section (D-15):
 # 2. render:
 ORCH_STATE_DIR="<task-dir>" touch-cycle-reporter "<wf_dir>" --final \
   --narrative "<task-dir>/report/narrative.html"
-# it prints the path it wrote: <task-dir>/report/research-report.html
-# 3. publish THAT file with the Artifact tool
+# stdout: the path it wrote — <task-dir>/report/research-report.html
+# stderr: `publish: <destination>` — this run's configured `local`, `public` or
+#         `local|public`, spelled out in words
+# 3. publish THAT file with the Artifact tool — UNLESS the line said `local`
+#    alone, which means the task-folder copy is the whole deliverable
 ```
+
+With `reports.research` off, step 2 prints nothing on stdout, writes no page
+and exits 0: skip the narrative and the publish with it, and hand over the plan
+itself. (`--force` renders it anyway, for a human overriding their own switch.)
 
 The renderer picks `research-report.html` for a research run (so an
 auto-chained `implement` run's `final-report.html` cannot overwrite it),

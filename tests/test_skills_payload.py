@@ -856,6 +856,19 @@ def test_templates_are_spec_driven():
     if research:
         for key in ("ARGS.subject", "ARGS.perspectives", "ARGS.min_reports"):
             check(key in research, f"research.workflow.js: reads {key}")
+        # The research half of the same report rule: the board is the
+        # requirement (the researchers' own finding ids) and the plan is the
+        # delivery, so the synthesizer has to account for every finding or the
+        # board→plan diagram cannot be drawn from recorded data.
+        synth = re.search(r"const SYNTH_SCHEMA = \{.*?\n\}", research, re.S)
+        check(synth is not None and "'coverage'" in synth.group(0)
+              and re.search(r"required: \[[^\]]*'coverage'", synth.group(0)),
+              "research.workflow.js: SYNTH_SCHEMA REQUIRES `coverage` — every "
+              "finding is accounted for, or the diagram says who was silent")
+        check("accepted', 'merged', 'dropped'" in research
+              or "accepted|merged|dropped" in research,
+              "research.workflow.js: the synth prompt spells out the enum the "
+              "renderer switches on")
     impl = template_src(TEMPLATES[1])
     if impl:
         for key in ("ARGS.plan_file", "ARGS.parallel", "ARGS.extra_attempts",
@@ -872,6 +885,27 @@ def test_templates_are_spec_driven():
             check(f"ARGS.{key} || " not in impl,
                   f"implement.workflow.js: a `{key}: 0` is honoured, not "
                   f"defaulted away")
+        # The requirement → implemented → Δ diagram is rendered from recorded
+        # results and nothing else, so the fields it reads have to be REQUIRED
+        # by the schemas — an optional one is a diagram that silently empties
+        # whenever an agent is terse. `items` is the implementation side;
+        # `deviations` is the difference side, one per read-only verdict.
+        check("'items'" in impl and "'deviations'" in impl,
+              "implement.workflow.js: the coverage fields exist")
+        required = re.findall(r"required: \[([^\]]*)\]", impl, re.S)
+        impl_req = [r for r in required if "'files_changed'" in r]
+        check(impl_req and all("'items'" in r for r in impl_req),
+              "implement.workflow.js: IMPL_SCHEMA REQUIRES `items` — the "
+              "implementation side of the diagram is not optional")
+        dev_req = [r for r in required
+                   if "'passed'" in r or "'approved'" in r]
+        check(len(dev_req) == 2 and all("'deviations'" in r for r in dev_req),
+              "implement.workflow.js: both read-only verdicts REQUIRE "
+              "`deviations` — the Δ side is not optional either")
+        for probe in ("done|partial|skipped", "missing|differs|extra"):
+            check(probe in impl,
+                  f"implement.workflow.js: the prompts spell out {probe}, so "
+                  f"an agent fills the enum the renderer switches on")
 
 
 #: An ALL-CAPS `/ABS/PATH/...` literal is legitimate only as the right-hand

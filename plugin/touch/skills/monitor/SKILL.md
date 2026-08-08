@@ -46,7 +46,13 @@ any run recipe there that disagrees with this one.
   API message id, restart-safe), and DERIVES the run close (below)
 - `touch-cycle-reporter` — renders `report/cycles/*.html` and the run's final
   report from the same journal, and emits the loop-terminal `plan done|failed`
-  events; `touch-run bind` starts it
+  events; `touch-run bind` starts it. WHICH pages it renders is per-surface
+  config (`reports` in the run spec → `orch-config.json`, re-read live:
+  `cycle`, `research`, `final`, each `{enabled, publish}`, defaulting to cycle
+  pages on and local, the end-of-run pages on and published). Switching a
+  surface off stops PAGES only — the events above are the protocol and still
+  fire, so no card stalls because reporting was turned off. `touch-run status`
+  prints the effective map
 - the dashboard page itself — event-driven: one card per plan, per-stage chips,
   newest-first logs, pulsing token counters; never regenerated for updates
 

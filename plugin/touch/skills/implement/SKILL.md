@@ -74,6 +74,31 @@ author is that JSON:
   yet, so when you grant one, write that map into `orch-config.json` yourself
   as well (a recorded `touch-run` follow-up, and not a licence to hand-edit
   anything else there).
+- **What the run reports, and where, is configured per surface** — `reports`,
+  in the spec or once per project in `.touch/run.json` (merged under the spec
+  surface by surface AND key by key, so naming one surface never silently
+  resets the others). Each surface takes `{"enabled": bool, "publish": <dest>}`,
+  or the same `<dest>` as a bare string standing for the whole surface, or
+  `"off"`. A destination NAMES where the page goes, `|`-joined — `local`,
+  `public`, `local|public` — so the value says which ones it means:
+
+  | surface | pages | default |
+  |---|---|---|
+  | `cycle` | `report/cycles/<sp-id>-cycle-<N>.html` + their index | on, `local` |
+  | `final` | `report/final-report.html`, this protocol's end-of-run page | on, `local\|public` |
+  | `research` | `report/research-report.html` — the `research` skill's page, never rendered by this run; here because one spec may configure both halves of a chain | on, `local\|public` |
+
+  Omit the key and those defaults apply. `touch-run start` publishes the
+  effective map into `orch-config.json` (the reporter re-reads it live, so a
+  mid-run edit needs no restart) and prints it; `touch-run status` reads it
+  back. Two things the switch does NOT do: **`enabled: false` stops PAGES and
+  nothing else** — every loop close, protocol close and roster event still
+  fires, so no card is left "running" because reporting was turned off — and
+  **it never suppresses the task-folder copy**, which is written for every
+  destination. `publish` chooses whether the Artifact step happens (a value
+  that does not name `public`: it does not), never whether the durable copy
+  exists. A malformed `reports`
+  is refused by the preflight, before anything is created.
 - **`PLUGIN_ROOT` is left as shipped** — never baked into a copy, not a
   fill-in.
 - Serial vs parallel, per the strategy above (`"parallel": true` only for
@@ -175,6 +200,28 @@ automatically. Each page renders the cycle as a simple UML-style flow
 word) and MUST answer WHY — on failure *and* on success: the gate/critique
 verdict summaries plus the full findings files embedded as the evidence.
 
+**Every page leads with the requirement → implemented → Δ diagram** — a
+coverage bar, counting chips, and one row per plan item: what was required,
+what was built, and where the two differ. It is what a reader opens the page
+for, so it comes before the prose and the prose stays short; the embedded
+findings are still there, below, as the evidence for what the diagram claims.
+Three recorded inputs feed it, and NOTHING is inferred:
+
+| column | source | schema field |
+|---|---|---|
+| requirement | the divider's partition | `subplans[].finding_ids` |
+| implemented | the implementer's return | `items[]` — `id`, `status` done\|partial\|skipped, `note` ≤120 chars |
+| Δ vs requirement | both read-only verdicts | `deviations[]` — `id`, `kind` missing\|differs\|extra, `what` ≤120 chars |
+
+All three are REQUIRED by their schemas, because a diagram that empties when an
+agent is terse is worse than no diagram. The rules the renderer will not bend:
+an item the implementer never mentioned renders `? unreported`, never as
+covered; an id outside the sub-plan's `finding_ids` renders `+ extra`
+(implementation beyond the requirement) rather than being dropped; a critique
+that APPROVES still reports a real `differs`; and a journal carrying none of
+these fields renders a stated absence, never a green zero. The overview and the
+final report fold the same numbers, so the three surfaces cannot disagree.
+
 The reports are rendered DETERMINISTICALLY (never by an LLM scribe) by
 `touch-cycle-reporter`, which `touch-run bind` starts for you as the third
 daemon, with its pid and log beside the watcher's. It tails the run's
@@ -202,6 +249,14 @@ ORCH_STATE_DIR="<task-dir>" touch-cycle-reporter "<wf_dir>" --settle
 
 `touch-run close` runs `--settle` itself as its first step, so the usual answer
 to "a card is stuck on running" is to close the run, not to type a verdict.
+
+`"reports": {"cycle": "off"}` switches these pages off and changes nothing
+else — the daemon still tails the journal, still emits every loop close, still
+settles the run; there is simply no HTML and no `report/cycles/` directory. When
+the destination names `public`, publish a cycle page when you SURFACE that
+cycle to the user (a red loop, the `awaiting-user` stop) rather than publishing all of them:
+each page is its own artifact, and the index links its siblings by relative
+path, which resolves on disk and not in the artifact store.
 
 Loop-failure policy (enforced by the template; acted on by you, the driver):
 
@@ -253,10 +308,14 @@ type `--state failed` for a run whose agents simply returned without a decisive
 verdict — that settles `done` with the honest "closed — no verdict" wording
 (R-58).
 
-The final report is DETERMINISTIC — run header, timeline, per-plan cards with
-verdicts/attempts/tokens/durations, links to the plan and every findings file,
-all read from the journal, the stream and the run snapshot. The only part you
-write is one narrative section (D-15):
+The final report is DETERMINISTIC and diagram-first: run header, the run-shape
+flow (divide → gated loops → final gate → run, in the same node vocabulary as
+the cycle pages, with every badge read from the STREAM), then the per-sub-plan
+requirement → implemented → Δ table (the same fold the cycle pages draw, at run
+scale), then timeline, then — behind a fold — the per-plan cards with
+verdicts/attempts/tokens/durations, and links to the plan and every findings
+file. All read from the journal, the stream and the run snapshot. The only part
+you write is one narrative section (D-15):
 
 ```bash
 # 1. load the `artifact-design` skill (the Artifact tool's own precondition for
@@ -267,9 +326,17 @@ write is one narrative section (D-15):
 # 2. render:
 ORCH_STATE_DIR="<task-dir>" touch-cycle-reporter "<wf_dir>" --final \
   --narrative "<task-dir>/report/narrative.html"
-# it prints the path it wrote: <task-dir>/report/final-report.html
-# 3. publish THAT file with the Artifact tool
+# stdout: the path it wrote — <task-dir>/report/final-report.html
+# stderr: `publish: <destination>` — this run's configured `local`, `public` or
+#         `local|public`, spelled out in words
+# 3. publish THAT file with the Artifact tool — UNLESS the line said `local`
+#    alone, which means the task-folder copy is the whole deliverable
 ```
+
+With `reports.final` off, step 2 prints nothing on stdout, writes no page and
+exits 0: skip the narrative and the publish with it, and report the run from
+the run itself. (`--force` renders it anyway, for a human overriding their own
+switch.)
 
 It lands in `report/` by construction and re-renders byte-identically, so the
 storage rule is satisfied structurally rather than by remembering to copy a

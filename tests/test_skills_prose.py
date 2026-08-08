@@ -399,6 +399,57 @@ def test_the_report_step_is_render_narrate_publish():
               "authored fragment is written and published")
 
 
+def test_the_report_surfaces_are_documented_with_their_defaults():
+    """Both skills state what a run reports, where it goes, and the default.
+
+    A switch nobody can find is a switch nobody uses, and a DEFAULT nobody
+    states is one the next reader re-derives by running something. The three
+    values below are the shipped answer (pinned as values in
+    `tests/test_cycle_reporter.py`, published by `touch-run start` and
+    cross-checked in `tests/test_touch_run.py`), so the prose that quotes them
+    is held to the same standard as every other number in this file.
+
+    The second arm is the one that matters operationally: switching a surface
+    off must be described as stopping PAGES only. A reader who believes it also
+    stops the run's events will "fix" a dashboard by re-enabling reports, or
+    worse, will not switch anything off at all.
+    """
+    print("test_the_report_surfaces_are_documented_with_their_defaults")
+    for name, surface, default in (("research/SKILL.md", "research", "local|public"),
+                                   ("implement/SKILL.md", "final", "local|public"),
+                                   ("implement/SKILL.md", "cycle", "local")):
+        text = texts().get(name, "")
+        check('"reports"' in text or "`reports`" in text,
+              f"{name} names the `reports` key a spec carries")
+        # A destination carries a `|`, which a table cell must escape or the
+        # row grows a column. Both spellings mean the same value, so the
+        # comparison is made on the unescaped text and the markdown is left to
+        # be markdown.
+        row = [ln.replace("\\|", "|") for ln in text.splitlines()
+               if ln.strip().startswith(f"| `{surface}`")]
+        check(len(row) == 1 and f"on, `{default}`" in row[0],
+              f"{name} states the `{surface}` surface's default (on, {default}) "
+              f"in its own row ({row})")
+        # The vocabulary is the DESTINATIONS, and a value names the ones it
+        # means — so the prose has to carry the joined spelling, not a word
+        # like `both` that a reader cannot decompose.
+        check("`local|public`" in text.replace("\\|", "|"),
+              f"{name} spells a destination as the set it names")
+        check("`both`" not in text,
+              f"{name} does not still quote a `both` destination")
+    for name in ("research/SKILL.md", "implement/SKILL.md"):
+        text = texts().get(name, "")
+        check("changes nothing else" in text or "nothing else" in text,
+              f"{name} says an off surface stops pages and nothing else")
+        check(".touch/run.json" in text,
+              f"{name} points at the per-project home for the same key")
+        # The storage rule is not a knob: `local` chooses whether the Artifact
+        # step happens, never whether the durable copy exists.
+        check("task-folder copy" in text,
+              f"{name} states the task-folder copy is written for every "
+              f"destination")
+
+
 # ------------------------------------------------------------ D-12 / GD-D11
 def test_the_run_specs_seed_the_cards_touch_run_can_know_up_front():
     """A documented spec must be able to make the claim beside it true.
@@ -562,6 +613,7 @@ def main():
               test_the_driver_recipes_collapsed_onto_touch_run,
               test_settle_replaces_hand_typed_corrections,
               test_the_report_step_is_render_narrate_publish,
+              test_the_report_surfaces_are_documented_with_their_defaults,
               test_the_run_specs_seed_the_cards_touch_run_can_know_up_front,
               test_the_method_paragraph_lives_in_the_skill,
               test_the_spawn_ledger_mandate_is_gone,

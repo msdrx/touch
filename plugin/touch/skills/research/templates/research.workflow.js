@@ -203,12 +203,31 @@ recommendation. Report only real, actionable items. This file is task state —
 writing it is required.
 `
 
+// The research protocol's half of the report rule the implement template
+// carries: a report shows what was ASKED FOR, what was DELIVERED, and where the
+// two differ. Here the requirement is the BOARD — every finding the researchers
+// returned, ids and all — and the delivery is the plan. `plan_file` and
+// `item_count` say how big the plan is; neither says WHICH findings reached it,
+// which is the question a reader of a merged-and-deduped plan actually has, and
+// the one a discard justification buried in prose cannot answer at a glance.
+//   accepted -> became a plan item (note: which one)
+//   merged   -> folded into another finding's item (note: which id)
+//   dropped  -> deliberately not carried (note: the justification)
+// A finding with no entry renders UNACCOUNTED, which is the only real gap of
+// the three: a stated drop is a decision, silence is a hole in the plan.
+const SYNTH_COVERAGE = {
+  type: 'object', required: ['id', 'status', 'note'],
+  properties: { id: { type: 'string' },
+                status: { type: 'string', enum: ['accepted', 'merged', 'dropped'] },
+                note: { type: 'string' } },
+}
 const SYNTH_SCHEMA = {
-  type: 'object', required: ['plan_file', 'item_count', 'summary'],
+  type: 'object', required: ['plan_file', 'item_count', 'summary', 'coverage'],
   properties: {
     plan_file: { type: 'string' },
     item_count: { type: 'integer' },
     summary: { type: 'string' },
+    coverage: { type: 'array', items: SYNTH_COVERAGE },
   },
 }
 
@@ -241,6 +260,12 @@ Tasks:
 4. Write the full plan to ${PLAN_FILE} (mkdir -p its dir first): the global
    decisions section, then the ordered item list. Findings stay in the research
    files — reference them by id + path.
+5. Return \`coverage\`: ONE entry per finding id on the board — \`id\` exactly as
+   the report wrote it, \`status\` accepted|merged|dropped, \`note\` in ≤120
+   chars (accepted: the plan item it became; merged: the id it folded into;
+   dropped: the justification from task 1). This is the report's board→plan
+   row, not the report: the reasoning stays in the plan. A finding you leave out
+   renders UNACCOUNTED, which reads worse than an honest \`dropped\`.
 `
 
 // REFUSE an incomplete spec before spending anything (D-12). This is defense in
